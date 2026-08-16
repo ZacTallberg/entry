@@ -1,10 +1,10 @@
 /*
- * scrollspy.js — PINNACLE HUB shared frontend kit
+ * scrollspy.js — hub shared frontend kit
  * ---------------------------------------------------------------------------
- * Vanilla, dependency-free scroll-spy + deep-link handler for every hub
- * (AETHER / Fairy / blobs / PDX Open Mic). NO build step, NO framework, NO web
- * fonts, NO external deps. Plain ES2020+. See C:\code\PINNACLE-HUB-DOCTRINE.md
- * sections 8 (Human View), 10 (a11y/perf/mobile/print), 11 (Shared Assets).
+ * Vanilla, dependency-free scroll-spy + deep-link handler for every project
+ * hub. NO build step, NO framework, NO web fonts, NO external deps. Plain
+ * ES2020+. See the hub doctrine sections 8 (Human View), 10 (a11y/perf/
+ * mobile/print), 11 (Shared Assets).
  *
  * RESPONSIBILITIES
  *   1. Scroll-spy: an IntersectionObserver (NOT a scroll listener — async,

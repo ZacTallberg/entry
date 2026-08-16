@@ -1,4 +1,4 @@
-"""manage.py hubaudit — this Plot's computed hub gate (exit 0 PASS / 2 violation / 1 internal). ASCII."""
+"""manage.py hubaudit — the project's computed hub gate (exit 0 PASS / 2 violation / 1 internal). ASCII."""
 import sys
 
 from django.core.management.base import BaseCommand

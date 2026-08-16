@@ -1,5 +1,5 @@
 /*
- * palette.js — Pinnacle Hub shared frontend kit
+ * palette.js — hub shared frontend kit
  * ----------------------------------------------
  * A vanilla, zero-dependency Cmd/Ctrl-K COMMAND PALETTE + an always-visible inline
  * fuzzy FILTER, both indexing the canonical `<script id="hub-data">` JSON island.
@@ -64,7 +64,7 @@
     return _data;
   }
 
-  // localid = the last colon-segment of an opaque id ("fairy:task:0147" -> "0147");
+  // localid = the last colon-segment of an opaque id ("demo:task:0147" -> "0147");
   // bare ids pass through unchanged.
   function localId(id) {
     id = String(id == null ? "" : id);

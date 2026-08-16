@@ -1,5 +1,5 @@
-"""manage.py hubmaterialize — Phase 2: materialize the REVIEW-AND-REIMPL-PLAN gap ledger into the
-PDX Open Mic hub as `gap` entities (doc-as-source, idempotent, schema-validated). Thin wrapper over
+"""manage.py hubmaterialize — materialize a REVIEW-AND-REIMPL-PLAN gap ledger into the hub as
+`gap` entities (doc-as-source, idempotent, schema-validated). Thin wrapper over
 hub_core.materialize. ASCII."""
 from django.core.management.base import BaseCommand
 
@@ -8,7 +8,7 @@ from hub_core.materialize import materialize_gaps, materialize_proposed_adrs
 
 
 class Command(BaseCommand):
-    help = "Materialize REVIEW-AND-REIMPL-PLAN.md gap ledger -> gap entities (Phase 2, idempotent)."
+    help = "Materialize REVIEW-AND-REIMPL-PLAN.md gap ledger -> gap entities (idempotent)."
 
     def add_arguments(self, p):
         p.add_argument("--dry-run", action="store_true")
@@ -25,5 +25,5 @@ class Command(BaseCommand):
         a = materialize_proposed_adrs(s, reg, ents, hub_app.PROJECT_KEY, head, text, dry_run=dry_run)
         for rej in g["rejects"] + a["rejects"]:
             self.stderr.write("  [REJECT] " + rej)
-        self.stdout.write("entry hubmaterialize %s: gaps=%d proposed_adrs=%d skipped=%d rejected=%d" % (
+        self.stdout.write("hubmaterialize %s: gaps=%d proposed_adrs=%d skipped=%d rejected=%d" % (
             "(dry-run)" if dry_run else "DONE", g["gap"], a["adr"], g["skip"] + a["skip"], g["reject"] + a["reject"]))

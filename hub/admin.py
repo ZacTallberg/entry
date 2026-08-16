@@ -1,7 +1,10 @@
-"""PDX Open Mic has no relational models to administer (the status board was removed 2026-06-29).
-All operational state lives in the agent hub (`/hub`, event-sourced in PROJECT/.hub/)."""
+"""The hub app has no relational models to administer: all operational state is event-sourced in
+PROJECT/.hub/ and surfaced at /hub. This module only brands the admin when contrib.admin is
+installed in the host project."""
 from django.contrib import admin
 
-admin.site.site_header = "PDX Open Mic"
-admin.site.site_title = "PDX Open Mic admin"
+from . import hub_app
+
+admin.site.site_header = hub_app.BRAND
+admin.site.site_title = f"{hub_app.BRAND} admin"
 admin.site.index_title = "Command center"

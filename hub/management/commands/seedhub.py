@@ -1,10 +1,10 @@
 """manage.py seedhub — genesis import of the reconciled board (tasks + ADRs) into the hub event log.
 
 This is the ONE sanctioned hand-authored entry point: the project's birth state, taken from the
-MoE-reconciled plan. After this, the board only changes through the discover->claim->implement->
+reconciled plan. After this, the board only changes through the discover->claim->implement->
 record->verify loop (typed events), never by hand. Idempotent: an id that already exists is skipped,
 so re-running is safe. Direct-store append (the genesis path) — the HTTP done-guard is bypassed only
-for already-RESOLVED decision tasks, which must carry their own evidence (verified_by).
+for already-RESOLVED decision tasks, which must carry their own `verified_by` and `evidence_uri`.
 """
 import json
 

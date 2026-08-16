@@ -1,0 +1,9 @@
+{
+  "project_key": "entry",
+  "brand": "The Entry",
+  "live_url": "https://entry.zacoberg.com",
+  "hub_url": "https://entry.zacoberg.com/hub/",
+  "kind": "public-artwork",
+  "parent_project": null,
+  "hub_scaffold_commit": "64f7b00"
+}

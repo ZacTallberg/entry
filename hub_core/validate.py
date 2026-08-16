@@ -5,7 +5,7 @@ additionalProperties (bool), required, items (single schema), minItems, minLengt
 maximum, pattern, format ('date-time', lenient), $ref (by $id + JSON-pointer), allOf, anyOf, if/then/else.
 
 Prefers the real `jsonschema` lib (Draft 2020-12) when installed; otherwise uses this fallback so a
-single-file WSGI app (Fairy) needs no dependency. Returns a list of "path: message" error strings;
+single-file WSGI app needs no dependency. Returns a list of "path: message" error strings;
 empty list = valid.
 """
 import re
@@ -120,7 +120,7 @@ def _check(schema, value, path, root_doc, registry, errors):
         if "pattern" in schema:
             pat = schema["pattern"]
             # JSON-Schema/ECMA-262: $ is end-of-INPUT (no trailing-\n exception that Python's re.search
-            # allows). For anchored ^...$ patterns use fullmatch so e.g. "aether:task:0001\n" is rejected.
+            # allows). For anchored ^...$ patterns use fullmatch so e.g. "proj:task:0001\n" is rejected.
             ok = (re.fullmatch(pat, value) is not None) if pat.startswith("^") else (re.search(pat, value) is not None)
             if not ok:
                 errors.append(f"{path}: does not match pattern {pat}")

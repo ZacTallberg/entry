@@ -54,6 +54,7 @@ MIDDLEWARE = [
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "hub.middleware.NoStoreHTMLMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
@@ -101,3 +102,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Token for hub writes (X-Write-Token). Public reads, token-gated writes (keeps a public Plot safe).
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
+
+# The Entry carries the canonical Hub cockpit as a first-class operational surface. The build
+# stamp is the same artifact exposed by the public front door, keeping delivery truth coherent.
+HUB_PROJECT_KEY = "entry"
+HUB_BRAND = "The Entry"
+HUB_BUILD_STAMP = "app/build_sha.txt"
+HUB_DONE_STRICTNESS = "strict"
+HUB_WORKER_LAUNCH_ENABLED = False

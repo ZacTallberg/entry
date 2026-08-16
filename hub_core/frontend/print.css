@@ -1,12 +1,12 @@
 /* =============================================================================
- * print.css — Pinnacle Hub shared frontend kit
+ * print.css — hub shared frontend kit
  * -----------------------------------------------------------------------------
  * Turns the interactive /hub into a clean, point-in-time, ink-frugal PRINTABLE
  * AUDIT REPORT. Loaded LAST (after tokens.css + component CSS) so its @media
  * print block wins the cascade; everything here is scoped to `@media print`
  * EXCEPT the @page rules, so screen rendering is untouched.
  *
- * What it does (per PINNACLE-HUB-DOCTRINE §10 Print):
+ * What it does (per the hub doctrine §10 Print):
  *   - forces a light, ink-frugal theme (overrides light-dark() / data-theme)
  *   - kills blur, shadow, gradient, glow, backdrop-filter, animation
  *   - hides nav / command palette / SSE chrome / all interactive controls

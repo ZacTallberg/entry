@@ -1,10 +1,10 @@
 # Greenhouse Plot manifest — the homebase REGISTRY reads these to list every created project.
 name = "entry"
-display = "entry"
+display = "The Entry"
 slug = "entry"
 url = "https://entry.zacoberg.com"
-ring = "seed"                 # seed | sprouting | blooming
+ring = "sprouting"            # seed | sprouting | blooming
 public = true
 auth_posture = "public-read, token-gated hub writes (X-Write-Token)"
 network_info = "none — public-safe by construction"
-summary = "A Greenhouse Plot. (edit me)"
+summary = "Say something into the dark and watch it become motion, then disappear without being kept."

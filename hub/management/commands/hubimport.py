@@ -1,6 +1,6 @@
 """manage.py hubimport — ingest CAPABILITY-LEDGER.md into the hub event log as LIVE cap entities
-(the PDX Open Mic capability-fabric pivot: the markdown ledger becomes a queryable, machine-readable
-registry). Idempotent; validates before append."""
+(the capability-fabric pattern: a markdown ledger becomes a queryable, machine-readable registry).
+Idempotent; validates before append."""
 import hashlib
 import re
 
@@ -17,7 +17,7 @@ def _slug(name):
 
 
 class Command(BaseCommand):
-    help = "Ingest CAPABILITY-LEDGER.md -> cap entities (idempotent). The capability-fabric pivot."
+    help = "Ingest CAPABILITY-LEDGER.md -> cap entities (idempotent). The capability-fabric pattern."
 
     def add_arguments(self, p):
         p.add_argument("--dry-run", action="store_true")
@@ -69,5 +69,5 @@ class Command(BaseCommand):
             ents[nid] = payload
             seen.add(legacy)
             made["cap"] += 1
-        self.stdout.write("entry hubimport %s: caps=%d skipped=%d rejected=%d" % (
+        self.stdout.write("hubimport %s: caps=%d skipped=%d rejected=%d" % (
             "(dry-run)" if dry_run else "DONE", made["cap"], made["skip"], made["reject"]))

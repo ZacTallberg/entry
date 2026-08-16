@@ -70,3 +70,9 @@ distillation of every hard lesson to date. Violating one is a defect even when t
 ## §6 Project laws (append below; each cites its ADR)
 <!-- Crystallized, project-specific laws land here as they are born. Format:
 N. **<law>** (ADR-NNNN, YYYY-MM-DD): <one-paragraph statement>. -->
+1. **The Entry is its own boundary** (ADR-0001, 2026-08-16): its root, release, Hub and canonical
+   identity belong to `entry.zacoberg.com`; zacoberg.com is a doorway and redirect only.
+2. **Words are not data** (ADR-0003, 2026-08-16): visitor text never leaves the browser and cannot
+   appear in logs, analytics, telemetry, tasks or evidence.
+3. **Upstream before instance** (ADR-0002, 2026-08-16): a reusable Hub improvement lands in
+   `hub-scaffold` first and returns here as a whole-unit adoption; local divergence is a defect.

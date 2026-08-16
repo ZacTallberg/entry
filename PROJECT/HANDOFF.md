@@ -1,37 +1,52 @@
-# HANDOFF — living continuity file
+# HANDOFF — The Entry
 
-> canonical · owner: the principal agent (solo) or LEADER (campaign) · update: at every significant state change and ALWAYS before ending a session
+> canonical living snapshot · update at every significant state change
 
-This is the single resume entry point. A cold agent reads this first (`README.md` §0) and must be
-able to continue seamlessly from it alone plus the tails of any active channels. Keep it current —
-a stale handoff is a defect. Rewrite in place (it is a snapshot, not a ledger); history lives in
-the hub and the channels.
+## 0. Arrangement
 
-## 0. The arrangement
-Operating mode (SOLO / campaign per `pm/PROTOCOL.md` §0 with seat roster), who deploys what, and
-where the channels are. If a campaign is active: "read `pm/PROTOCOL.md`, then your seat's CHARTER,
-DIRECTIVES tail, and STATE."
+SOLO principal-agent build with parallel read-only audits. Work is governed by the event-sourced Hub.
+Canonical upstream for reusable Hub units: `C:/code/hub-scaffold` at recorded commit `64f7b00` or its
+newer successor after any upstream correction.
 
 ## 1. Standing doctrine deltas
-Nothing here duplicates `DOCTRINE.md` — list only recent laws not yet internalized by all seats,
-with their ADR numbers.
 
-## 2. What's live right now (all verified, with evidence)
-- Deployed code SHA + how it was verified.
-- Deployed data state + gate status (`runs/status.json`).
-- Domains/surfaces and their states.
+- ADR-0001: The Entry owns `entry.zacoberg.com`, its repository, release and Hub.
+- ADR-0002: Hub improvements are upstream-first; no Entry-only scaffold fork.
+- ADR-0003: visitor words never leave the browser.
 
-## 3. In-flight
-What is being worked RIGHT NOW, by whom, and what to verify when each lands.
+## 2. Live state
 
-## 4. Backlog (priority order)
-The next actionable items with enough context to start each. Deep specs stay in their own docs — link.
+- Standalone production: not deployed yet.
+- Legacy experience: `https://zacoberg.com/entry/` remains live until cutover.
+- Local Hub genesis: seeded with three ADRs and the complete extraction/release task graph.
 
-## 5. Environment quirks & access
-Pointers only (atlas + creds by key name), plus the quirks that burn cold agents.
+## 3. In flight
+
+- `entry:task:0001` — standalone project and canonical Hub adoption, owned by `codex-root`.
+- Canonical Hub blockers discovered during adoption are tracked separately as `entry:task:0008`.
+
+## 4. Backlog
+
+Follow `/hub/next.json`: elevate product, prove locally, cut portfolio links, provision and deploy,
+register everywhere, then perform an independent live release review.
+
+## 5. Environment and access
+
+- Deployment/access source: `C:/code/_deploy/ACCESS-DEPLOY-ATLAS.md`.
+- Secrets remain in `C:/code/creds.local.txt` by key name; none belong in this repository.
+- Hub runtime is persistent and untracked at `PROJECT/.hub/` locally and `$HUB_DIR` live.
 
 ## 6. Hard-won gotchas
-The "do not relearn these" list. Promote recurring ones into `DOCTRINE.md` §6 or the global gotcha docs.
 
-## 7. Session narrative (compressed)
-A few sentences of how the project got here — enough to reconstruct intent, not a diary.
+- The old page's timer used pre-mutation `keydown` state, breaking first-character, paste, IME and
+  mobile behavior. Drive release timing from the `input` event.
+- Never transplant zacoberg.com's archive analytics merely to retain a page-view counter.
+- Sync Gunicorn workers are incompatible with a long-held SSE stream; production must be threaded.
+- First provisioning must not mint the Hub token inside a disposable deploy worktree.
+
+## 7. Narrative
+
+The Entry began in March 2026 as one 625-line template inside zacoberg.com. In August it gained a
+portfolio doorway, revealing that its product identity and operational lifecycle deserved separation.
+This project was spun up cleanly, immediately rebased onto canonical hub-scaffold, and is being elevated
+without importing the parent site's unrelated data or tracking systems.

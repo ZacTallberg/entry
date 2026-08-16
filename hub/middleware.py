@@ -1,6 +1,6 @@
 class NoStoreHTMLMiddleware:
     """Dynamic dashboard pages must never be served stale from the browser cache after a
-    deploy (the spin-up rules: no-store on interactive pages). Static assets are untouched."""
+    deploy (no-store on interactive pages). Static assets are untouched."""
 
     def __init__(self, get_response):
         self.get_response = get_response
