@@ -1,0 +1,1 @@
+{ "name": "entry", "scripts": { "dokku": { "predeploy": "python manage.py migrate --noinput" } } }

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="build" content="build-{{ build_sha }}">
+<title>{% block title %}entry{% endblock %}</title>
+<style>
+  :root{
+    color-scheme: dark;
+    --bg:#0e1014; --surface:#161a21; --line:#283041; --fg:#eaf0f8; --mut:#9aa7bd;
+    --brand: oklch(0.72 0.15 250); --brand2: oklch(0.78 0.13 190);
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--bg);color:var(--fg);font:16px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:10px;padding:16px 22px;border-bottom:1px solid var(--line);position:sticky;top:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px)}
+  .dot{width:12px;height:12px;border-radius:99px;background:radial-gradient(circle at 35% 30%,#fff,var(--brand) 60%,var(--brand2));box-shadow:0 0 16px -2px var(--brand)}
+  .brand{font-weight:800;letter-spacing:-.02em}
+  nav{margin-left:auto;display:flex;gap:16px} nav a{color:var(--mut);text-decoration:none} nav a:hover{color:var(--fg)}
+  main{max-width:920px;margin:0 auto;padding:40px 22px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:26px}
+  h1{font-size:clamp(1.6rem,4vw,2.4rem);letter-spacing:-.02em;margin:.2em 0}
+  .sub{color:var(--mut)}
+  code{background:#0b0d11;border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span><span class="brand">entry</span>
+  <nav><a href="/">Home</a><a href="/hub/">Hub</a></nav>
+</header>
+<main>{% block body %}{% endblock %}</main>
+</body>
+</html>
