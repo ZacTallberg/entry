@@ -1,12 +1,99 @@
-{% extends "app/base.html" %}
-{% block title %}entry{% endblock %}
-{% block body %}
-<div class="card">
-  <h1>entry</h1>
-  <p class="sub">This is the front door of <strong>entry</strong> — a fresh Greenhouse Plot. The
-  root URL serves the app itself (never a cloned landing). Build your app in <code>app/</code>;
-  project tracking lives at <a href="/hub/">/hub</a>.</p>
-  <p class="sub" style="margin-top:18px">Start: edit <code>app/views.py</code> + <code>app/templates/app/home.html</code>,
-  add models in <code>app/models.py</code>, then <code>bash deploy.sh</code>.</p>
-</div>
-{% endblock %}
+{% load static %}
+<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="build" content="build-{{ build_sha }}">
+  <meta name="theme-color" content="#030308">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Say something into the dark. Watch it become motion. Nothing is sent. Nothing is saved.">
+  <meta name="author" content="Zac Oberg">
+  <meta name="application-name" content="The Entry">
+  <meta name="robots" content="index,follow,max-image-preview:large">
+  <link rel="canonical" href="https://entry.zacoberg.com/">
+  <link rel="icon" type="image/png" sizes="64x64" href="{% static 'app/icon-64.png' %}">
+  <link rel="apple-touch-icon" sizes="180x180" href="{% static 'app/icon-180.png' %}">
+  <link rel="preload" href="{% static 'app/fonts/roboto-flex.ttf' %}" as="font" type="font/ttf" crossorigin>
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="The Entry">
+  <meta property="og:title" content="The Entry">
+  <meta property="og:description" content="Say something into the dark. Nothing is sent. Nothing is saved.">
+  <meta property="og:url" content="https://entry.zacoberg.com/">
+  <meta property="og:image" content="https://entry.zacoberg.com{% static 'app/og.png' %}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The Entry surrounded by a luminous field of particles">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="The Entry">
+  <meta name="twitter:description" content="Say something into the dark. Nothing is sent. Nothing is saved.">
+  <meta name="twitter:image" content="https://entry.zacoberg.com{% static 'app/og.png' %}">
+  <title>The Entry — Say something into the dark</title>
+  <link rel="stylesheet" href="{% static 'app/entry.css' %}">
+  <script nonce="{{ csp_nonce }}">document.documentElement.classList.replace('no-js','js')</script>
+  <script type="importmap" nonce="{{ csp_nonce }}">
+    {
+      "imports": {
+        "three": "{% static 'app/vendor/three/three.module.js' %}",
+        "three/addons/": "{% static 'app/vendor/three/addons/' %}"
+      }
+    }
+  </script>
+</head>
+<body data-state="empty" data-graphics="fallback">
+  <div class="atmosphere" aria-hidden="true">
+    <canvas id="particle-field"></canvas>
+    <div class="fallback-field"><i></i><i></i><i></i></div>
+    <div class="vignette"></div>
+    <div class="grain"></div>
+  </div>
+
+  <header class="site-mark">
+    <a href="https://www.zacoberg.com/apps/" aria-label="Return to Zac Oberg's apps">
+      <span aria-hidden="true">the</span> entry
+    </a>
+  </header>
+
+  <main class="entry-stage" id="main-content">
+    <h1 class="sr-only">The Entry</h1>
+    <section class="composer" aria-describedby="entry-instruction privacy-note">
+      <p class="invitation" id="entry-instruction">say something into the dark</p>
+
+      <div class="writing-field">
+        <label class="sr-only" for="entry-text">Words to release</label>
+        <textarea
+          id="entry-text"
+          rows="1"
+          maxlength="360"
+          enterkeyhint="enter"
+          autocomplete="off"
+          autocapitalize="sentences"
+          spellcheck="true"
+          aria-describedby="entry-instruction privacy-note entry-status"
+          placeholder="say something"
+        ></textarea>
+        <div class="caret-glow" aria-hidden="true"></div>
+      </div>
+
+      <div class="release-row">
+        <button id="release" type="button" aria-label="Release these words" disabled>
+          <span class="release-ring" aria-hidden="true"></span>
+          <span class="release-label">release</span>
+        </button>
+      </div>
+
+      <p class="state-message" id="entry-status" role="status" aria-live="polite" aria-atomic="true">listening</p>
+    </section>
+  </main>
+
+  <footer class="quiet-footer">
+    <p id="privacy-note"><span aria-hidden="true">○</span> nothing is sent. nothing is saved.</p>
+    <a href="/hub/">project hub</a>
+  </footer>
+
+  <noscript>
+    <div class="no-script">The field needs JavaScript to move, but your words would still never leave this page.</div>
+  </noscript>
+  <script type="module" src="{% static 'app/entry.js' %}"></script>
+</body>
+</html>

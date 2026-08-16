@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">The Entry</title>
+  <defs>
+    <radialGradient id="night" cx="50%" cy="48%" r="66%">
+      <stop offset="0" stop-color="#101329"/>
+      <stop offset=".62" stop-color="#05050d"/>
+      <stop offset="1" stop-color="#020206"/>
+    </radialGradient>
+    <linearGradient id="light" x1=".08" y1=".9" x2=".9" y2=".12">
+      <stop stop-color="#7d84ff"/>
+      <stop offset=".48" stop-color="#aabaff"/>
+      <stop offset="1" stop-color="#ffe2cf"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="54" fill="url(#night)"/>
+  <g fill="none" stroke="url(#light)" stroke-linecap="round" filter="url(#glow)">
+    <path d="M43 153c17 43 72 62 119 38 41-20 63-69 39-108-20-32-63-44-98-25-29 15-45 50-30 79 12 24 42 35 66 22 19-10 29-34 19-53" stroke-width="5" opacity=".9"/>
+    <path d="M57 168c35 35 94 39 129 1" stroke-width="2" opacity=".5"/>
+  </g>
+  <g fill="#dce4ff">
+    <circle cx="44" cy="150" r="3"/><circle cx="53" cy="177" r="2" opacity=".8"/>
+    <circle cx="73" cy="196" r="2.6"/><circle cx="98" cy="205" r="1.7" opacity=".65"/>
+    <circle cx="178" cy="190" r="2.3"/><circle cx="204" cy="161" r="1.8" opacity=".7"/>
+    <circle cx="211" cy="120" r="2.6"/><circle cx="199" cy="82" r="1.9" opacity=".7"/>
+    <circle cx="170" cy="58" r="2.2"/><circle cx="131" cy="49" r="1.6" opacity=".75"/>
+    <circle cx="93" cy="61" r="2.4"/><circle cx="69" cy="85" r="1.8" opacity=".65"/>
+  </g>
+  <circle cx="128" cy="128" r="14" fill="#030309" stroke="#dbe4ff" stroke-opacity=".32"/>
+</svg>
