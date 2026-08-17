@@ -6,8 +6,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
-# collectstatic at build (SECRET_KEY not needed for it under DEBUG); whitenoise serves /static.
-RUN DEBUG=1 SECRET_KEY=build python manage.py collectstatic --noinput
+# Build the same hashed manifest that production resolves at request time; DEBUG would select the
+# non-manifest backend and leave every `{% static %}` reference broken after release.
+RUN DEBUG=0 SECRET_KEY=build python manage.py collectstatic --noinput
 EXPOSE 5000
 # Migrate and idempotently seed the task plane on boot, then keep the push-first Hub on one coherent
 # ASGI process. Uvicorn serves product and SSE connections asynchronously; horizontal workers
