@@ -1,10 +1,14 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-project="{{project_key}}" data-mark="{{visual_mark}}" data-display-voice="{{display_voice}}" data-surface="{{surface_character}}" data-motif="{{ambient_motif}}" style="--accent-h:{{accent_h}};--accent-pair-h:{{accent_pair_h}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{{brand}}</title>
 <meta name="robots" content="noindex">
+<meta name="hub-project" content="{{project_key}}">
+<meta name="build" content="{{build_identity}}">
+<meta name="hub-release" content="{{release_identity}}">
+<meta name="hub-build-coherent" content="{{build_coherent}}">
 <meta name="csrf-token" content="{{csrf_token}}">
 {{theme_init}}
 <style>{{tokens_css}}</style>
@@ -33,6 +37,10 @@
     <a class="btn-white" id="launchWorkerBtn" href="#" data-launch="1" data-count="1" hidden title="Launch one local worker that pulls the next ready task and completes it with a receipt.">▶ Launch Worker</a>
     <a class="btn-white" id="launch4Btn" href="#" data-launch="1" data-count="4" hidden title="Launch four independent workers against the shared readiness queue.">▶▶ Launch 4</a>
     <button class="btn-white" id="paletteBtn" type="button" data-hub-palette-trigger title="Search — Ctrl/Cmd-K" aria-label="Open command palette">⌘K</button>
+    <label class="sr-only" for="hub-density-select">Density</label>
+    <select id="hub-density-select" class="hub-density-select btn-white" autocomplete="off" aria-label="Information density" title="Information density">
+      <option value="comfortable">Comfortable</option><option value="compact">Compact</option>
+    </select>
     <label class="sr-only" for="hub-theme-select">Theme</label>
     <select id="hub-theme-select" class="hub-theme-select btn-white" autocomplete="off" aria-label="Theme">
       <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>

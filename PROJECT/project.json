@@ -1,9 +1,18 @@
 {
-  "project_key": "entry",
+  "key": "entry",
   "brand": "The Entry",
-  "live_url": "https://entry.zacoberg.com",
+  "app_name": "entry",
+  "app_host": "https://entry.zacoberg.com",
+  "worker_scheme": "hub-entry",
   "hub_url": "https://entry.zacoberg.com/hub/",
   "kind": "public-artwork",
   "parent_project": null,
-  "hub_scaffold_commit": "fab19fe"
+  "visual": {
+    "mark": "route",
+    "accent_h": 214,
+    "accent_pair_h": 286,
+    "display_voice": "precision",
+    "surface": "glass",
+    "motif": "monolith"
+  }
 }

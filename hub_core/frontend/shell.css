@@ -75,6 +75,7 @@ body.hub-app {
 }
 .navbar-brand .brand-mark svg { width: 22px; height: 22px; }
 .navbar-right { display: flex; align-items: center; gap: 12px; }
+.hub-density-select, .hub-theme-select { min-width: 88px; }
 
 .status-pill {
   display: flex; align-items: center; gap: 8px;
@@ -913,7 +914,7 @@ body.hub-app {
 /* =============================================================================
    RESPONSIVE — below 720px, the modal detail grid + overview grids collapse.
    ========================================================================== */
-@media (max-width: 1200px) {
+@media (max-width: 1100px) {
   .compact-task-sort { display: flex; }
   .task-table-wrapper { overflow-x: hidden; }
   .task-table { display: block; width: 100%; }
@@ -996,7 +997,7 @@ body.hub-app {
   .task-table .mini-progress { flex: 1; width: auto; max-width: none; }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   /* The navbar must WRAP under 720px: it is a non-wrapping space-between row, and once brand +
      pills + theme select exceed the viewport the right group runs past the edge — body clips it
      (overflow-x hidden), so the theme control was silently CUT OFF on phones, measured at
@@ -1006,7 +1007,7 @@ body.hub-app {
                  flex-wrap: wrap; }
   .navbar-brand { font-size: 13px; min-width: 0; }
   .navbar-right { gap: 6px; flex-wrap: wrap; min-width: 0; justify-content: flex-end; }
-  .hub-theme-select { max-width: 42vw; }
+  .hub-density-select, .hub-theme-select { max-width: 42vw; }
   .status-pill { min-width: 0; padding: 6px 9px; }
   .status-pill .status-meta, .status-pill .clock { display: none; }
   .overview-signal-strip { align-items: flex-start; flex-direction: column; gap: 8px; }
@@ -1341,6 +1342,16 @@ body.hub-app {
 .tcard-agent { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: var(--step--1); color: var(--accent, #4f7cff); font-weight: 600; }
 .tcard-agent.is-stalled { color: var(--warn-solid, #d99a2b); }
 .tcard-title { font-weight: 600; line-height: var(--leading-tight); }
+.tcard > .task-age-sle { margin-top: -2px; }
+.task-title { display: block; color: var(--text); font-weight: 680; line-height: 1.3; }
+.task-age-sle {
+  display: inline-flex; width: fit-content; margin-top: 5px; padding: 2px 7px;
+  border: 1px solid currentColor; border-radius: var(--radius-pill);
+  font: 650 9.5px/1.25 var(--mono); letter-spacing: .015em; white-space: nowrap;
+}
+.task-age-sle.b-pass { color: var(--pass-fg); background: var(--pass); }
+.task-age-sle.b-warn { color: var(--warn-fg); background: var(--warn); }
+.task-age-sle.b-fail { color: var(--fail-fg); background: var(--fail); }
 .tcard-track { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; border: 1px solid var(--border); }
 .tcard-fill {
   height: 100%; border-radius: 3px;
@@ -1434,7 +1445,7 @@ body.hub-app {
 }
 .hub-backdrop::after {
   width: 52vw; height: 52vw; min-width: 380px; min-height: 380px; bottom: -24vw; right: -14vw;
-  background: radial-gradient(circle at 50% 50%, var(--pass, #2fae66), transparent 68%);
+  background: radial-gradient(circle at 50% 50%, var(--accent-pair, #8b5cf6), transparent 68%);
   animation: aurora-b calc(var(--aurora-tempo, 34s) * 1.28) ease-in-out infinite alternate;
 }
 /* A stalled worker or a failing audit tints the field amber — the ambient layer agrees with the
@@ -1501,6 +1512,97 @@ body[data-fleet="many"] { --aurora-opacity: .38; --aurora-tempo: 18s; }
   .hub-backdrop::before, .hub-backdrop::after { animation: none !important; }
   .overview-scroll > .card, .overview-scroll > .ov-grid { animation: none !important; }
   .hub-app .card { transition: none !important; }
+}
+
+/* ============================================================================
+   AUTHORED PROJECT CHARACTER
+
+   These bounded root attributes come only from validated PROJECT/project.json values. They alter
+   art direction while status colors, state-derived motion, focus behavior, and layout semantics
+   remain shared. No adopter needs a CSS fork.
+   ========================================================================= */
+:root[data-display-voice="editorial"] .navbar-brand,
+:root[data-display-voice="editorial"] .overview-heading-copy h2,
+:root[data-display-voice="editorial"] .progress-pct {
+  font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  font-weight: 620;
+  letter-spacing: -.035em;
+}
+:root[data-display-voice="kinetic"] .navbar-brand,
+:root[data-display-voice="kinetic"] .overview-heading-copy h2 {
+  font-family: var(--mono);
+  font-weight: 780;
+  letter-spacing: -.045em;
+  text-transform: uppercase;
+}
+:root[data-display-voice="humanist"] .navbar-brand,
+:root[data-display-voice="humanist"] .overview-heading-copy h2 {
+  font-weight: 650;
+  letter-spacing: -.018em;
+}
+:root[data-display-voice="monumental"] .navbar-brand,
+:root[data-display-voice="monumental"] .overview-heading-copy h2,
+:root[data-display-voice="monumental"] .progress-pct {
+  font-weight: 820;
+  letter-spacing: -.065em;
+}
+
+:root[data-surface="paper"] .hub-app .card,
+:root[data-surface="paper"] .navbar-main,
+:root[data-surface="paper"] .tabs-bar,
+:root[data-surface="paper"] .integrity-drawer {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background: var(--surface);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--border) 84%, transparent);
+}
+:root[data-surface="paper"] .hub-backdrop::before,
+:root[data-surface="paper"] .hub-backdrop::after { opacity: calc(var(--aurora-opacity, .16) * .42); filter: blur(105px); }
+:root[data-surface="luminous"] .hub-app .card { background: color-mix(in srgb, var(--surface) 80%, transparent); box-shadow: 0 24px 72px -58px var(--accent), inset 0 1px 0 color-mix(in srgb, #fff 34%, transparent); }
+:root[data-surface="luminous"] .navbar-brand .brand-mark { box-shadow: 0 0 30px -7px var(--accent), inset 0 1px 0 color-mix(in srgb, #fff 65%, transparent); }
+:root[data-surface="technical"] { --radius: .22rem; --radius-sm: .14rem; }
+:root[data-surface="technical"] .hub-app .card,
+:root[data-surface="technical"] .integrity-drawer { border-style: dashed; box-shadow: none; }
+:root[data-surface="technical"] .navbar-brand .brand-mark { border-radius: 2px; }
+:root[data-surface="soft"] { --radius: 1.15rem; --radius-sm: .78rem; }
+:root[data-surface="soft"] .hub-app .card { border-color: color-mix(in srgb, var(--accent) 22%, var(--border)); box-shadow: 0 28px 78px -68px var(--accent); }
+
+:root[data-motif="none"] .hub-backdrop .grid-veil { display: none; }
+:root[data-motif="constellation"] .hub-backdrop .grid-veil {
+  background-image: radial-gradient(circle, currentColor 1px, transparent 1.6px), radial-gradient(circle, var(--accent-pair) 1px, transparent 1.7px);
+  background-position: 0 0, 31px 23px; background-size: 67px 67px, 89px 89px; opacity: .28;
+}
+:root[data-motif="orbit"] .hub-backdrop .grid-veil {
+  background-image: repeating-radial-gradient(circle at 50% 18%, transparent 0 52px, currentColor 53px 54px, transparent 55px 82px);
+  background-size: 100% 100%; opacity: .22;
+}
+:root[data-motif="waves"] .hub-backdrop .grid-veil {
+  background-image: repeating-radial-gradient(ellipse at 10% 0%, transparent 0 38px, currentColor 39px 40px, transparent 41px 72px);
+  background-size: 310px 132px; opacity: .20;
+}
+:root[data-motif="embers"] .hub-backdrop .grid-veil {
+  background-image: radial-gradient(ellipse, currentColor 0 1px, transparent 1.8px), radial-gradient(ellipse, var(--accent-pair) 0 1px, transparent 1.9px);
+  background-position: 0 0, 19px 41px; background-size: 43px 71px, 61px 97px; opacity: .27;
+}
+:root[data-motif="threads"] .hub-backdrop .grid-veil {
+  background-image: repeating-linear-gradient(62deg, transparent 0 31px, currentColor 32px, transparent 33px 67px), repeating-linear-gradient(118deg, transparent 0 53px, color-mix(in srgb, var(--accent-pair) 42%, transparent) 54px, transparent 55px 103px);
+  background-size: auto; opacity: .20;
+}
+:root[data-motif="petals"] .hub-backdrop .grid-veil {
+  background-image: radial-gradient(ellipse at 30% 50%, currentColor 0 2px, transparent 3px), radial-gradient(ellipse at 70% 50%, var(--accent-pair) 0 2px, transparent 3px);
+  background-size: 54px 38px; background-position: 0 0, 27px 19px; opacity: .24;
+}
+:root[data-motif="monolith"] .hub-backdrop .grid-veil {
+  background-image: repeating-linear-gradient(90deg, transparent 0 93px, currentColor 94px 95px, transparent 96px 187px);
+  background-size: auto; opacity: .22;
+}
+:root[data-motif="rings"] .hub-backdrop .grid-veil {
+  background-image: repeating-radial-gradient(circle at 78% 22%, transparent 0 24px, currentColor 25px 26px, transparent 27px 49px);
+  background-size: 100% 100%; opacity: .22;
+}
+:root[data-motif="stage"] .hub-backdrop .grid-veil {
+  background-image: linear-gradient(112deg, transparent 0 37%, currentColor 37.2% 37.5%, transparent 37.8%), linear-gradient(68deg, transparent 0 63%, color-mix(in srgb, var(--accent-pair) 50%, transparent) 63.2% 63.5%, transparent 63.8%);
+  background-size: 100% 100%; opacity: .24;
 }
 
 /* Renderer contract repairs and command-deck finish. */
@@ -1826,7 +1928,7 @@ body.hub-app {
 body[data-fleet="0"] .hub-backdrop::before,
 body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
 
-@media (max-width: 1040px) {
+@media (max-width: 1100px) {
   .progress-stats { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
   .operations-grid,
   .next-grid,
@@ -1834,7 +1936,7 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
   .outcome-grid .delivery-flow { justify-content: stretch; }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   body.hub-app { font-size: 13px; }
   .navbar-main { padding: 9px 14px 10px; }
   .navbar-brand::after { display: none; }
@@ -1844,7 +1946,8 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
   .navbar-right .status-meta,
   .navbar-right .clock { display: none; }
   .navbar-right .btn-white { min-width: 38px; padding-inline: 9px; justify-content: center; }
-  .hub-theme-select { width: 72px; min-width: 72px; margin-left: auto; padding-inline: 7px; }
+  .hub-density-select { width: 88px; min-width: 88px; margin-left: auto; padding-inline: 7px; }
+  .hub-theme-select { width: 72px; min-width: 72px; padding-inline: 7px; }
   .tabs-bar { padding-inline: 8px; scroll-snap-type: x proximity; }
   .tab-btn { padding: 13px 12px; scroll-snap-align: start; }
   .tab-btn.active::after { inset-inline: 12px; }
@@ -1862,6 +1965,35 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
   .integrity-summary > .badge { display: none; }
   .integrity-grid { grid-template-columns: 1fr; padding: 0 12px 12px; }
   .integrity-grid > .card:last-child:nth-child(odd) { grid-column: auto; }
+}
+
+/* Density is an actual spatial mode, not a preference label that changes nothing. */
+:root[data-density="compact"] .overview-scroll { padding: clamp(12px, 1.5vw, 20px); }
+:root[data-density="compact"] .overview-scroll > .card,
+:root[data-density="compact"] .overview-scroll > .ov-grid,
+:root[data-density="compact"] .overview-scroll > .operations-grid,
+:root[data-density="compact"] .overview-scroll > .next-grid,
+:root[data-density="compact"] .overview-scroll > .outcome-grid { margin-bottom: 12px; }
+:root[data-density="compact"] .toolbar { padding-block: 7px; gap: 8px; }
+:root[data-density="compact"] .tab-btn { padding-block: 10px; padding-inline: 14px; }
+:root[data-density="compact"] .card-header { padding: 11px 14px; }
+:root[data-density="compact"] .card-body { padding: 12px 14px; }
+:root[data-density="compact"] .data-table th,
+:root[data-density="compact"] .data-table td { padding-block: 7px; }
+:root[data-density="compact"] .tcard { gap: 5px; padding: 9px 10px; }
+
+@media (max-width: 320px) {
+  .navbar-main { padding-inline: 9px; }
+  .navbar-right { flex-wrap: wrap; }
+  .navbar-right .status-pill { flex-basis: 100%; }
+  .hub-density-select, .hub-theme-select { min-width: 0; width: calc(50% - 23px); margin-left: 0; }
+  .overview-scroll { padding: 12px 9px 22px; }
+  .progress-hero { padding: 18px 14px; }
+  .progress-stats, .dag-facts { grid-template-columns: 1fr; }
+  .hero-command-mode { display: none; }
+  .task-table tbody tr[data-hub-row] { padding-inline: 11px; gap: 8px; }
+  .task-age-sle { white-space: normal; }
+  .tab-btn { padding-inline: 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

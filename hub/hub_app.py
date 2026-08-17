@@ -16,8 +16,9 @@ substitutes at scaffold time):
     HUB_DONE_STRICTNESS completion proof dial: tracked or strict.       Default "tracked".
     HUB_SETTINGS_FILE settings.py path the AST security audit scans.   Default: the module file
                       of DJANGO_SETTINGS_MODULE.
-    HUB_WRITE_TOKEN   general write bearer token; grants terminal board authority, not shell
-                      execution. Fail-closed when empty.
+    HUB_WRITE_TOKEN   shared-root compatibility bearer token; grants terminal board authority,
+                      not shell execution. Fail-closed when empty.
+    HUB_SHARED_TOKEN_COMPAT accept the legacy shared-root credential. Default True for migration.
     HUB_WORKER_LAUNCH_ENABLED   expose the optional grant-backed local launcher. Default False.
     HUB_WORKER_PROTOCOL         custom URL scheme registered on the workstation. Default hub-worker.
     HUB_WORKER_LAUNCH_ISSUER_URL explicit HTTPS consume endpoint (recommended in production).
@@ -235,34 +236,42 @@ def _state_json() -> dict:
 def build_meta(served=None, state=None) -> dict:
     """The build/coherence block for /hub.json. ``coherent`` is always computed.
 
-    Runtime ``PROJECT/state.json`` remains a useful deploy-side shortcut. If it is absent, the
-    latest immutable post-canary deploy entity is already durable canonical evidence and supplies
-    the same release SHA; production must not report "no deploy" while its ledger names one.
+    Runtime ``PROJECT/state.json`` remains a useful deploy-side shortcut, but it is baked before a
+    release while an immutable deploy entity is written after the public canary. Prefer a valid
+    closure matching the running artifact, then an already-matching state shortcut, then the newest
+    valid closure. A stale mutable file must never mask stronger post-canary evidence.
     """
     sj = _state_json()
     head = _git_head()  # Git checkout or, in a production artifact, the baked build stamp.
-    sha = _normalize_build_sha(sj.get("last_deploy_sha"))
+    state_sha = _normalize_build_sha(sj.get("last_deploy_sha"))
+    served_sha = _normalize_build_sha(served) if served is not None else None
+    sha = state_sha
     release = None
-    if not sha and state is not None:
-        candidates = []
+    candidates = []
+    if state is not None:
         for deploy in state.get("by_type", {}).get("deploy", []):
             shipped = _normalize_build_sha(deploy.get("sha"))
             observed = _normalize_build_sha(deploy.get("served_sha"))
             if (shipped and observed == shipped and
                     isinstance(deploy.get("tasks_closed"), list)):
                 candidates.append(deploy)
-        if candidates:
-            release = max(candidates, key=lambda row: str(row.get("at") or ""))
-            sha = _normalize_build_sha(release.get("sha"))
-    served_sha = _normalize_build_sha(served) if served is not None else None
+    matching = [row for row in candidates if _normalize_build_sha(row.get("sha")) == head]
+    if matching:
+        release = max(matching, key=lambda row: str(row.get("at") or ""))
+        sha = _normalize_build_sha(release.get("sha"))
+    elif state_sha and state_sha == head:
+        sha = state_sha
+    elif candidates:
+        release = max(candidates, key=lambda row: str(row.get("at") or ""))
+        sha = _normalize_build_sha(release.get("sha"))
     coherent = bool(head and sha and head == sha and (served is None or served_sha == head))
+    release_source = "deploy entity" if release else ("state.json" if state_sha else None)
     return {
         "repo": sj.get("repo_build"),
-        "deploy": sj.get("last_deploy_build") or (release or {}).get("build"),
+        "deploy": (release or {}).get("build") or sj.get("last_deploy_build"),
         "tag": sj.get("last_deploy_tag"), "sha": sha, "served_sha": served_sha, "head": head,
         "coherent": coherent, "live_url": sj.get("live_url") or _IDENTITY.get("app_host"),
-        "release_source": "state.json" if _normalize_build_sha(sj.get("last_deploy_sha"))
-                          else ("deploy entity" if release else None),
+        "release_source": release_source,
     }
 
 
@@ -337,7 +346,7 @@ def settings_ast_adapter(state):
 def route_guard_adapter(state):
     """Auth-boundary primitive: assert every mutating route has an explicit gate.
 
-    General writes carry ``@writer`` (the private header token).  The one deliberately narrow
+    General writes carry ``@writer`` with a named operation scope. The one deliberately narrow
     browser capability may instead carry ``@csrf_protect`` plus ``_hub_origin_gated``; it can only
     mint a short-lived launch grant and never receives general write authority.
     """
@@ -363,6 +372,13 @@ def route_guard_adapter(state):
                                      (pat, getattr(cb, "__name__", "?")),
                                      "@writer or narrow @csrf_protect capability",
                                      remediation="wrap general writes with @writer"))
+                elif (getattr(cb, "_hub_token_gated", False) and
+                      not getattr(cb, "_hub_required_scope", None)):
+                    viols.append(_sv("routes:unscoped", "every token-gated /hub/api/ route names a scope",
+                                     "%s -> %s has no operation scope" %
+                                     (pat, getattr(cb, "__name__", "?")),
+                                     "@writer(scope='operation:name')",
+                                     remediation="assign the least-privilege operation scope"))
     try:
         walk(resolver.url_patterns)
     except Exception as e:
@@ -406,6 +422,16 @@ def _range_touched_paths(base, head):
     return val
 
 
+def _legacy_receipt_baseline():
+    """Read the adopter's immutable migration cutoff; absent/invalid means no exception."""
+    try:
+        manifest = json.loads((WORK_ROOT / "hub-scaffold-adoption.json").read_text(encoding="utf-8"))
+        record = (manifest.get("compatibility") or {}).get("legacy_done_receipts")
+        return record if isinstance(record, dict) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _run_audit_with_store(s, served=None) -> dict:
     state = current_state(s)
     bm = build_meta(served, state=state)
@@ -434,6 +460,7 @@ def _run_audit_with_store(s, served=None) -> dict:
                           "a coherent immutable deploy entity is present)")
         coh["unknown_severity"] = "warn"
     return _audit.audit(state, registry(), store=s, coherence=coh,
+                        legacy_receipt_baseline=_legacy_receipt_baseline(),
                         adapters=[settings_ast_adapter, identity_settings_adapter,
                                   route_guard_adapter])
 
@@ -478,15 +505,22 @@ def _write_lease(task_id, lease):
     _os.replace(tmp, p)
 
 
-def claim(task_id, agent, ttl_s=900):
+def claim(task_id, agent, ttl_s=900, *, auth_subject=None, credential_id=None,
+          actor_kind=None):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         now = _time.time()
         cur = _read_lease(task_id)
         if cur and cur.get("expires", 0) > now:
-            if cur.get("agent") != agent:
+            if (cur.get("agent") != agent or
+                    (cur.get("auth_subject") and cur.get("auth_subject") != auth_subject) or
+                    (cur.get("credential_id") and cur.get("credential_id") != credential_id)):
                 return {"ok": False, "reason": "held", "held_by": cur.get("agent"), "expires": cur.get("expires")}
             # Retrying the same claim must not silently invalidate the fencing token already held
             # by this worker. Renew the lease in place and return that same token.
+            if not cur.get("auth_subject"):
+                cur["auth_subject"] = auth_subject
+                cur["credential_id"] = credential_id
+                cur["actor_kind"] = actor_kind
             cur["last_heartbeat"] = now
             cur["expires"] = now + ttl_s
             _write_lease(task_id, cur)
@@ -495,6 +529,8 @@ def claim(task_id, agent, ttl_s=900):
             _schedule_lease_truth(cur)
             return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **cur}
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
+                 "auth_subject": auth_subject, "credential_id": credential_id,
+                 "actor_kind": actor_kind,
                  "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
         _write_lease(task_id, lease)
         _publish_realtime("lease.claimed", task=task_id, agent=agent,
@@ -547,12 +583,38 @@ def lease_valid(task_id, token):
     return bool(cur and cur.get("token") == token and cur.get("expires", 0) > _time.time())
 
 
-def heartbeat(task_id, token, ttl_s=900):
+def lease_authorized(task_id, token, auth_subject, credential_id=None):
+    """Require both the fencing token and the subject that acquired it.
+
+    A legacy lease has no subject. Only the conspicuous shared-root migration actor may consume
+    such a lease; the next fresh claim is always fully bound.
+    """
+    cur = _read_lease(task_id)
+    if not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time():
+        return False
+    bound = cur.get("auth_subject")
+    if bound and bound != auth_subject:
+        return False
+    if not bound and auth_subject != "shared-root":
+        return False
+    bound_credential = cur.get("credential_id")
+    return not bound_credential or bound_credential == credential_id
+
+
+def heartbeat(task_id, token, ttl_s=900, *, auth_subject=None, credential_id=None,
+              actor_kind=None):
     with ProcessFileLock(CLAIMS, name=".claims.lock", timeout=30):
         cur = _read_lease(task_id)
-        if not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time():
+        if (not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time() or
+                (cur.get("auth_subject") and cur.get("auth_subject") != auth_subject) or
+                (cur.get("credential_id") and cur.get("credential_id") != credential_id) or
+                (not cur.get("auth_subject") and auth_subject != "shared-root")):
             return {"ok": False, "reason": "no/stale lease"}
         now = _time.time()
+        if not cur.get("auth_subject"):
+            cur["auth_subject"] = auth_subject
+            cur["credential_id"] = credential_id
+            cur["actor_kind"] = actor_kind
         cur["last_heartbeat"] = now
         cur["expires"] = now + ttl_s
         _write_lease(task_id, cur)

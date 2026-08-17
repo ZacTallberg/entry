@@ -26,6 +26,22 @@ cleanup_worktree() { git worktree remove --force "$WT" 2>/dev/null || true; }
 trap cleanup_worktree EXIT
 printf '%s\n' "$SHA" > "$WT/app/build_sha.txt"   # baked into the image pre-build; served in <meta name="build">
 
+# The Hub reads its deploy closure from the release artifact, not this checkout. Stamp the detached
+# build context before offbox-deploy exports it so the live Hub can prove deployed == served == HEAD.
+python - "$WT/PROJECT/state.json" "$SHA" "https://${APP}.zacoberg.com/" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+d = {}
+if p.exists():
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except ValueError:
+        d = {}
+d.update({"last_deploy_sha": sys.argv[2], "live_url": sys.argv[3]})
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(json.dumps(d, indent=1) + "\n", encoding="utf-8")
+PY
+
 (cd "$WT" \
   && bash ./provision.sh "$APP" \
   && bash "$CODE_ROOT/_deploy/offbox-deploy.sh" --app "$APP" \

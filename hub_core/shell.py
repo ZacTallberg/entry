@@ -5,15 +5,21 @@ client-rendered tabbed app — no per-stack template duplication. hub.js builds 
 client-side from the island (UI == API by construction; each active view owns a bounded native
 scrollport). Stdlib only."""
 import json
+import html as _html
+import re
 from functools import lru_cache
 from pathlib import Path
 
+from . import identity as _identity
+
 FRONTEND = Path(__file__).resolve().parent / "frontend"
 
-# no-FOUC theme bootstrap — must run before styles paint (reads localStorage "hub-theme").
+# no-FOUC theme/density bootstrap — must run before styles paint.
 _THEME_INIT = ('<script>(function(){try{var c=localStorage.getItem("hub-theme"),r=document.documentElement;'
                'if(c==="light"||c==="dark"){r.setAttribute("data-theme",c);r.style.colorScheme=c}'
-               'else{r.removeAttribute("data-theme");r.style.colorScheme="light dark"}}catch(e){}})();</script>')
+               'else{r.removeAttribute("data-theme");r.style.colorScheme="light dark"}'
+               'var d=localStorage.getItem("hub-density");if(d==="compact"||d==="comfortable")'
+               '{r.setAttribute("data-density",d)}}catch(e){}})();</script>')
 
 
 @lru_cache(maxsize=16)
@@ -27,9 +33,26 @@ def render(snap, brand, csrf_token=""):
     = the navbar title (e.g. 'Project · Hub'). Escapes the JSON island (< -> \\u003c so a stray
     </script in any field can't close it) and inlined JS (</script -> <\\/script)."""
     snap_json = json.dumps(snap, separators=(",", ":")).replace("<", "\\u003c")
+    ident = _identity.load()
+    visual = ident["visual"]
+    build = snap.get("build") or {}
+    safe_sha = lambda value: value if re.fullmatch(r"[0-9a-f]{7,64}", str(value or "").lower()) else ""
+    running_sha = safe_sha(build.get("head"))
+    release_sha = safe_sha(build.get("sha"))
+    coherent = "true" if build.get("coherent") is True else "false" if build.get("coherent") is False else "unknown"
     repl = {
-        "brand": brand,
-        "csrf_token": str(csrf_token or ""),
+        "brand": _html.escape(str(brand)),
+        "csrf_token": _html.escape(str(csrf_token or ""), quote=True),
+        "project_key": ident["key"],
+        "visual_mark": visual["mark"],
+        "accent_h": str(visual["accent_h"]),
+        "accent_pair_h": str(visual["accent_pair_h"]),
+        "display_voice": visual["display_voice"],
+        "surface_character": visual["surface"],
+        "ambient_motif": visual["motif"],
+        "build_identity": running_sha,
+        "release_identity": release_sha,
+        "build_coherent": coherent,
         "theme_init": _THEME_INIT,
         "tokens_css": _asset("tokens.css"),
         "shell_css": _asset("shell.css"),
