@@ -46,6 +46,7 @@ const GLSL_PRELUDE = `
   #define TAU 6.28318530718
 
   uniform float uTime;
+  uniform float uDt;
   uniform float uSeed;
   uniform float uEnergy;
   uniform float uRelease;
@@ -164,7 +165,7 @@ const buildSimFragment = (formDef) => `
     float centerDistance = max(length(pos), 0.12);
     velocity += normalize(pos) * uRelease * (0.036 * FORM_RELEASE / centerDistance);
     velocity += (origin - pos) * FORM_HOME;
-    pos += velocity * FORM_SPEED;
+    pos += velocity * FORM_SPEED * uDt;
     if (length(pos) > 6.5) pos = mix(pos, origin, 0.5);
     gl_FragColor = vec4(pos, 1.0);
   }
@@ -460,7 +461,9 @@ class ParticleField {
       alpha: true,
       powerPreference: 'high-performance',
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, narrow ? 1.25 : 1.6));
+    this.baseDpr = Math.min(window.devicePixelRatio || 1, narrow ? 1.1 : 1.35);
+    this.renderScale = 1;
+    this.renderer.setPixelRatio(this.baseDpr);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -539,6 +542,7 @@ class ParticleField {
         uRelease: { value: 0 },
         uSeed: { value: 0 },
         uEnergy: { value: 0.5 },
+        uDt: { value: 1 },
       },
     });
     const js = formDef.js || {};
@@ -560,6 +564,7 @@ class ParticleField {
         uSeed: { value: 0 },
         uEnergy: { value: 0.5 },
         uGlowAmt: { value: js.pointerGlow ? 0.85 : 0.0 },
+        uDt: { value: 1 },
       },
       transparent: true,
       blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
@@ -570,23 +575,38 @@ class ParticleField {
     return cached;
   }
 
-  warmForm(formDef) {
+  async warmForm(formDef) {
     if (this.disposed) return;
+    this.warmedForms ||= new Set();
+    if (this.warmedForms.has(formDef.slug)) return;
+    this.warmedForms.add(formDef.slug);
     const { simMaterial, renderMaterial } = this.materialsFor(formDef);
-    const previousMaterial = this.simQuad.material;
     simMaterial.uniforms.tPositions.value = this.targetA.texture;
     simMaterial.uniforms.tOrigin.value = this.origin;
-    this.simQuad.material = simMaterial;
-    this.renderer.setRenderTarget(this.warmTarget);
-    this.renderer.render(this.simScene, this.simCamera);
     renderMaterial.uniforms.tPositions.value = this.targetA.texture;
     renderMaterial.uniforms.tOrigin.value = this.origin;
-    const held = this.particles.material;
+    const heldPoints = this.particles.material;
+    const heldQuad = this.simQuad.material;
     this.particles.material = renderMaterial;
-    this.renderer.render(this.scene, this.camera);
-    this.particles.material = held;
-    this.simQuad.material = previousMaterial;
-    this.renderer.setRenderTarget(null);
+    this.simQuad.material = simMaterial;
+    try {
+      if (this.renderer.compileAsync) {
+        await Promise.all([
+          this.renderer.compileAsync(this.scene, this.camera),
+          this.renderer.compileAsync(this.simScene, this.simCamera),
+        ]);
+      } else {
+        this.renderer.setRenderTarget(this.warmTarget);
+        this.renderer.render(this.simScene, this.simCamera);
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setRenderTarget(null);
+      }
+    } finally {
+      if (!this.disposed) {
+        this.particles.material = heldPoints;
+        this.simQuad.material = heldQuad;
+      }
+    }
   }
 
   setForm(formDef, utterance, { fromCenter, seedHash }) {
@@ -635,7 +655,23 @@ class ParticleField {
   }
 
   basePointSize() {
-    return (window.innerWidth < 640 ? 3.8 : 4.4) * 1.15;
+    return window.innerWidth < 640 ? 3.8 : 4.4;
+  }
+
+  governFidelity(now, interacting) {
+    if (!this.lastGovern) this.lastGovern = now;
+    if (now - this.lastGovern < 1600) return;
+    this.lastGovern = now;
+    const previous = this.renderScale;
+    const slow = interacting ? 26 : 48;
+    const fast = interacting ? 15 : 36;
+    if (this.frameEma > slow) this.renderScale = Math.max(0.45, this.renderScale * 0.85);
+    else if (this.frameEma < fast && this.renderScale < 1) this.renderScale = Math.min(1, this.renderScale * 1.18);
+    if (this.renderScale !== previous) {
+      this.renderer.setPixelRatio(this.baseDpr * this.renderScale);
+      this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+      this.composer.setSize(window.innerWidth, window.innerHeight);
+    }
   }
 
   contextLost(event) {
@@ -697,10 +733,12 @@ class ParticleField {
     const frameGap = this.prevFrameAt ? now - this.prevFrameAt : 16.7;
     this.prevFrameAt = now;
     this.lastFrame = now;
-    const steps = Math.max(1, Math.min(6, Math.round(frameGap / 16.7)));
+    const dt = clamp(frameGap / 16.7, 0.5, 2.5);
+    this.frameEma = this.frameEma ? this.frameEma * 0.92 + frameGap * 0.08 : frameGap;
+    this.governFidelity(now, interacting);
     const time = this.clock.getElapsedTime();
     this.pointer.lerp(this.pointerTarget, 0.055);
-    this.pulse *= Math.pow(0.91, steps);
+    this.pulse *= Math.pow(0.91, dt);
 
     let releaseForce = 0;
     if (this.releaseStarted) {
@@ -727,18 +765,17 @@ class ParticleField {
     }
 
     const su = this.simMaterial.uniforms;
+    su.uDt.value = dt;
     su.uTime.value = time;
     su.uPointer.value.copy(this.pointer);
     su.uPulse.value = this.pulse;
     su.uPulseType.value = this.pulseType;
     su.uRelease.value = releaseForce;
     this.simQuad.material = this.simMaterial;
-    for (let step = 0; step < steps; step += 1) {
-      su.tPositions.value = this.targetA.texture;
-      this.renderer.setRenderTarget(this.targetB);
-      this.renderer.render(this.simScene, this.simCamera);
-      [this.targetA, this.targetB] = [this.targetB, this.targetA];
-    }
+    su.tPositions.value = this.targetA.texture;
+    this.renderer.setRenderTarget(this.targetB);
+    this.renderer.render(this.simScene, this.simCamera);
+    [this.targetA, this.targetB] = [this.targetB, this.targetA];
     const ru = this.renderMaterial.uniforms;
     ru.tPositions.value = this.targetA.texture;
     ru.uTime.value = time;
@@ -853,23 +890,27 @@ function cancelReleaseSchedule() {
 
 function cancelIdleWarm() {
   if (warmHandle) {
-    (window.cancelIdleCallback || clearTimeout)(warmHandle);
+    clearTimeout(warmHandle);
     warmHandle = 0;
   }
 }
 
+let lastWarmedSlug = null;
+
 function scheduleWarm() {
   cancelIdleWarm();
-  const schedule = window.requestIdleCallback || ((fn) => setTimeout(fn, 120));
-  warmHandle = schedule(() => {
+  warmHandle = setTimeout(() => {
     warmHandle = 0;
     const raw = text.value;
     if (!raw.trim() || !field) return;
+    if (field.frameEma && field.frameEma > 45) return;
     const { form } = forcedForm
       ? { form: FORM_INDEX.get(forcedForm) }
       : chooseForm(raw, cadence);
-    if (form) field.warmForm(form);
-  });
+    if (!form || form.slug === lastWarmedSlug) return;
+    lastWarmedSlug = form.slug;
+    field.warmForm(form);
+  }, 550);
 }
 
 function paintProgress(now) {
@@ -1057,5 +1098,6 @@ window.entryExperience = Object.freeze({
   },
   lastForm: () => lastForm,
   lastRelease: () => lastRelease,
+  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), scale: Number((field.renderScale || 1).toFixed(2)) } : null,
   force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
 });
