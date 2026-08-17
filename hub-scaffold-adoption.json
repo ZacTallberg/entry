@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "units": {
+    "hub_core": {
+      "destination": "hub_core"
+    },
+    "django_hub": {
+      "destination": "hub"
+    },
+    "project_schema": {
+      "destination": "PROJECT/schema"
+    },
+    "project_contracts": {
+      "destination": "PROJECT"
+    }
+  },
+  "adopted_from": {
+    "repository": "https://github.com/ZacTallberg/hub-scaffold.git",
+    "commit": "3c3f201c377823176b72d919a65a710d7f93319b",
+    "managed_tree_dirty": false,
+    "recorded_at": "2026-08-17T02:17:51+00:00",
+    "tree_sha256": "sha256:ec643ed4793c8b0684cbb781f206fe7118f59b296ef7b78aa7295ea0e310b2cb",
+    "units": {
+      "hub_core": {
+        "source": "hub_core",
+        "destination": "hub_core",
+        "tree_sha256": "sha256:61dc5335acbea715452c81df4522335b89148290a2f24a0a6db294ca1ca12ceb",
+        "files": {
+          "__init__.py": "sha256:d3e814254381496d999e6320df71b2baaf75c653cc4bbe8cc1c1929450a6c931",
+          "adherence.py": "sha256:9a4bc4f56b415f880e83a0424d5de1fb95b010d103f6235e5a9fb5ee6f8b8d17",
+          "audit.py": "sha256:a27710daaeb32b196a6c8a8b9c0aa094e78981295b09a0e2432f844af6f05f29",
+          "canonical.py": "sha256:1d98ec5be3bc2178d650c52c8fc5f82e60b138fe8a8aa0e793c480505cff05cd",
+          "collision.py": "sha256:bd1d8d594aff4a00ad1a8acc318f5bb179a17c0c9b9218c9c0a7fd3f4234a11b",
+          "cost.py": "sha256:83ce2d6cc903345e7278805355680af493039ed3b32e0f4741a5a8e09cc8947d",
+          "dag.py": "sha256:61579d534669f9274beb389c9e6234bc392d9de0c05cd1ccbd409ee5435496ba",
+          "failure_taxonomy.py": "sha256:cbab445c719eca21d3f5dab3a5d11bbb6e5e2cb753dd4b1080d44c6b953c94f1",
+          "flow.py": "sha256:cbb87e86f39e83e0847bd28d61bba015384164b23e427c58f48a4270293c6d30",
+          "frontend/README.md": "sha256:8f477f26e237fe9516b59485bcf8723d4b10abcc7601ddfe15ef03f385741bfa",
+          "frontend/hub.js": "sha256:2cc41276338ac6c97ff09d089c3cef262cf57e06a422ed2aa4894fab234b28a7",
+          "frontend/hub_shell.html": "sha256:59bf2544fc32cb6e2e53798e89d62e6b98760b9b0a20abc785046e8deb8414ab",
+          "frontend/palette.js": "sha256:0423af658b9f8c7f241fb9f82eea787317a21c5b1c46ea5e81ced3c66766b5e8",
+          "frontend/print.css": "sha256:b4187c5055ee65b71b6d5f27df1e30d08c5b61731b85e5166ade02dd0c9afc18",
+          "frontend/scrollspy.js": "sha256:0735d1e119d4a758cab6346c3339a7bb99184164c54479b0ca067d1edd88fcb7",
+          "frontend/shell.css": "sha256:1ad9ec4675a50c581264854a9c903d6f87cd2903211f9badbe1b31bffe27df6b",
+          "frontend/theme-init.html": "sha256:e18c536c6f072a3c4b62067322442522df3bdd202f600528bd8e32aa1c592851",
+          "frontend/theme.js": "sha256:4b1a433418a4c2a4f3b3597ce07913b206c268f828e3e62fd4a0ccfef2805d7d",
+          "frontend/tokens.css": "sha256:57eacbd04b413b7883fd7748381d1c78d81b23a36dabebd32c55ed6deebc3d50",
+          "grandfather.py": "sha256:68ddfec1198a8e8ca66c52e4b4a9a6677c7a090f1bd54f638f253c54e9bb5057",
+          "identity.py": "sha256:6c2d26ed14d50ac6591af5fe20b4daeeead829bac3da507396547a7069ac20a8",
+          "ids.py": "sha256:d2c0f0303e0e225eddf34e638f64c4dd89785596f3f7340996365c6ba78d726d",
+          "judge.py": "sha256:abdef823c12e858d37220c3e69be0b92a039e1fb91ba1cdae9db50fb9c55ed9d",
+          "launch_grant.py": "sha256:094d4c02e4479f1ae95d21b7fcbdd5103bd8ab76485afa51cb05b2d2cc69d480",
+          "materialize.py": "sha256:6d0eddc0e0fb179b04e42ef40270ecbe0ce5ba35e82e6b35059f31748a471552",
+          "metamorphic.py": "sha256:a8e4bcb31a4bb65661fc90f9af3b7a50a8f033851c54c2dc9dc7121931d5d81e",
+          "process_lock.py": "sha256:c239d6c508633ec7d9e94c0c13588576994528da38d8c6868b27ad40e6cc1bc8",
+          "project.py": "sha256:9d474c26d7fbede5efd087ccb2306c152ad52507311082b207c6064dcbecf542",
+          "projections.py": "sha256:783243bf47c485a7d0c386959a285e626c11b585505f61c97da28616efae4b15",
+          "schedule.py": "sha256:8a92ce6f38de7aa4e2ad813a948f36098b19c9a63878b50f63a1bc3d0f76b9cd",
+          "shell.py": "sha256:ebb641c7a8f889e785258e13dfc2b5298d1f8dce2e6e5a71f795cb46d59c90af",
+          "store.py": "sha256:f2e4a5e225d8fdf1694dd4201120f5378cec590b736575992ab211448377fb9f",
+          "telemetry.py": "sha256:7f7be029598870fadfe97aab9b9683773d8c15f58cef8d6f215004d6d04f1302",
+          "upcast.py": "sha256:55dbc7d6905bc9ea87f44cd8f8013f90a0c02f0406c3865198f9d86c4f5de24b",
+          "validate.py": "sha256:b5a4bf12b50d0d1ab69c4b596fd43bd0eb59210e32cf2d5baf4e8a90dc7f8f20",
+          "verifier.py": "sha256:217d263e05e741a488021295fc73aaf35723e7e78fc6da31633b5263644d4690",
+          "viz.py": "sha256:11e0c96f0dacb6a125cb55bc12f98e6f1d4ec89806096612cac558d946cc0f8e",
+          "wip.py": "sha256:f02d620961fafec517ce7ab76cd2521ddbe833e9e780420a8d6329e104d39358"
+        },
+        "installed_files": {
+          "__init__.py": "sha256:d3e814254381496d999e6320df71b2baaf75c653cc4bbe8cc1c1929450a6c931",
+          "adherence.py": "sha256:9a4bc4f56b415f880e83a0424d5de1fb95b010d103f6235e5a9fb5ee6f8b8d17",
+          "audit.py": "sha256:a27710daaeb32b196a6c8a8b9c0aa094e78981295b09a0e2432f844af6f05f29",
+          "canonical.py": "sha256:1d98ec5be3bc2178d650c52c8fc5f82e60b138fe8a8aa0e793c480505cff05cd",
+          "collision.py": "sha256:bd1d8d594aff4a00ad1a8acc318f5bb179a17c0c9b9218c9c0a7fd3f4234a11b",
+          "cost.py": "sha256:83ce2d6cc903345e7278805355680af493039ed3b32e0f4741a5a8e09cc8947d",
+          "dag.py": "sha256:61579d534669f9274beb389c9e6234bc392d9de0c05cd1ccbd409ee5435496ba",
+          "failure_taxonomy.py": "sha256:cbab445c719eca21d3f5dab3a5d11bbb6e5e2cb753dd4b1080d44c6b953c94f1",
+          "flow.py": "sha256:cbb87e86f39e83e0847bd28d61bba015384164b23e427c58f48a4270293c6d30",
+          "frontend/README.md": "sha256:8f477f26e237fe9516b59485bcf8723d4b10abcc7601ddfe15ef03f385741bfa",
+          "frontend/hub.js": "sha256:2cc41276338ac6c97ff09d089c3cef262cf57e06a422ed2aa4894fab234b28a7",
+          "frontend/hub_shell.html": "sha256:59bf2544fc32cb6e2e53798e89d62e6b98760b9b0a20abc785046e8deb8414ab",
+          "frontend/palette.js": "sha256:0423af658b9f8c7f241fb9f82eea787317a21c5b1c46ea5e81ced3c66766b5e8",
+          "frontend/print.css": "sha256:b4187c5055ee65b71b6d5f27df1e30d08c5b61731b85e5166ade02dd0c9afc18",
+          "frontend/scrollspy.js": "sha256:0735d1e119d4a758cab6346c3339a7bb99184164c54479b0ca067d1edd88fcb7",
+          "frontend/shell.css": "sha256:1ad9ec4675a50c581264854a9c903d6f87cd2903211f9badbe1b31bffe27df6b",
+          "frontend/theme-init.html": "sha256:e18c536c6f072a3c4b62067322442522df3bdd202f600528bd8e32aa1c592851",
+          "frontend/theme.js": "sha256:4b1a433418a4c2a4f3b3597ce07913b206c268f828e3e62fd4a0ccfef2805d7d",
+          "frontend/tokens.css": "sha256:57eacbd04b413b7883fd7748381d1c78d81b23a36dabebd32c55ed6deebc3d50",
+          "grandfather.py": "sha256:68ddfec1198a8e8ca66c52e4b4a9a6677c7a090f1bd54f638f253c54e9bb5057",
+          "identity.py": "sha256:6c2d26ed14d50ac6591af5fe20b4daeeead829bac3da507396547a7069ac20a8",
+          "ids.py": "sha256:d2c0f0303e0e225eddf34e638f64c4dd89785596f3f7340996365c6ba78d726d",
+          "judge.py": "sha256:abdef823c12e858d37220c3e69be0b92a039e1fb91ba1cdae9db50fb9c55ed9d",
+          "launch_grant.py": "sha256:094d4c02e4479f1ae95d21b7fcbdd5103bd8ab76485afa51cb05b2d2cc69d480",
+          "materialize.py": "sha256:6d0eddc0e0fb179b04e42ef40270ecbe0ce5ba35e82e6b35059f31748a471552",
+          "metamorphic.py": "sha256:a8e4bcb31a4bb65661fc90f9af3b7a50a8f033851c54c2dc9dc7121931d5d81e",
+          "process_lock.py": "sha256:c239d6c508633ec7d9e94c0c13588576994528da38d8c6868b27ad40e6cc1bc8",
+          "project.py": "sha256:9d474c26d7fbede5efd087ccb2306c152ad52507311082b207c6064dcbecf542",
+          "projections.py": "sha256:783243bf47c485a7d0c386959a285e626c11b585505f61c97da28616efae4b15",
+          "schedule.py": "sha256:8a92ce6f38de7aa4e2ad813a948f36098b19c9a63878b50f63a1bc3d0f76b9cd",
+          "shell.py": "sha256:ebb641c7a8f889e785258e13dfc2b5298d1f8dce2e6e5a71f795cb46d59c90af",
+          "store.py": "sha256:f2e4a5e225d8fdf1694dd4201120f5378cec590b736575992ab211448377fb9f",
+          "telemetry.py": "sha256:7f7be029598870fadfe97aab9b9683773d8c15f58cef8d6f215004d6d04f1302",
+          "upcast.py": "sha256:55dbc7d6905bc9ea87f44cd8f8013f90a0c02f0406c3865198f9d86c4f5de24b",
+          "validate.py": "sha256:b5a4bf12b50d0d1ab69c4b596fd43bd0eb59210e32cf2d5baf4e8a90dc7f8f20",
+          "verifier.py": "sha256:217d263e05e741a488021295fc73aaf35723e7e78fc6da31633b5263644d4690",
+          "viz.py": "sha256:11e0c96f0dacb6a125cb55bc12f98e6f1d4ec89806096612cac558d946cc0f8e",
+          "wip.py": "sha256:f02d620961fafec517ce7ab76cd2521ddbe833e9e780420a8d6329e104d39358"
+        }
+      },
+      "django_hub": {
+        "source": "adapters/django/hub",
+        "destination": "hub",
+        "tree_sha256": "sha256:926f3e7eb591d8731656d7e9374941da48db3006fd4f38a0fbf28838995c35f2",
+        "files": {
+          "__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "admin.py": "sha256:b6584138a3a892eee34c2531b2fe6f2ad1c59daca88bc8f14c230235b5d5fe67",
+          "agent_card.py": "sha256:267232f3ccd8e635daae94d4ad0e4b8412e7b1d629b78fc37068d80baa003d0d",
+          "apps.py": "sha256:c2ae7897ed5af26ce89817ba0e239ffe758439e510dbe4812b130db0da5dee03",
+          "delivery.py": "sha256:b798a94c048e4df641aea14ceee0cd382c08c60acb1b7586e3772fc94d07cc28",
+          "hub_api.py": "sha256:248fa856d7285fd9c1519e0505482092331ef2e7f03c279f3af14244b8837e1c",
+          "hub_app.py": "sha256:3919a7365bd549f5b29b4c237c2cc1fb2130f8982baa1cd2d39434107e25a199",
+          "hub_write.py": "sha256:4ef9383a30a8e12433fa6ad97e2bfde2c97e3d317bb7d8c41c566db52e3c87b4",
+          "hubsite.py": "sha256:06c9d67482f645c64738b135a887a360f7a8ae770a92a2098e3d564959c9ac5f",
+          "management/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "management/commands/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "management/commands/hubaudit.py": "sha256:cf64832fbfc3697f6795ff0f5158a8c78e51755ca6b108a7e7c5635210fa8cfa",
+          "management/commands/hubimport.py": "sha256:8a5b56bd6f1ea5bacd9e9eab7061ab1a600d3d1c9639d0675ca75d06afd253e5",
+          "management/commands/hubmaterialize.py": "sha256:f4f005183b54842fe27f60361549407b0cc860da515572679649ca56c0fc47a9",
+          "management/commands/seedhub.py": "sha256:5b6cde9ad4fb563be5c57c0563255cbce85faadcef4d59ccd52cdee2341f4191",
+          "mcp_server.py": "sha256:d17fcb218ad941ed003503d7764a48afe59ee43ad14f95d2768e27d58635ca50",
+          "middleware.py": "sha256:42d301c58f8b610dddb8d328b4d98c6d8fa1850819f83e2aebf6ce960ed0ceb4",
+          "realtime.py": "sha256:a36e3b0c2672315a5cc7cefce59125b4b6cad15b4190b5be5faa11657a8d094d",
+          "urls.py": "sha256:e316577d4c3b82df532918a89659a18ba34cc99c885be8e4b86023502f86a26c"
+        },
+        "installed_files": {
+          "__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "admin.py": "sha256:b6584138a3a892eee34c2531b2fe6f2ad1c59daca88bc8f14c230235b5d5fe67",
+          "agent_card.py": "sha256:267232f3ccd8e635daae94d4ad0e4b8412e7b1d629b78fc37068d80baa003d0d",
+          "apps.py": "sha256:c2ae7897ed5af26ce89817ba0e239ffe758439e510dbe4812b130db0da5dee03",
+          "delivery.py": "sha256:b798a94c048e4df641aea14ceee0cd382c08c60acb1b7586e3772fc94d07cc28",
+          "hub_api.py": "sha256:248fa856d7285fd9c1519e0505482092331ef2e7f03c279f3af14244b8837e1c",
+          "hub_app.py": "sha256:3919a7365bd549f5b29b4c237c2cc1fb2130f8982baa1cd2d39434107e25a199",
+          "hub_write.py": "sha256:4ef9383a30a8e12433fa6ad97e2bfde2c97e3d317bb7d8c41c566db52e3c87b4",
+          "hubsite.py": "sha256:06c9d67482f645c64738b135a887a360f7a8ae770a92a2098e3d564959c9ac5f",
+          "management/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "management/commands/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "management/commands/hubaudit.py": "sha256:cf64832fbfc3697f6795ff0f5158a8c78e51755ca6b108a7e7c5635210fa8cfa",
+          "management/commands/hubimport.py": "sha256:8a5b56bd6f1ea5bacd9e9eab7061ab1a600d3d1c9639d0675ca75d06afd253e5",
+          "management/commands/hubmaterialize.py": "sha256:f4f005183b54842fe27f60361549407b0cc860da515572679649ca56c0fc47a9",
+          "management/commands/seedhub.py": "sha256:5b6cde9ad4fb563be5c57c0563255cbce85faadcef4d59ccd52cdee2341f4191",
+          "mcp_server.py": "sha256:d17fcb218ad941ed003503d7764a48afe59ee43ad14f95d2768e27d58635ca50",
+          "middleware.py": "sha256:42d301c58f8b610dddb8d328b4d98c6d8fa1850819f83e2aebf6ce960ed0ceb4",
+          "realtime.py": "sha256:a36e3b0c2672315a5cc7cefce59125b4b6cad15b4190b5be5faa11657a8d094d",
+          "urls.py": "sha256:e316577d4c3b82df532918a89659a18ba34cc99c885be8e4b86023502f86a26c"
+        }
+      },
+      "project_schema": {
+        "source": "PROJECT/schema",
+        "destination": "PROJECT/schema",
+        "tree_sha256": "sha256:4065d9b5b6172b4485727e9590f6b6b0d331b527b6d4dc2ddfd04fce29e5d434",
+        "files": {
+          "adr.schema.json": "sha256:3fd1a5eadfc9e4409572ff1b1cec89373d3d3e7dd81374e0b55fdb3e8f22868f",
+          "cap.schema.json": "sha256:388e2503ad79531098f184ad1419cf9d9359ee1bef5b2d3e665e16e091201051",
+          "common.schema.json": "sha256:8df0f2250e0e6f68364247261ebea2db8ea89cf7cd7d530fe18565e9091960db",
+          "deploy.schema.json": "sha256:a80ae69d7bf3a241bf30fc6786eb58d42f008e15f803dc8d2f7f2a88b25cea13",
+          "feat.schema.json": "sha256:f288fc0cf33199d8efeffbaa1b4df4a541e0160b2f3199404a38100445542353",
+          "gap.schema.json": "sha256:567f89d37ad8481aa00b54576e5bc39327a64e9235d5e64f2b6025a138bae354",
+          "note.schema.json": "sha256:ab84dee085994c97b0e8a0eeb998add11f1ca9b18d5ef8d47a44f57b21bac556",
+          "task.schema.json": "sha256:33a9926122361bbc38fe8ee0714126339023c972f763043d8fc3f621747bb5ea"
+        },
+        "installed_files": {
+          "adr.schema.json": "sha256:3fd1a5eadfc9e4409572ff1b1cec89373d3d3e7dd81374e0b55fdb3e8f22868f",
+          "cap.schema.json": "sha256:388e2503ad79531098f184ad1419cf9d9359ee1bef5b2d3e665e16e091201051",
+          "common.schema.json": "sha256:8df0f2250e0e6f68364247261ebea2db8ea89cf7cd7d530fe18565e9091960db",
+          "deploy.schema.json": "sha256:a80ae69d7bf3a241bf30fc6786eb58d42f008e15f803dc8d2f7f2a88b25cea13",
+          "feat.schema.json": "sha256:f288fc0cf33199d8efeffbaa1b4df4a541e0160b2f3199404a38100445542353",
+          "gap.schema.json": "sha256:567f89d37ad8481aa00b54576e5bc39327a64e9235d5e64f2b6025a138bae354",
+          "note.schema.json": "sha256:ab84dee085994c97b0e8a0eeb998add11f1ca9b18d5ef8d47a44f57b21bac556",
+          "task.schema.json": "sha256:33a9926122361bbc38fe8ee0714126339023c972f763043d8fc3f621747bb5ea"
+        }
+      },
+      "project_contracts": {
+        "source": [
+          "PROJECT/HUB-QUALITY.md",
+          "PROJECT/DOCTRINE.md"
+        ],
+        "destination": "PROJECT",
+        "tree_sha256": "sha256:aef65001b9c218fa2c21d945eefe7836f251f76814f9e64a69de2b89e229813d",
+        "files": {
+          "DOCTRINE.md": "sha256:42c2bc02042629031b0bcf9e0de02da8d741107895d6fbbc67558e4ef15cf285",
+          "HUB-QUALITY.md": "sha256:556b2fd65322b3c2228082b729ae772d2325f2e72fb841fbe10efe3c43fb2fbb"
+        },
+        "installed_files": {
+          "DOCTRINE.md": "sha256:ebcb43a5de55bcc1a5732c2c48b555524a0e07a2588d5f568e996ed83d797ea7",
+          "HUB-QUALITY.md": "sha256:556b2fd65322b3c2228082b729ae772d2325f2e72fb841fbe10efe3c43fb2fbb"
+        },
+        "managed_prefixes": {
+          "DOCTRINE.md": "sha256:42c2bc02042629031b0bcf9e0de02da8d741107895d6fbbc67558e4ef15cf285"
+        }
+      }
+    }
+  }
+}
