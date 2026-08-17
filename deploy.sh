@@ -9,6 +9,17 @@ cd "$(dirname "$0")"
 APP="$(basename "$(pwd)")"
 CODE_ROOT="$(dirname "$(pwd)")"
 
+# The operator may invoke this from WSL (python3) or Git Bash/Windows (python). Resolve the
+# interpreter once before allocating a release worktree so a missing alias cannot strand a build.
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+  PYTHON=python
+else
+  echo "ERROR: deploy.sh requires python3 or python for release stamping" >&2
+  exit 2
+fi
+
 git rev-parse --git-dir >/dev/null 2>&1 \
   || { echo "ERROR: not a git repo — a Plot deploys its HEAD. Run: git init -b main && git add -A && git commit -m genesis" >&2; exit 2; }
 if [ -n "$(git status --porcelain)" ]; then
@@ -28,7 +39,7 @@ printf '%s\n' "$SHA" > "$WT/app/build_sha.txt"   # baked into the image pre-buil
 
 # The Hub reads its deploy closure from the release artifact, not this checkout. Stamp the detached
 # build context before offbox-deploy exports it so the live Hub can prove deployed == served == HEAD.
-python - "$WT/PROJECT/state.json" "$SHA" "https://${APP}.zacoberg.com/" <<'PY'
+"$PYTHON" - "$WT/PROJECT/state.json" "$SHA" "https://${APP}.zacoberg.com/" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 d = {}
@@ -53,7 +64,7 @@ printf '%s\n' "$SHA" > app/build_sha.txt   # local stamp so the running checkout
 
 # Deploy record (uncommitted stamp): PROJECT/state.json feeds the hub's computed coherence, so
 # 'no deploy record' stops being flagged and served==deployed==HEAD becomes checkable.
-python - "$SHA" "https://${APP}.zacoberg.com/" <<'PY'
+"$PYTHON" - "$SHA" "https://${APP}.zacoberg.com/" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path("PROJECT/state.json")
 d = {}
