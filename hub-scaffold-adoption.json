@@ -16,10 +16,10 @@
   },
   "adopted_from": {
     "repository": "https://github.com/ZacTallberg/hub-scaffold.git",
-    "commit": "3c3f201c377823176b72d919a65a710d7f93319b",
+    "commit": "b205c249b65897918858a8ba2eed50a442b50f19",
     "managed_tree_dirty": false,
-    "recorded_at": "2026-08-17T02:17:51+00:00",
-    "tree_sha256": "sha256:ec643ed4793c8b0684cbb781f206fe7118f59b296ef7b78aa7295ea0e310b2cb",
+    "recorded_at": "2026-08-17T02:33:57+00:00",
+    "tree_sha256": "sha256:051b2fe0ea5071cb66e3052d80ffb9f3163b4c4a8eb4e03cb576157de8e7a816",
     "units": {
       "hub_core": {
         "source": "hub_core",
@@ -109,11 +109,11 @@
       "django_hub": {
         "source": "adapters/django/hub",
         "destination": "hub",
-        "tree_sha256": "sha256:926f3e7eb591d8731656d7e9374941da48db3006fd4f38a0fbf28838995c35f2",
+        "tree_sha256": "sha256:30c3df2f6280b2f277b277d56b3899fab6878da3587c9a46b77a3efb47a23b8b",
         "files": {
           "__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
           "admin.py": "sha256:b6584138a3a892eee34c2531b2fe6f2ad1c59daca88bc8f14c230235b5d5fe67",
-          "agent_card.py": "sha256:267232f3ccd8e635daae94d4ad0e4b8412e7b1d629b78fc37068d80baa003d0d",
+          "agent_card.py": "sha256:6a0335c0f384d9b38b023f10a5854e0b3018cfece8e6de5fd000cf10e141b09b",
           "apps.py": "sha256:c2ae7897ed5af26ce89817ba0e239ffe758439e510dbe4812b130db0da5dee03",
           "delivery.py": "sha256:b798a94c048e4df641aea14ceee0cd382c08c60acb1b7586e3772fc94d07cc28",
           "hub_api.py": "sha256:248fa856d7285fd9c1519e0505482092331ef2e7f03c279f3af14244b8837e1c",
@@ -134,7 +134,7 @@
         "installed_files": {
           "__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
           "admin.py": "sha256:b6584138a3a892eee34c2531b2fe6f2ad1c59daca88bc8f14c230235b5d5fe67",
-          "agent_card.py": "sha256:267232f3ccd8e635daae94d4ad0e4b8412e7b1d629b78fc37068d80baa003d0d",
+          "agent_card.py": "sha256:6a0335c0f384d9b38b023f10a5854e0b3018cfece8e6de5fd000cf10e141b09b",
           "apps.py": "sha256:c2ae7897ed5af26ce89817ba0e239ffe758439e510dbe4812b130db0da5dee03",
           "delivery.py": "sha256:b798a94c048e4df641aea14ceee0cd382c08c60acb1b7586e3772fc94d07cc28",
           "hub_api.py": "sha256:248fa856d7285fd9c1519e0505482092331ef2e7f03c279f3af14244b8837e1c",
