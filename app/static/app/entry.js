@@ -53,6 +53,8 @@ const GLSL_PRELUDE = `
   uniform float uPulse;
   uniform float uPulseType;
   uniform vec2 uPointer;
+  uniform vec2 uPulseCenter;
+  uniform vec2 uStir;
 
   mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
   float idOf(vec3 o) { return fract(sin(dot(o, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
@@ -148,17 +150,21 @@ const buildSimFragment = (formDef) => `
     float pointerDistance = max(length(pointerDelta), 0.12);
     vec3 pointerDirection = normalize(vec3(pointerDelta, pos.z * 0.2));
     velocity += pointerDirection * (0.0018 * FORM_POINTER / pointerDistance);
+    velocity.xy += uStir * (0.16 * FORM_POINTER / (pointerDistance * pointerDistance + 0.4));
 
+    vec2 pulseDelta = pos.xy - uPulseCenter;
+    float pulseDistance = max(length(pulseDelta), 0.12);
+    vec3 pulseDirection = normalize(vec3(pulseDelta, pos.z * 0.2));
     if (uPulse > 0.001) {
-      float falloff = 1.0 / (pointerDistance + 0.18);
+      float falloff = 1.0 / (pulseDistance + 0.18);
       if (uPulseType < 0.5) {
-        velocity += pointerDirection * 0.035 * falloff * uPulse * FORM_POINTER;
+        velocity += pulseDirection * 0.035 * falloff * uPulse * FORM_POINTER;
       } else if (uPulseType < 1.5) {
-        velocity -= pointerDirection * 0.025 * falloff * uPulse * FORM_POINTER;
+        velocity -= pulseDirection * 0.025 * falloff * uPulse * FORM_POINTER;
       } else if (uPulseType < 2.5) {
-        velocity += vec3(-pointerDirection.y, pointerDirection.x, 0.03) * 0.04 * falloff * uPulse * FORM_POINTER;
+        velocity += vec3(-pulseDirection.y, pulseDirection.x, 0.03) * 0.04 * falloff * uPulse * FORM_POINTER;
       } else {
-        velocity += curlNoise(pos) * 0.055 * uPulse + pointerDirection * 0.02 * falloff * uPulse * FORM_POINTER;
+        velocity += curlNoise(pos) * 0.055 * uPulse + pulseDirection * 0.02 * falloff * uPulse * FORM_POINTER;
       }
     }
 
@@ -447,6 +453,10 @@ class ParticleField {
     this.envelope = { inhale: 0.48, exhale: 2.35, peak: 2.35 };
     this.pointerTarget = new THREE.Vector2(0, 0);
     this.pointer = new THREE.Vector2(0, 0);
+    this.stir = new THREE.Vector2(0, 0);
+    this.stirTarget = new THREE.Vector2(0, 0);
+    this.pulseAnchor = null;
+    this.lastBreath = 0;
     this.clock = new THREE.Clock();
     this.lastFrame = 0;
     this.materialCache = new Map();
@@ -543,6 +553,8 @@ class ParticleField {
         uSeed: { value: 0 },
         uEnergy: { value: 0.5 },
         uDt: { value: 1 },
+        uPulseCenter: { value: new THREE.Vector2(0, 0) },
+        uStir: { value: new THREE.Vector2(0, 0) },
       },
     });
     const js = formDef.js || {};
@@ -565,6 +577,8 @@ class ParticleField {
         uEnergy: { value: 0.5 },
         uGlowAmt: { value: js.pointerGlow ? 0.85 : 0.0 },
         uDt: { value: 1 },
+        uPulseCenter: { value: new THREE.Vector2(0, 0) },
+        uStir: { value: new THREE.Vector2(0, 0) },
       },
       transparent: true,
       blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
@@ -681,13 +695,36 @@ class ParticleField {
   }
 
   setPointer(x, y) {
-    this.pointerTarget.set(x * 2.2, y * 1.45);
+    const nx = x * 2.2;
+    const ny = y * 1.45;
+    const now = performance.now();
+    if (this.lastPointerAt) {
+      const dtMs = Math.max(8, now - this.lastPointerAt);
+      const vx = (nx - this.pointerTarget.x) / dtMs * 16.7;
+      const vy = (ny - this.pointerTarget.y) / dtMs * 16.7;
+      this.stirTarget.set(clamp(vx, -0.9, 0.9), clamp(vy, -0.9, 0.9));
+      this.animatedUntil = Math.max(this.animatedUntil, now + 900);
+    }
+    this.lastPointerAt = now;
+    this.pointerTarget.set(nx, ny);
   }
 
-  excite(kind, energy = 1) {
+  ripple(x, y, energy = 1.4) {
+    this.pulseAnchor = new THREE.Vector2(x * 2.2, y * 1.45);
+    this.pulseType = 0;
+    this.pulse = Math.max(this.pulse, clamp(energy, 0.4, 2.8));
+    this.animatedUntil = Math.max(this.animatedUntil, performance.now() + 1600);
+  }
+
+  anchorPulses(vec) {
+    this.pulseAnchor = vec;
+  }
+
+  excite(kind, energy = 1, anchor = null) {
     const types = { outward: 0, inward: 1, orbit: 2, scatter: 3 };
     this.pulseType = types[kind] ?? 0;
     this.pulse = Math.max(this.pulse, clamp(energy, 0.25, 2.8));
+    this.pulseAnchor = anchor;
     this.animatedUntil = Math.max(this.animatedUntil, performance.now() + 1400);
   }
 
@@ -738,7 +775,20 @@ class ParticleField {
     this.governFidelity(now, interacting);
     const time = this.clock.getElapsedTime();
     this.pointer.lerp(this.pointerTarget, 0.055);
+    this.stir.lerp(this.stirTarget, 0.12);
+    this.stirTarget.multiplyScalar(Math.pow(0.82, dt));
     this.pulse *= Math.pow(0.91, dt);
+
+    if (!interacting && now - (this.lastBreath || 0) > 16000) {
+      this.lastBreath = now;
+      this.pulseType = 3;
+      this.pulse = Math.max(this.pulse, 0.55);
+      this.pulseAnchor = null;
+    }
+
+    this.camera.position.x += (this.pointer.x * 0.14 - this.camera.position.x) * 0.03;
+    this.camera.position.y += (this.pointer.y * 0.1 - this.camera.position.y) * 0.03;
+    this.camera.lookAt(0, 0, 0);
 
     let releaseForce = 0;
     if (this.releaseStarted) {
@@ -771,6 +821,8 @@ class ParticleField {
     su.uPulse.value = this.pulse;
     su.uPulseType.value = this.pulseType;
     su.uRelease.value = releaseForce;
+    su.uStir.value.copy(this.stir);
+    su.uPulseCenter.value.copy(this.pulseAnchor || this.pointer);
     this.simQuad.material = this.simMaterial;
     su.tPositions.value = this.targetA.texture;
     this.renderer.setRenderTarget(this.targetB);
@@ -961,7 +1013,12 @@ function onInput(event) {
     return;
   }
   setState('writing', 'listening');
-  field?.excite(classifyInput(event), event.inputType === 'insertFromPaste' ? 2.4 : clamp(1.85 - cadence / 1000, .8, 1.8));
+  if (field) {
+    const box = text.getBoundingClientRect();
+    const ax = ((box.left + box.width / 2) / window.innerWidth - .5) * 2.2;
+    const ay = (.5 - (box.top + box.height / 2) / window.innerHeight) * 1.45;
+    field.excite(classifyInput(event), event.inputType === 'insertFromPaste' ? 2.4 : clamp(1.85 - cadence / 1000, .8, 1.8), new THREE.Vector2(ax, ay));
+  }
   if (!composing) scheduleRelease();
 }
 
@@ -985,6 +1042,7 @@ function beginRelease() {
   releaseButton.disabled = true;
   releaseButton.setAttribute('aria-busy', 'true');
   setState('releasing', 'letting go');
+  field?.warmForm(chosen.form);
   field?.release(length, energy);
 
   const inhaleMs = field ? field.envelope.inhale * 1000 : 480;
@@ -1062,6 +1120,20 @@ document.addEventListener('pointermove', (event) => {
   const y = .5 - (event.clientY / window.innerHeight);
   field?.setPointer(x, y);
 }, { passive: true });
+
+document.addEventListener('pointerdown', (event) => {
+  if (event.target.closest('.composer, .site-mark, .quiet-footer')) return;
+  const x = (event.clientX / window.innerWidth) - .5;
+  const y = .5 - (event.clientY / window.innerHeight);
+  field?.ripple(x, y, event.pointerType === 'touch' ? 1.7 : 1.4);
+}, { passive: true });
+
+if (window.DeviceOrientationEvent && !finePointer.matches && typeof DeviceOrientationEvent.requestPermission !== 'function') {
+  window.addEventListener('deviceorientation', (event) => {
+    if (event.gamma == null || event.beta == null) return;
+    field?.setPointer(clamp(event.gamma / 60, -0.5, 0.5), clamp((event.beta - 45) / -70, -0.5, 0.5));
+  }, { passive: true });
+}
 
 document.addEventListener('visibilitychange', () => {
   field?.setActive(document.visibilityState === 'visible');
