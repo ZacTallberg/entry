@@ -9,13 +9,16 @@ cd "$(dirname "$0")"
 APP="$(basename "$(pwd)")"
 CODE_ROOT="$(dirname "$(pwd)")"
 
-# The operator may invoke this from WSL (python3) or Git Bash/Windows (python). Resolve the
-# interpreter once before allocating a release worktree so a missing alias cannot strand a build.
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON=python3
-elif command -v python >/dev/null 2>&1; then
-  PYTHON=python
-else
+# Resolve a working interpreter, not merely an App Execution Alias that exists on PATH but opens
+# the Microsoft Store. Prefer the proven Windows/Git-Bash runtime, with python3 as the WSL fallback.
+PYTHON=""
+for candidate in python python3; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import sys" >/dev/null 2>&1; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+if [ -z "$PYTHON" ]; then
   echo "ERROR: deploy.sh requires python3 or python for release stamping" >&2
   exit 2
 fi
