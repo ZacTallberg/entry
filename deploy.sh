@@ -7,6 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 APP="$(basename "$(pwd)")"
+CODE_ROOT="$(dirname "$(pwd)")"
 
 git rev-parse --git-dir >/dev/null 2>&1 \
   || { echo "ERROR: not a git repo — a Plot deploys its HEAD. Run: git init -b main && git add -A && git commit -m genesis" >&2; exit 2; }
@@ -27,7 +28,7 @@ printf '%s\n' "$SHA" > "$WT/app/build_sha.txt"   # baked into the image pre-buil
 
 (cd "$WT" \
   && bash ./provision.sh "$APP" \
-  && bash /c/code/_deploy/offbox-deploy.sh --app "$APP" \
+  && bash "$CODE_ROOT/_deploy/offbox-deploy.sh" --app "$APP" \
        --canary "https://${APP}.zacoberg.com/" --expect "build-$SHA")
 
 git worktree remove --force "$WT"
