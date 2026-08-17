@@ -4,6 +4,7 @@ let THREE;
 let EffectComposer;
 let RenderPass;
 let UnrealBloomPass;
+let OutputPass;
 let graphicsModules;
 
 const body = document.body;
@@ -198,21 +199,17 @@ const buildRenderVertex = (formDef) => `
   }
 `;
 
-const buildRenderFragment = (formDef) => `
-  ${formDef.defines || ''}
-  #ifndef FORM_SOFT
-  #define FORM_SOFT 1.6
-  #endif
-  #ifndef FORM_ALPHA
-  #define FORM_ALPHA 0.68
-  #endif
+const buildRenderFragment = () => `
+  uniform float uExposure;
+  uniform float uSoft;
+  uniform float uAlpha;
   varying vec3 vColor;
   void main() {
     vec2 point = gl_PointCoord - 0.5;
     float radius = length(point);
     if (radius > 0.5) discard;
-    float alpha = pow(1.0 - radius * 2.0, FORM_SOFT) * FORM_ALPHA;
-    gl_FragColor = vec4(vColor, alpha);
+    float alpha = pow(1.0 - radius * 2.0, uSoft) * uAlpha;
+    gl_FragColor = vec4(vColor * uExposure, alpha);
   }
 `;
 
@@ -467,17 +464,19 @@ class ParticleField {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
 
     const renderPass = new RenderPass(this.scene, this.camera);
     this.bloom = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      narrow ? 1.15 : 1.42,
-      0.52,
-      0.16,
+      narrow ? 1.0 : 1.2,
+      0.5,
+      0.38,
     );
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(renderPass);
     this.composer.addPass(this.bloom);
+    this.composer.addPass(new OutputPass());
 
     this.simScene = new THREE.Scene();
     this.simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -545,12 +544,15 @@ class ParticleField {
     const js = formDef.js || {};
     const renderMaterial = new THREE.ShaderMaterial({
       vertexShader: buildRenderVertex(formDef),
-      fragmentShader: buildRenderFragment(formDef),
+      fragmentShader: buildRenderFragment(),
       uniforms: {
         tPositions: { value: null },
         tOrigin: { value: null },
         uTime: { value: 0 },
         uPointSize: { value: this.basePointSize() * (js.size || 1) },
+        uExposure: { value: 1.7 },
+        uSoft: { value: js.soft || 1.6 },
+        uAlpha: { value: Math.min(0.92, (js.alpha || 0.68) * 1.08) },
         uPointer: { value: new THREE.Vector2(0, 0) },
         uPulse: { value: 0 },
         uPulseType: { value: 0 },
@@ -611,11 +613,12 @@ class ParticleField {
     this.simMaterial.uniforms.uSeed.value = ((seedHash >>> 0) % 997) * 0.37;
     this.renderMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
     this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * (js.size || 1);
-    this.bloom.strength = (this.narrow ? 1.05 : 1.3) * (js.bloom || 1.2);
+    this.baseBloom = (this.narrow ? 1.0 : 1.2) * (js.bloom || 1.2);
+    this.bloom.strength = this.baseBloom;
     this.particles.material = this.renderMaterial;
 
     const primeValues = fromCenter
-      ? this.originValues.map((v, i) => (i % 4 === 3 ? 1 : v * 0.05 + (Math.random() - 0.5) * 0.03))
+      ? this.originValues.map((v, i) => (i % 4 === 3 ? 1 : v * 0.3 + (Math.random() - 0.5) * 0.08))
       : this.originValues;
     const prime = new THREE.DataTexture(primeValues instanceof Float32Array ? primeValues : new Float32Array(primeValues), size, size, THREE.RGBAFormat, THREE.FloatType);
     prime.needsUpdate = true;
@@ -632,7 +635,7 @@ class ParticleField {
   }
 
   basePointSize() {
-    return window.innerWidth < 640 ? 3.8 : 4.4;
+    return (window.innerWidth < 640 ? 3.8 : 4.4) * 1.15;
   }
 
   contextLost(event) {
@@ -691,10 +694,13 @@ class ParticleField {
       this.raf = requestAnimationFrame(this.frame);
       return;
     }
+    const frameGap = this.prevFrameAt ? now - this.prevFrameAt : 16.7;
+    this.prevFrameAt = now;
     this.lastFrame = now;
+    const steps = Math.max(1, Math.min(6, Math.round(frameGap / 16.7)));
     const time = this.clock.getElapsedTime();
     this.pointer.lerp(this.pointerTarget, 0.055);
-    this.pulse *= 0.91;
+    this.pulse *= Math.pow(0.91, steps);
 
     let releaseForce = 0;
     if (this.releaseStarted) {
@@ -710,22 +716,35 @@ class ParticleField {
       }
     }
 
+    let exposure = 1.45;
+    if (this.releaseStarted) {
+      const surgePhase = Math.min(1, ((now - this.releaseStarted) / 1000) / (this.envelope.inhale + 0.7));
+      const surge = Math.sin(surgePhase * Math.PI);
+      exposure += surge * 0.95;
+      this.bloom.strength = (this.baseBloom || 1.2) * (1 + surge * 0.6);
+    } else if (this.baseBloom) {
+      this.bloom.strength += (this.baseBloom - this.bloom.strength) * 0.08;
+    }
+
     const su = this.simMaterial.uniforms;
     su.uTime.value = time;
     su.uPointer.value.copy(this.pointer);
     su.uPulse.value = this.pulse;
     su.uPulseType.value = this.pulseType;
     su.uRelease.value = releaseForce;
-    su.tPositions.value = this.targetA.texture;
     this.simQuad.material = this.simMaterial;
-    this.renderer.setRenderTarget(this.targetB);
-    this.renderer.render(this.simScene, this.simCamera);
-    [this.targetA, this.targetB] = [this.targetB, this.targetA];
+    for (let step = 0; step < steps; step += 1) {
+      su.tPositions.value = this.targetA.texture;
+      this.renderer.setRenderTarget(this.targetB);
+      this.renderer.render(this.simScene, this.simCamera);
+      [this.targetA, this.targetB] = [this.targetB, this.targetA];
+    }
     const ru = this.renderMaterial.uniforms;
     ru.tPositions.value = this.targetA.texture;
     ru.uTime.value = time;
     ru.uPointer.value.copy(this.pointer);
     ru.uRelease.value = releaseForce;
+    ru.uExposure.value = exposure;
     this.renderer.setRenderTarget(null);
     this.composer.render();
     this.raf = requestAnimationFrame(this.frame);
@@ -790,13 +809,15 @@ async function initializeField() {
       import('three/addons/postprocessing/EffectComposer.js'),
       import('three/addons/postprocessing/RenderPass.js'),
       import('three/addons/postprocessing/UnrealBloomPass.js'),
+      import('three/addons/postprocessing/OutputPass.js'),
     ]);
-    const [threeModule, composerModule, renderPassModule, bloomModule] = await graphicsModules;
+    const [threeModule, composerModule, renderPassModule, bloomModule, outputModule] = await graphicsModules;
     if (generation !== fieldGeneration || reducedMotion.matches) return;
     THREE = threeModule;
     EffectComposer = composerModule.EffectComposer;
     RenderPass = renderPassModule.RenderPass;
     UnrealBloomPass = bloomModule.UnrealBloomPass;
+    OutputPass = outputModule.OutputPass;
     field = new ParticleField(canvas);
     body.dataset.graphics = 'webgl';
   } catch (_error) {
@@ -899,7 +920,7 @@ function onInput(event) {
     return;
   }
   setState('writing', 'listening');
-  field?.excite(classifyInput(event), event.inputType === 'insertFromPaste' ? 2.1 : clamp(1.45 - cadence / 1000, .55, 1.35));
+  field?.excite(classifyInput(event), event.inputType === 'insertFromPaste' ? 2.4 : clamp(1.85 - cadence / 1000, .8, 1.8));
   if (!composing) scheduleRelease();
 }
 
@@ -928,10 +949,12 @@ function beginRelease() {
   const inhaleMs = field ? field.envelope.inhale * 1000 : 480;
   const swapAt = reducedMotion.matches ? 200 : Math.max(360, inhaleMs);
 
+  const formNumber = FORMS.indexOf(chosen.form) + 1;
+  const revealLine = `it became — ${chosen.form.name} · № ${formNumber} of fifty`;
   swapTimer = window.setTimeout(() => {
     body.dataset.form = chosen.form.slug;
     field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash });
-    setState('releasing', `it became — ${chosen.form.name}`);
+    setState('releasing', revealLine);
   }, swapAt);
 
   clearTimer = window.setTimeout(() => {
@@ -945,7 +968,7 @@ function beginRelease() {
     text.readOnly = false;
     releaseButton.removeAttribute('aria-busy');
     field?.settle();
-    setState('returned', `it became — ${chosen.form.name}`);
+    setState('returned', revealLine);
     if (finePointer.matches && document.visibilityState === 'visible') text.focus({ preventScroll: true });
   }, reducedMotion.matches ? 420 : Math.max(2200, swapAt + 1500));
 

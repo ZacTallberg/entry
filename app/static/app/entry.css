@@ -235,6 +235,8 @@ body[data-state="holding"] .invitation {
 }
 
 body[data-state="releasing"] .invitation { opacity: 0; }
+body[data-state="releasing"] #entry-text::placeholder,
+body[data-state="returned"] #entry-text::placeholder { opacity: 0; }
 
 .writing-field {
   position: relative;
