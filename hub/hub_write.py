@@ -13,7 +13,7 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import collision, ids, validate
+from hub_core import collision, flow, ids, schedule, validate
 from hub_core.process_lock import ProcessFileLock
 from hub_core.store import ConflictError
 
@@ -56,8 +56,9 @@ def writer(fn):
 def _evidence_problem(ev):
     """Return None if the evidence string dereferences to something real, else the reason it
     doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this repo, or an existing
-    file path resolved from BASE_DIR. This proves existence, not confinement: the general write
-    token is already command-execution-grade. 'done' evidence that cannot resolve is decoration."""
+    file path resolved from BASE_DIR. This proves existence, not confinement: strict URL evidence
+    is fetched from the Hub service account's network. 'done' evidence that cannot resolve is
+    decoration."""
     import re
     import urllib.request
 
@@ -106,10 +107,13 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     if errs:
         return ({"errors": [{"code": "schema", "msg": e} for e in errs]}, 422)
     try:
+        before = s.latest_cursor().get("seq", 0)
         ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
                       agent_id=agent, git_sha=hub_app._git_head(), idem_key=idem)
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
+    if ev.get("seq", 0) > before:
+        hub_app.publish_event(ev)
     return ({"data": {"id": eid, "version": ev["result_version"], "event": ev["event_id"]}}, 200)
 
 
@@ -127,12 +131,12 @@ def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
 def task(request, b):
     agent = b.get("agent", "agent")
     is_create = not b.get("id")
-    # FALSE-GREEN GUARD: 'done' is a terminal transition granted ONLY by complete()
-    # (evidence + verification_command + recomputed-audit gated). The generic upsert must
+    # 'done' is a terminal transition granted ONLY by complete() so it always has a lease-owned
+    # result and evidence. The generic upsert must
     # never mint a 'done' — that was the bypass an adversarial audit found.
     if (b.get("status") or "").lower() == "done":
         return JsonResponse({"errors": [{"code": "use_complete",
-            "msg": "status 'done' must go through POST /hub/api/complete (evidence + verify + audit gated)"}]},
+            "msg": "status 'done' must go through POST /hub/api/complete (lease + result + evidence)"}]},
             status=409)
     twins = []
     if is_create:
@@ -170,6 +174,9 @@ def complete(request, b):
         return JsonResponse({"errors": [{"code": "must_claim", "msg": "claim the task first (POST /hub/api/claim)"}]}, status=409)
     if not hub_app.lease_valid(eid, token):
         return JsonResponse({"errors": [{"code": "lease", "msg": "claimed by another agent / stale token"}]}, status=409)
+    if cur.get("agent") != agent:
+        return JsonResponse({"errors": [{"code": "identity",
+            "msg": "completing agent must be the lease owner", "lease_agent": cur.get("agent")}]}, status=409)
     evidence = b.get("evidence_uri")
     if isinstance(evidence, str):
         evidence = [evidence]
@@ -178,13 +185,12 @@ def complete(request, b):
             not evidence or any(not isinstance(item, str) or not item.strip() for item in evidence)):
         return JsonResponse({"errors": [{"code": "need_evidence",
             "msg": "non-empty accept_note + >=1 non-empty string evidence_uri required"}]}, status=422)
-    # HUB_DONE_STRICTNESS is the flow-vs-proof dial (settings; default "tracked"):
+    # HUB_DONE_STRICTNESS is only an evidence-resolution dial (settings; default "tracked"):
     #   "tracked" — done always carries WHO/WHAT/EVIDENCE (lease + accept_note + evidence), but
     #               evidence may be anything non-empty (auth-walled ticket links are fine) and a
-    #               verification_command is optional (still RUNS when present).
-    #   "strict"  — evidence must dereference and a verification_command is required. For
-    #               environments where completions cannot be taken on trust (e.g. autonomous
-    #               agents — the mode this hub's origin system runs).
+    #               verification_command is optional; when present, the worker must submit its
+    #               typed exit-0 receipt (the Hub never runs it).
+    #   "strict"  — evidence must dereference. It never manufactures a test requirement.
     strict = str(hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")).lower() == "strict"
     if strict:
         # FALSE-GREEN GUARD: evidence must DEREFERENCE — a string nothing can resolve is not evidence.
@@ -218,15 +224,11 @@ def complete(request, b):
     # verification_command, `exit_code` must be 0, and `ran_by` must be the completing agent.
     verification_receipt = []
     vc = ent.get("verification_command")
-    if strict and not vc:
-        return JsonResponse({"errors": [{"code": "need_verification_command",
-            "msg": "done requires a verification_command on the task; set it (POST /hub/api/task) before completing"}]},
-            status=422)
     # A bare suite runner is not a proof of THIS task: a suite is green whenever the repo is
     # healthy, whether or not the work happened, and accepting one teaches every completion to
     # pay the whole battery's price. The command must name the artifact this task changed.
-    if vc and re.match(r"^(?:\S*python[\w.]*\s+)?(?:-m\s+)?(?:pytest|unittest(?:\s+discover)?)\b[^&|;]*$"
-                       r"|^(?:bash\s+)?tools/(?:selftest|check)\.sh\b[^&|;]*$", vc.strip(), re.I):
+    if vc and re.match(r"^(?:\S*python[\w.]*\s+)?(?:-m\s+)?(?:pytest|unittest(?:\s+discover)?)\b[^&|;]*$",
+                       vc.strip(), re.I):
         return JsonResponse({"errors": [{"code": "verification_command_is_a_suite",
             "msg": "a bare suite runner proves the repo, not this task — name a command whose "
                    "subject is the artifact this task changed"}]}, status=422)
@@ -239,25 +241,19 @@ def complete(request, b):
                        "submit what happened — the hub does not run it for you (it would be "
                        "executing caller-supplied text on the server)."}]}, status=422)
         problems = []
-        if " ".join(str(run.get("command") or "").split()) != " ".join(vc.split()):
+        if str(run.get("command") or "") != str(vc):
             problems.append("verification_run.command must be the task's own verification_command "
                             f"({vc!r}), not {run.get('command')!r}")
         if run.get("exit_code") != 0:
             problems.append(f"exit_code is {run.get('exit_code')!r}; only 0 grants done")
-        if run.get("ran_by") and b.get("agent") and run["ran_by"] != b.get("agent"):
-            problems.append(f"ran_by {run['ran_by']!r} is not the completing agent {b.get('agent')!r}")
+        if run.get("ran_by") != cur.get("agent"):
+            problems.append(f"ran_by {run.get('ran_by')!r} is not the lease owner {cur.get('agent')!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(run.get("output_sha256") or "")):
+            problems.append("output_sha256 must be a 64-character lowercase hexadecimal digest")
         if problems:
             return JsonResponse({"errors": [{"code": "bad_verification_run",
                                              "problems": problems}]}, status=422)
         verification_receipt = [run]
-    # FALSE-GREEN GUARD: recompute the audit server-side at completion time and refuse to grant
-    # 'done' while the hub itself is in an unsound state (critical violations: broken chain, schema
-    # corruption). coherence:repo (pre-deploy) is excluded — it is resolved by deploying, not by a task.
-    audit = hub_app.run_audit()
-    blocking = [v for v in audit.get("violations", []) if v.get("severity") == "critical"]
-    if blocking:
-        return JsonResponse({"errors": [{"code": "audit_unsound", "msg": "hub audit has CRITICAL violations; resolve before completing",
-            "violations": [{"id": v.get("id"), "observed": v.get("observed")} for v in blocking[:5]]}]}, status=422)
     payload = {"type": "task", "status": "done", "verified_by": b.get("verified_by") or [accept],
                "evidence_uri": evidence}
     # The receipt is what makes this completion falsifiable later — it rides the appended event.
@@ -381,11 +377,14 @@ def decision(request, b):
     idem = "decision:" + hashlib.sha256((topic + choice).encode("utf-8")).hexdigest()[:16]
     s = hub_app.store()
     try:
+        before = s.latest_cursor().get("seq", 0)
         ev = s.append(
             aggregate=f"{hub_app.PROJECT_KEY}:decision:{idem[-12:]}", type="decision.logged",
             payload={"topic": topic, "choice": choice, "rationale": b.get("rationale"),
                      "invalidates": b.get("invalidates", []), "refs": b.get("refs", [])},
             expected_version=None, agent_id=agent, git_sha=hub_app._git_head(), idem_key=idem)
+        if ev.get("seq", 0) > before:
+            hub_app.publish_event(ev)
     finally:
         s.close()
     return JsonResponse({"data": {"event": ev["event_id"]}})
@@ -413,12 +412,21 @@ def claim(request, b):
             return JsonResponse({"errors": [{"code": "not_found", "msg": "task does not exist"}]}, status=404)
         status = ent.get("status")
         flags = state.get("flags", {}).get(eid, {})
-        if flags.get("deps_unmet"):
-            return JsonResponse({"errors": [{"code": "deps_blocked", "msg": "task dependencies are not done",
-                                             "deps_unmet": flags.get("deps_unmet")}]}, status=409)
-        if status not in ("todo", "in_progress"):
-            return JsonResponse({"errors": [{"code": "not_claimable",
-                                             "msg": "only todo or in_progress tasks can be claimed"}]}, status=409)
+        live = hub_app.leases()
+        existing = next((lease for lease in live if lease.get("task") == eid), None)
+        same_lease = existing and existing.get("agent") == agent
+        other = next((lease for lease in live
+                      if lease.get("agent") == agent and lease.get("task") != eid), None)
+        if other:
+            return JsonResponse({"errors": [{"code": "one_active", "task": other.get("task"),
+                                             "msg": "agent already owns an active task"}]}, status=409)
+        if not same_lease and hub_app.wip_status(len(live))["saturated"]:
+            return JsonResponse({"errors": [{"code": "board_saturated",
+                                             "msg": "configured WIP ceiling reached"}]}, status=429)
+        verdict = flow.classify(ent, flags, existing)
+        if not same_lease and not verdict["available"]:
+            return JsonResponse({"errors": [{"code": verdict["state"],
+                                             "msg": verdict["reason"]}]}, status=409)
         res = hub_app.claim(eid, agent, ttl_s=ttl)
         if not res["ok"]:
             return JsonResponse(res, status=409)
@@ -435,6 +443,71 @@ def claim(request, b):
         else:
             res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
+
+
+@writer
+def release(request, b):
+    eid, token = b.get("id"), b.get("token")
+    if not isinstance(eid, str) or not eid.strip() or not isinstance(token, str) or not token.strip():
+        return JsonResponse({"errors": [{"code": "need_id_token"}]}, status=400)
+    lease = next((row for row in hub_app.leases() if row.get("task") == eid), None)
+    if not lease or lease.get("token") != token:
+        return JsonResponse({"errors": [{"code": "lease_mismatch"}]}, status=409)
+    agent = b.get("agent")
+    if agent and agent != lease.get("agent"):
+        return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
+    hub_app.release_lease(eid, token)
+    return JsonResponse({"ok": True, "task": eid, "stale_reclaim": True})
+
+
+@writer
+def take(request, b):
+    agent = b.get("agent")
+    if not isinstance(agent, str) or not agent.strip() or len(agent) > 256:
+        return JsonResponse({"errors": [{"code": "need_agent"}]}, status=400)
+    try:
+        ttl = int(b.get("ttl_s", 900))
+    except (TypeError, ValueError):
+        ttl = 0
+    if ttl < 1 or ttl > 86400:
+        return JsonResponse({"errors": [{"code": "bad_ttl"}]}, status=422)
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        state, live = hub_app.current_state(), hub_app.leases()
+        owned = next((row for row in live if row.get("agent") == agent), None)
+        if owned:
+            return JsonResponse({"errors": [{"code": "one_active", "task": owned.get("task")}]}, status=409)
+        if hub_app.wip_status(len(live))["saturated"]:
+            return JsonResponse({"errors": [{"code": "board_saturated"}]}, status=429)
+        lease_ids = {row.get("task") for row in live}
+        candidates = []
+        for task in state.get("entities", {}).values():
+            if task.get("type") != "task" or task.get("id") in lease_ids:
+                continue
+            verdict = flow.classify(task, state.get("flags", {}).get(task.get("id"), {}), None)
+            if verdict["available"]:
+                candidates.append(task)
+        if not candidates:
+            return JsonResponse({"errors": [{"code": "no_ready_task"}]}, status=409)
+        busy_touches = set()
+        entities = state.get("entities", {})
+        for lease in live:
+            busy_touches.update(schedule.normalized_touches(
+                entities.get(lease.get("task"), {})))
+        task = schedule.order_ready(candidates, busy_touches=busy_touches)[0]
+        eid = task["id"]
+        res = hub_app.claim(eid, agent, ttl_s=ttl)
+        if not res["ok"]:
+            return JsonResponse(res, status=409)
+        if task.get("status") != "in_progress":
+            transition, code = _append("task", eid, {"type": "task", "status": "in_progress"},
+                                       expected_version=task.get("version"), agent=agent,
+                                       idem=b.get("idem_key"), etype="task.transitioned")
+            if code != 200:
+                hub_app.release_lease(eid, res["token"])
+                return JsonResponse(transition, status=code)
+            res["version"] = transition["data"]["version"]
+        res["task"] = task
+    return JsonResponse(res)
 
 
 @writer

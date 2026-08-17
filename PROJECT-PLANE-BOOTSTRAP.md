@@ -1,10 +1,14 @@
-# THE PROJECT PLANE — BOOTSTRAP SPECIFICATION (v1, 2026-07-02)
+# THE PROJECT PLANE — BOOTSTRAP SPECIFICATION (v1.1, 2026-08-03)
 
-**This document is fully self-contained.** Hand it to a fresh agent in any environment — no other
-files, repos, or credentials from the origin ecosystem are needed — and it can stand up the
-complete Project Plane: a verifiable, agent-operated project-management system with a
-tamper-evident source of truth, live governance, independent verification, and a crystallized
-multi-agent protocol.
+Every generated plane embeds `PROJECT/HUB-QUALITY.md`, making exceptional Hub construction a
+birthright rather than optional post-generation guidance.
+
+**This document is a self-contained specification and template set.** Hand it to a fresh agent in
+any environment and it can create the Project Plane without origin-specific files or credentials.
+The templates include contracts for independent verification, runs, deploys, and multi-agent
+coordination; those controls become active only when the adopting project implements and wires their
+runners. The `hub-scaffold` repository supplies a working filesystem Hub/Django reference binding;
+this standalone document embeds the plane templates, not that implementation's source code.
 
 Provenance: crystallized from a live-fire multi-agent campaign (2026-07) and a five-project
 quality-doctrine corpus. Template blocks below are machine-inserted from the
@@ -26,7 +30,8 @@ byte-exact.
 4. Prove the setup with §7 (the setup self-test). **The Plane is not "set up" until the seeded
    violations FAIL the gate and the clean state PASSES it.** A gate that has never failed in test
    is presumed broken.
-5. Everything in this spec is law unless your environment truly cannot provide it — in which case
+5. Everything in this spec is project policy unless your environment truly cannot provide it—in
+   which case
    record the deviation as your project's ADR-0002 (ADR-0001 is the adoption itself), with the
    compensating control.
 
@@ -81,12 +86,13 @@ provides — the roles, not the tools, are the requirement:
 history · one-canonical-store-per-fact-class. An environment that cannot provide these is not a
 binding target; it's a gap.
 
-### 2.3 Reference substrate (pure files — works anywhere)
+### 2.3 Reference substrate (the shipped filesystem Hub)
 
-If the environment provides nothing, implement this; it needs only a filesystem and any scripting
-runtime.
+The `hub-scaffold` repository implements this binding in `hub_core/` with the Django HTTP adapter in
+`adapters/django/hub/`. A standalone adopter can reproduce the same roles with any runtime, but must
+not claim the controls are active until its implementation passes §7.
 
-**Ledger** — `PROJECT/.plane/ledger.jsonl`, one event per line, append-only:
+**Ledger** — `PROJECT/.hub/events.jsonl`, one canonical-JSON event per line, append-only:
 
 ```json
 {"seq": 12, "ts": "2026-07-02T18:00:00Z", "aggregate": "myproj:task:0007",
@@ -94,24 +100,28 @@ runtime.
  "prev_hash": "<hash of event 11>", "hash": "<see below>"}
 ```
 
-- `hash` = SHA-256 hex of the canonical JSON (sorted keys, no whitespace, UTF-8) of the event
-  **without** the `hash` field. Genesis event's `prev_hash` = 64 zeros.
+- `hash` = SHA-256 hex of `prev_hash + canonical(selected event fields)`, where canonical JSON uses
+  sorted keys, no insignificant whitespace, and UTF-8. The selected field order is defined by
+  `hub_core.store._HASH_FIELDS`; genesis `prev_hash` is the empty string.
 - `verify_chain`: replay the file recomputing every hash and linking every `prev_hash`; any
   mismatch = tampering = CRITICAL.
-- Event `type` vocabulary: `<entity>.created`, `<entity>.updated`, `<entity>.amended`,
-  `task.claimed`, `task.completed`, `event.reverted` (a compensating event — the only way to undo).
+- Entity events use typed names such as `task.created`, `task.updated`, `task.transitioned`, and
+  `adr.upserted`; log-only events such as `decision.logged` remain in the stream without projecting
+  an entity. Evolve state with later events, never by editing prior lines.
 - Writes are validated BEFORE append (R2): fold the aggregate's current state, merge the payload,
   validate against the schema — reject on any violation, including the conditional rules.
+- `PROJECT/.hub/events.db` is a rebuildable SQLite index and transactional gatekeeper for aggregate
+  versions/idempotency. JSONL remains canonical.
 
 **Entities** — projections, never a store: fold events per aggregate in `seq` order,
 last-write-wins per field. Any materialized view (JSON snapshot, dashboard, markdown table)
 carries a "generated — canonical: ledger" header and is regenerated, never edited.
 
-**Claims (multi-agent)** — `PROJECT/.plane/claims/<entity-id>.json` =
+**Claims (multi-agent)** — `PROJECT/.hub/claims/<entity-id>.json` =
 `{"task": id, "agent": seat, "token": nonce, "claimed": epoch, "expires": epoch}`; a completion
 without a live claim is rejected; expired claims auto-release.
 
-### 2.4 The gate runner (`plane_audit`)
+### 2.4 The gate runner (`manage.py hubaudit` in the reference binding)
 
 One command; runs everywhere (CI required check + pre-ship + on demand); **fail-closed** (an
 internal error is a RED, never a skip). Invariants, in order:
@@ -120,17 +130,24 @@ internal error is a RED, never a skip). Invariants, in order:
 2. **Referential integrity** — every idref resolves; no dangling references. HIGH.
 3. **ADR contiguity** — ADR numbers gap-free from 1; every `superseded` has a successor. WARN.
 4. **Chain verification** — `verify_chain` intact. CRITICAL.
-5. **Live-ledger parity** — created-vs-transitioned ratio and stale `in_progress` beyond a
-   threshold flag a lagging ledger (the governance-fiction failure). WARN→HIGH.
-6. **Build coherence** (once deploys exist) — last deploy's `sha` == intended == what the live
-   artifact reports; unknown ⇒ AMBER, mismatch ⇒ HIGH.
-7. **Behavioral adapters** (environment-specific, added over time) — e.g. settings safety,
-   route-guard checks. An adapter that raises ⇒ CRITICAL.
+5. **Build coherence** (once deploys exist) — last deploy's `sha` matches the checkout/build stamp;
+   when a caller supplies an independently observed `served` SHA, compare that too. Unknown ⇒
+   AMBER, mismatch ⇒ HIGH. The base audit does not actively probe the live URL.
+6. **Behavioral adapters** (environment-specific, added over time) — the Django binding checks a
+   focused set of settings defaults and explicit guards on mutation routes.
+7. **Project-specific controls** — live-ledger parity, stale leases, live probes, verifier gates,
+   backups, and alert delivery are valuable but are not generic `hubaudit` checks; wire and test them
+   when the project's threat/failure model requires them.
 
-Exit codes: `0` PASS · `2` blocking (critical/high) · `3` warn-only amber · `1` internal error
-(treat as RED). The write path adds its own guards: `done` cannot be minted directly — only a
-completion operation that requires a live claim, ≥1 evidence entry, and a passing verification
-command may grant it.
+An audit adapter that raises becomes a CRITICAL violation rather than a silent skip.
+
+The structured audit uses `exit_code`: `0` PASS · `2` blocking (critical/high) · `3` warn-only
+amber. The Django management command returns process exit `0` for PASS or amber, `2` for blocking,
+and `1` for an internal error (treat as RED). The write path adds its own guards: `done` cannot be minted directly. Completion
+always requires a live claim, acceptance note, evidence, and a sound critical audit. In the default
+`tracked` mode a verification command is optional; when present, the Hub requires the worker's
+matching typed exit-0 receipt. `strict` additionally requires a command and dereferenceable
+evidence. The Hub never executes task commands; the write token grants terminal board authority.
 
 ## §3 The entity model
 
@@ -139,11 +156,11 @@ unsatisfiable at write time.** Field lists are authoritative in the embedded sch
 
 | Type | Required | Status enum | Unsatisfiability rules |
 |---|---|---|---|
-| `task` | id, type, title, status, version | `todo · in_progress · blocked · done · dropped · shadow` (shadow = wired-but-inert, NOT done) | `done` ⇒ `verified_by` ≥1 · `blocked` ⇒ `deps` ≥1 |
+| `task` | id, type, title, status, version | `todo · in_progress · blocked · done · dropped · shadow` (shadow = wired-but-inert, NOT done) | `done` ⇒ substantive `verified_by` ≥1 + `evidence_uri` ≥1 · `blocked` ⇒ `deps` ≥1 |
 | `adr` | id, type, number, title, status, version | `proposed · accepted · superseded · deprecated · rejected` | accepted/superseded/deprecated ⇒ full `context_md`+`decision_md`+`consequences_md` · `superseded` ⇒ `superseded_by` ≥1 |
 | `gap` | id, type, title, status, version | `open · investigating · mitigated · closed · wont-fix` | mitigated/closed ⇒ `addressed_by` ≥1 |
 | `feat` | id, type, name, status, version | `shipped · partial · planned · experimental · removed` | shipped/partial ⇒ `tasks` ≥1 (no orphan feature claims) |
-| `deploy` | id, type, sha, at, version | — (append-only record, written BY the act of deploying) | `audit_ok` computed from the gate exit, never hand-set; `served_sha` null until a canary confirms |
+| `deploy` | id, type, sha, at, version | — (append-only record, written BY the act of deploying) | schema has no conditional proof rule; the project-specific deploy writer must derive `audit_ok` and `served_sha`, never accept them as self-attested input |
 | `cap` | id, type, name, maturity, version | maturity: `concept · prototype · proven · reusable · extracted` | — (reuse fabric node) |
 | `note` | id, type, title, version | `standing · superseded` | categories: discovery/gotcha/data/method/source/risk/context — a note is NOT a decision |
 
@@ -159,12 +176,12 @@ project key are renameable bindings; the rules are not.
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:common",
   "title": "Hub shared definitions",
-  "description": "PINNACLE HUB DOCTRINE shared $defs. Identical bytes across all project hubs. IDs are project-prefixed, type-segmented, allocated once, never reused/renumbered.",
+  "description": "Hub shared definitions. IDs are project-prefixed, type-segmented, allocated once, and never reused or renumbered.",
   "$defs": {
     "id": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]*:(task|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$",
-      "description": "Stable opaque id, e.g. aether:task:0001, fairy:cap:ar.world-lock"
+      "description": "Stable opaque id, e.g. {{PROJECT_KEY}}:task:0001, {{PROJECT_KEY}}:cap:sync.offline-cache"
     },
     "idref": {
       "type": "string",
@@ -189,7 +206,9 @@ project key are renameable bindings; the rules are not.
     },
     "evidenceUri": {
       "type": "string",
-      "description": "A pointer to recomputed proof: a test exit, a headless screenshot path, a /debug scorecard url, an audit violation id."
+      "minLength": 1,
+      "pattern": ".*\\S.*",
+      "description": "A pointer to the real result: a commit, live operation, artifact, task receipt, or an explicitly invoked structural audit."
     }
   }
 }
@@ -212,17 +231,39 @@ project key are renameable bindings; the rules are not.
     "priority": { "enum": ["P0", "P1", "P2", "P3"] },
     "phase": { "type": "string" },
     "acceptance": { "type": "string", "description": "Definition of done for this task." },
-    "verification_command": { "type": "string", "description": "The command the HUB runs server-side to grant done; exit 0 + evidence required." },
+    "work_kind": {
+      "enum": ["product", "content", "corpus", "governance", "verification", "decision", "research", "migration", "duplicate", "legacy"],
+      "description": "The kind of work represented, so records that are not executable work stay queryable without masquerading as it. The A2A agent card publishes one skill per kind straight from this enum."
+    },
+    "verification_command": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Optional one-shot command for a rare critical-risk boundary. The worker runs it OUT-OF-BAND, retains the receipt, and removes every temporary test artifact before completion. Ordinary and copy/style work must omit it." },
+    "verification_run": {
+      "type": "array",
+      "description": "Historical receipts for an optional one-shot critical-boundary command run OUT-OF-BAND. The receipt persists and composes upward; temporary test artifacts do not.",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "command": { "type": "string", "minLength": 1 },
+          "exit_code": { "type": "integer" },
+          "output_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "ran_by": { "type": "string", "minLength": 1 },
+          "ran_at": { "type": "string" }
+        },
+        "required": ["command", "exit_code"]
+      }
+    },
     "touches": { "type": "array", "items": { "type": "string" }, "description": "Files/areas this task changes." },
     "plan": {
       "type": "array",
       "items": { "type": "object", "additionalProperties": false, "properties": { "step": { "type": "string" }, "done": { "type": "boolean" } }, "required": ["step", "done"] },
       "description": "Persisted, resumable checklist."
     },
+    "not_before": { "type": "string", "description": "Durable timer: an ISO-8601 instant before which this task is not offered to a worker. It is WAITING, not blocked and not drained — the readiness rail reports snoozed work separately so a deferred task never reads as an empty board." },
+    "poison_blocked": { "type": "boolean", "description": "The circuit breaker opened after repeated failing receipts; the task is withheld from the queue until an exit-0 receipt clears it, so a broken task cannot consume the whole fleet in a retry storm." },
+    "poison_reason": { "type": "string", "description": "Why the circuit breaker opened, surfaced verbatim on the attention rail." },
     "deps": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "Blocked iff any dep is not done." },
     "implements": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "feat/cap this realizes." },
     "decided_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" }, "description": "ADR(s) governing this task." },
-    "verified_by": { "type": "array", "items": { "type": "string" }, "description": "Verification evidence summaries; >=1 required for done." },
+    "verified_by": { "type": "array", "items": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" }, "description": "Substantive result summaries from the completed real operation; >=1 required for done." },
     "evidence_uri": { "type": "array", "items": { "$ref": "hub:common#/$defs/evidenceUri" } },
     "surfaced_by": { "$ref": "hub:common#/$defs/idref", "description": "The task/work during which this was scouted." },
     "source": { "type": "string", "description": "Where it came from, e.g. REVIEW-G3, CHARTER, RESEARCH-HISTORY." },
@@ -232,8 +273,11 @@ project key are renameable bindings; the rules are not.
   },
   "required": ["id", "type", "title", "status", "version"],
   "allOf": [
-    { "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] }, "then": { "properties": { "verified_by": { "type": "array", "minItems": 1 } }, "required": ["verified_by"] } },
-    { "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] }, "then": { "properties": { "deps": { "type": "array", "minItems": 1 } }, "required": ["deps"] } }
+    { "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] }, "then": { "properties": { "verified_by": { "type": "array", "minItems": 1 }, "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["verified_by", "evidence_uri"] } },
+    { "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] }, "then": { "properties": { "deps": { "type": "array", "minItems": 1 } }, "required": ["deps"] } },
+    { "if": { "properties": { "work_kind": { "enum": ["product", "verification"] } }, "required": ["work_kind"] }, "then": { "properties": { "acceptance": { "minLength": 1 } }, "required": ["acceptance"] } },
+    { "if": { "properties": { "work_kind": { "const": "decision" } }, "required": ["work_kind"] }, "then": { "properties": { "decided_by": { "type": "array", "minItems": 1 } }, "required": ["decided_by"] } },
+    { "if": { "properties": { "work_kind": { "const": "research" } }, "required": ["work_kind"] }, "then": { "properties": { "evidence_uri": { "type": "array", "minItems": 1 } }, "required": ["evidence_uri"] } }
   ]
 }
 ````
@@ -253,9 +297,9 @@ project key are renameable bindings; the rules are not.
     "number": { "type": "integer", "minimum": 1, "description": "Gap-free sequential ADR number." },
     "title": { "type": "string", "minLength": 1 },
     "status": { "enum": ["proposed", "accepted", "superseded", "deprecated", "rejected"] },
-    "context_md": { "type": "string", "description": "Immutable post-accept." },
-    "decision_md": { "type": "string", "description": "Immutable post-accept." },
-    "consequences_md": { "type": "string" },
+    "context_md": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Substantive context; immutable post-accept." },
+    "decision_md": { "type": "string", "minLength": 1, "pattern": ".*\\S.*", "description": "Substantive decision; immutable post-accept." },
+    "consequences_md": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
     "amendments_md": { "type": "string", "description": "Dated, append-only amendments (the legal way to evolve an Accepted ADR short of supersession)." },
     "supersedes": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
     "superseded_by": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
@@ -278,7 +322,7 @@ project key are renameable bindings; the rules are not.
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:gap",
   "title": "Gap / finding",
-  "description": "A reviewed finding from the analysis (REVIEW plans, RESEARCH-HISTORY, the CHARTER, CAPABILITY-LEDGER 'Needs'). Materializing these into the hub is Phase 2.",
+  "description": "A reviewed, evidence-backed finding that represents a real project gap.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -344,10 +388,10 @@ project key are renameable bindings; the rules are not.
     "id": { "$ref": "hub:common#/$defs/id" },
     "type": { "const": "deploy" },
     "build": { "type": "string" },
-    "sha": { "type": "string", "description": "The blessed git SHA the receiver wrote." },
+    "sha": { "type": "string", "description": "The git SHA this deploy record claims was shipped." },
     "method": { "type": "string" },
     "at": { "$ref": "hub:common#/$defs/isoDate" },
-    "audit_ok": { "type": "boolean", "description": "COMPUTED from the gate exit at deploy time, never hand-set." },
+    "audit_ok": { "type": "boolean", "description": "Must be derived by the trusted deploy writer from the gate exit; the schema alone cannot prove it." },
     "served_sha": { "type": ["string", "null"], "description": "What the live artifact reported back (coherence proof); null until a canary confirms." },
     "tasks_closed": { "type": "array", "items": { "$ref": "hub:common#/$defs/idref" } },
     "legacy_ref": { "type": "string" },
@@ -365,7 +409,7 @@ project key are renameable bindings; the rules are not.
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "hub:cap",
   "title": "Capability",
-  "description": "A reusable system/architecture node in the cross-project capability fabric. Project-prefixed ids share ONE id space so cap graphs cross projects.",
+  "description": "A reusable system or architecture node in this project's capability graph. Cross-project discovery requires an external registry or federation binding.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -420,28 +464,134 @@ project key are renameable bindings; the rules are not.
 ````
 <!-- /TPL -->
 
-### 3.2 Genesis seed (example shape)
+### 3.2 Portable project identity
+
+`init.sh` emits this file with every placeholder substituted. It is the shared identity for the
+Hub core, MCP server discovery, the root agent discovery card, receipt predicates, and the local
+worker scheme.
+
+<!-- TPL:PROJECT/project.json -->
+````json
+{
+  "project_key": "entry",
+  "brand": "The Entry",
+  "live_url": "https://entry.zacoberg.com",
+  "hub_url": "https://entry.zacoberg.com/hub/",
+  "kind": "public-artwork",
+  "parent_project": null,
+  "hub_scaffold_commit": "fab19fe"
+}
+````
+<!-- /TPL -->
+
+### 3.3 Genesis seed (example shape)
 
 <!-- TPL:PROJECT/seed.json -->
 ````json
 {
   "adrs": [
-    {"ref":"template-1","number":1,"status":"accepted",
-     "title":"A new app is a clean Plot whose ROOT serves the app",
-     "context_md":"Cloning-and-pivoting an existing Plot drags the donor's landing page onto the new root (this shipped a prior app with the wrong front door).",
-     "decision_md":"Start every app from C:/code/_template via spinup.sh: root serves the app, hub at /hub, born-safe, migrate-on-boot.",
-     "consequences_md":"The deployed root URL always presents the app; no command-center cruft."},
-    {"ref":"template-2","number":2,"status":"accepted",
-     "title":"PROJECT/ is the Project Plane: the canonical content-agnostic management framework",
-     "context_md":"Projects accumulated decisions, research, gaps, verification, and audit history in ad-hoc files; multi-agent campaigns improvised their own protocol, registers, and gates mid-flight, and governance lagged the work layer.",
-     "decision_md":"Every Plot is born with the Project Plane (PROJECT/README.md = the spec): hub ledger canonical for trackable entities; DOCTRINE/CHARTER/HANDOFF spine; ADR + research + registers + audit + verify + runs + worklogs + ops; pm/PROTOCOL.md as the leader/worker/verifier campaign law.",
-     "consequences_md":"One source of truth per fact class; channels crystallize into canon same-session; ships gate on re-derived green; any cold agent resumes from HANDOFF.md alone."}
+    {
+      "ref": "0001",
+      "number": 1,
+      "status": "accepted",
+      "title": "The Entry is an independent application at entry.zacoberg.com",
+      "context_md": "The Entry began as a single route inside zacoberg.com, but it has its own product identity, interaction model, release cadence, and operational needs. Keeping it embedded hides it behind the parent site's lifecycle and prevents it from owning a truthful task hub.",
+      "decision_md": "The Entry becomes a first-class application whose canonical public origin is https://entry.zacoberg.com. It owns its repository, deployment, project identity, event ledger, realtime hub, verification, and portfolio record. The former zacoberg.com/entry/ route becomes a permanent redirect after the standalone origin is proven live.",
+      "consequences_md": "The Entry can evolve independently without coupling releases to zacoberg.com. The parent site remains the portfolio doorway and preserves old links through a redirect. Deployment and hub health must be verified independently."
+    },
+    {
+      "ref": "0002",
+      "number": 2,
+      "status": "accepted",
+      "title": "hub-scaffold is the direct upstream for The Entry's project plane",
+      "context_md": "The project template contains an older Hub generation, while hub-scaffold now carries the living cockpit, realtime SSE and delta protocol, agent interoperability, delivery truth, adherence, bitemporal replay, and the current visual system.",
+      "decision_md": "The Entry adopts the current C:/code/hub-scaffold engine, Django adapter, schemas, management plane, and frontend as curated whole units. Product-specific work stays outside those units so future scaffold improvements can be applied without an instance fork.",
+      "consequences_md": "The Entry receives the current state of the art immediately and remains upgradeable. Any generally useful improvement discovered here must be upstreamed to hub-scaffold rather than left as an Entry-only divergence."
+    },
+    {
+      "ref": "0003",
+      "number": 3,
+      "status": "accepted",
+      "title": "Visitor words remain ephemeral and browser-local",
+      "context_md": "The core experience invites a visitor to say something into the dark. The existing piece transforms the words visually and then releases them without sending or storing their content.",
+      "decision_md": "The standalone application preserves that privacy boundary: visitor text is never submitted to the server, logged, persisted, analyzed, or placed in telemetry. Only content-free operational health may be observed.",
+      "consequences_md": "The experience remains intimate and safe by construction. Product analytics cannot include visitor text, and browser/network verification must prove that no content-bearing request occurs."
+    }
   ],
   "tasks": [
-    {"ref":"T1","phase":"0 Genesis","status":"todo","priority":"P1","decided_by":["template-1"],
-     "title":"Build the app: edit app/views.py + templates, add models, then deploy.sh"},
-    {"ref":"T2","phase":"0 Genesis","status":"todo","priority":"P1","decided_by":["template-2"],
-     "title":"Adopt the Project Plane: fill CHARTER.md + HANDOFF.md, read DOCTRINE.md, seed TRUTH-MATRIX for your first surface"}
+    {
+      "ref": "0001",
+      "phase": "0 Genesis",
+      "status": "todo",
+      "priority": "P0",
+      "work_kind": "migration",
+      "decided_by": ["0001", "0002"],
+      "title": "Create the standalone project and adopt the current canonical Hub",
+      "acceptance": "The Entry has an independent repository and project identity; the current hub-scaffold engine and Django adapter are mounted at /hub/; the app and Hub operate through the canonical ASGI entrypoint."
+    },
+    {
+      "ref": "0002",
+      "phase": "1 Product",
+      "status": "todo",
+      "priority": "P0",
+      "work_kind": "product",
+      "deps": ["0001"],
+      "decided_by": ["0001", "0003"],
+      "title": "Elevate The Entry into a complete standalone experience",
+      "acceptance": "The root presents a distinctive, responsive, keyboard- and touch-accessible Entry experience; visitor words dissolve without any content-bearing request; reduced-motion and graphics-fallback paths remain complete."
+    },
+    {
+      "ref": "0003",
+      "phase": "1 Product",
+      "status": "todo",
+      "priority": "P1",
+      "work_kind": "product",
+      "deps": ["0002"],
+      "title": "Exercise product, privacy, accessibility, and Hub operation locally",
+      "acceptance": "Real browser operation demonstrates the root, health route, Hub reads, literal pushed task motion, reduced-motion behavior, responsive layouts, and zero visitor-text network submission."
+    },
+    {
+      "ref": "0004",
+      "phase": "2 Portfolio",
+      "status": "todo",
+      "priority": "P1",
+      "work_kind": "migration",
+      "deps": ["0003"],
+      "decided_by": ["0001"],
+      "title": "Point zacoberg.com at the standalone Entry and preserve the old route",
+      "acceptance": "The Apps catalog links to https://entry.zacoberg.com and zacoberg.com/entry/ permanently redirects there without retaining the embedded implementation."
+    },
+    {
+      "ref": "0005",
+      "phase": "3 Release",
+      "status": "todo",
+      "priority": "P0",
+      "work_kind": "product",
+      "deps": ["0003"],
+      "decided_by": ["0001"],
+      "title": "Provision and publish entry.zacoberg.com",
+      "acceptance": "The canonical HTTPS origin serves the repository SHA, the root experience works through its real interaction, and /hub/ is reachable with truthful Connected or Disconnected transport state."
+    },
+    {
+      "ref": "0006",
+      "phase": "3 Release",
+      "status": "todo",
+      "priority": "P1",
+      "work_kind": "governance",
+      "deps": ["0004", "0005"],
+      "title": "Register The Entry everywhere and reconcile portfolio identity",
+      "acceptance": "Homebase, the public Apps catalog, and all project inventories identify The Entry as an independent app with its canonical URL and Hub; aliases and parent relationships do not misclassify it as a zacoberg.com child surface."
+    },
+    {
+      "ref": "0007",
+      "phase": "4 Close",
+      "status": "todo",
+      "priority": "P1",
+      "work_kind": "product",
+      "deps": ["0004", "0005", "0006"],
+      "title": "Complete the live release operation and close the extraction",
+      "acceptance": "The live app, old-route redirect, portfolio links, build identity, privacy boundary, responsive presentation, and Hub functionality all succeed through their real public operations with no open P0 or P1 gap."
+    }
   ],
   "notes": []
 }
@@ -455,7 +605,7 @@ a role header (`canonical | view | channel | template`); fill-ins are `<...>`.
 
 ```
 PROJECT/
-  README.md  CHARTER.md  DOCTRINE.md  HANDOFF.md  seed.json  schema/(8 files)
+  README.md  CHARTER.md  DOCTRINE.md  HANDOFF.md  project.json  seed.json  schema/(8 files)
   ADR/README.md + 0000-template.md
   research/README.md + RESEARCH-HISTORY.md
   registers/FAILURE-MODES.md INCIDENTS.md TRUTH-MATRIX.md BLINDSPOTS.md DECISIONS-PENDING.md GLOSSARY.md
@@ -606,46 +756,68 @@ Rebinding rules:
 ### 4.2 `PROJECT/CHARTER.md`
 <!-- TPL:PROJECT/CHARTER.md -->
 ````markdown
-# CHARTER — <project name>
+# CHARTER — The Entry
 
-> template → becomes canonical once filled · owner: leader · update: by ADR only (scope changes are decisions)
-
-The charter is the contract for WHAT this project is and WHEN it is done. It changes rarely and
-only by ADR. If work in flight contradicts the charter, the work is wrong or the charter needs an
-ADR — never both silently.
+> canonical · owner: principal agent · scope changes require a new ADR
 
 ## 1. Mission
-One paragraph: what this delivers, for whom, and the single sentence a stranger repeats back.
+
+The Entry gives any visitor a quiet place to say something, see their language become motion, and
+let it disappear. The sentence a stranger should repeat is: **write into the dark; nothing is kept.**
 
 ## 2. Users & surfaces
-Who touches it (operator, public, agents) and through what (web root, API, feeds, /hub).
+
+- **Visitor:** `https://entry.zacoberg.com/` on phone, tablet, or desktop.
+- **Operator:** the same public experience plus deployment and health evidence.
+- **Agents:** `/hub/`, `/hub/api/mcp`, `/.well-known/agent-card.json`, and the typed Hub APIs.
+- **Portfolio:** zacoberg.com Apps and Homebase link to the standalone origin.
 
 ## 3. Scope
-The capabilities this project promises. Each maps to hub `feat` entities once building starts.
+
+- A responsive text-to-motion artwork with an explicit release action and contemplative auto-release.
+- Browser-local, non-persistent visitor words.
+- Adaptive graphics, reduced-motion and graphics-fallback experiences.
+- Current canonical Hub cockpit: event ledger, direct push patches with reconnect recovery,
+  connected/disconnected truth, high-throughput task flow, delivery truth, MCP and discovery.
+- Independent build, deployment, HTTPS origin, health proof, and portfolio identity.
 
 ## 4. Non-goals
-Explicitly out of scope, with the reason. A non-goal may only move into scope via ADR.
+
+- A message board, confession archive, moderation system, or content corpus.
+- Accounts, profiles, voting, sharing visitor text, or text analytics.
+- A second implementation of reusable Hub capabilities.
 
 ## 5. Quality bar
-- **Born-safe:** prod settings hardened at birth (no DEBUG default, no committed secrets, token-gated writes).
-- **Truth-first:** every rendered assertion derives from gathered evidence (`DOCTRINE.md` §2) —
-  the truth matrix (`registers/TRUTH-MATRIX.md`) is the acceptance checklist for any new surface.
-- **Gate-green:** `hubaudit` PASS + project invariant gates green are ship preconditions, fail-closed.
-- **Best-of-breed:** research before build (`research/README.md`); re-architect rather than polish a failing approach.
 
-## 6. Definition of done (project-level)
-Machine-binary first, judgment second:
-1. All promised capabilities exist, are WIRED (reachable in the served artifact), and are hub `feat: shipped` with linked tasks.
-2. `hubaudit` exit 0; invariant gates green; deploy coherence proven (served SHA == blessed SHA).
-3. Live front-door verification passed (patient canary, real UA, asserts the app's own body).
-4. Zero open P0/P1 gaps; every open `DP-` decision either resolved or explicitly deferred by the operator.
-5. `HANDOFF.md` current; audit history complete (every deploy/run/incident recorded).
+- The artwork—not navigation or dashboard chrome—owns the first viewport.
+- Motion is organic, input-responsive and quiet when idle; it never obstructs writing.
+- The experience remains usable without WebGL and honors `prefers-reduced-motion`.
+- Public routes disclose no private board data beyond the intentionally publishable task plane.
+- Real product and Hub operations are the default proof. Only a rare critical boundary earns one
+  transient probe, removed before commit; copy, style and motion never receive tests.
+
+## 6. Definition of done
+
+1. The root, health route, Hub, realtime cursor/delta/SSE, MCP and discovery surfaces are reachable.
+2. The real browser network path shows that typed text produces no content-bearing request.
+3. Phone and desktop layouts, keyboard/touch input, reduced motion and graphics fallback work.
+4. The live build SHA equals the repository and deploy record; HTTPS is healthy.
+5. zacoberg.com redirects its old Entry route and links the standalone origin.
+6. Homebase recognizes The Entry as an independent project with its own Hub.
+7. No P0/P1 gap remains and `HANDOFF.md` names the verified live state.
 
 ## 7. Run model & cost ceiling
-Compute tiers this project may use, hard cost ceiling, and what happens at the ceiling (stop, not degrade silently).
+
+One small public Django service with one asynchronous Uvicorn ASGI process and persistent SQLite/Hub
+storage. One async process keeps the default realtime bus coherent; horizontal processes require a
+shared `HUB_REALTIME_BROKER` before rollout.
+No paid model, data, or rendering APIs run in the visitor path. Graphics execute only on the visitor's
+device and adapt downward when the device or preference asks for less.
 
 ## 8. Data & legal posture
-Where data comes from, what may be stored/published, rate-limit/courtesy rules, takedown stance.
+
+Visitor text never crosses the network. The application may emit content-free operational logs and
+health measurements only. No visitor identity, behavioral profile, or creative text corpus is created.
 ````
 <!-- /TPL -->
 
@@ -656,8 +828,13 @@ Where data comes from, what may be stored/published, rate-limit/courtesy rules, 
 
 > canonical · owner: leader · update: append §6 laws as they are crystallized (each cites its ADR); §§1–5 change only with the framework
 
+The Hub product itself is governed by `HUB-QUALITY.md`: visual hierarchy, motion meaning,
+accessibility, realtime freshness, and throughput truth are one quality bar.
+
 These are the laws every agent on this project operates under, regardless of content. They are the
 distillation of every hard lesson to date. Violating one is a defect even when the output "works".
+They are normative policy; `README.md` identifies which reference-Hub controls are shipped and which
+require project-specific wiring.
 
 ## §1 Operator contract
 1. **Zero decisions pushed to the operator.** Best-guess every fork, record it (ADR if architectural,
@@ -666,40 +843,51 @@ distillation of every hard lesson to date. Violating one is a defect even when t
    destructive act, a privileged/undefined-secret operation, or a true operator-only decision —
    and even then, queue it in `registers/DECISIONS-PENDING.md` and route around it.
 3. **No device-test gates.** Never frame a milestone as "waiting on the operator to test".
-   Implement full scope; real-device checks come at the end.
+   Implement full scope; when a feature inherently requires a device, use it through the real
+   operation and record the outcome.
 4. **Best way, no thrashing.** Research best-of-breed first; a named technology is a hypothesis,
    not a mandate; when an approach keeps failing, re-architect — don't polish.
-5. **Verify every agent claim yourself.** No sub-agent/seat "done" is recorded until independently
-   re-verified (re-run the stated command, read the diff, check the live wiring).
+5. **Finish first; prove only what is at risk.** The successful real operation is the default proof.
+   Copy, wording, style, animation polish, and other non-critical changes get no test or validation
+   ritual. Permanent tests, fixtures, verifier scripts, and always-on verification workflows are
+   forbidden. A security, destructive-data, migration, protocol, or concurrency boundary may earn
+   one temporary probe: create it outside the durable product tree, run it once, retain its receipt,
+   and delete it before commit. Completed receipts compose upward; a release checks only a newly
+   created critical integration seam and never reruns accepted child work.
 6. **Track and document, always.** Every directed change gets a hub task AND a decision record.
    Note every downstream artifact a shared-state change invalidates.
 
 ## §2 Truth discipline (anti-false-green)
-1. **FALSE-GREEN is the meta-failure.** Gates fail by being self-attested, bypassed, textual, or
-   committed-not-deployed — not by being absent. The four enforcement primitives (authorization-
-   boundary hook · behavioral-not-textual audit · out-of-band deployed-artifact canary ·
-   tamper-evident never-weaken invariants) are defined in the global charter; the portable
-   invariant is: **the verifier identity must differ from the builder identity.**
-2. **ASSERTED ≠ DERIVED = BROKEN.** Every rendered assertion (every label, badge, ordering, count)
-   must derive from gathered evidence via a deterministic path. One mismatch anywhere means the
-   product is broken. `registers/TRUTH-MATRIX.md` maps every field to its derivation and detector.
+1. **FALSE-GREEN is the meta-failure at a declared critical boundary.** A boundary receipt must
+   describe what actually ran and what happened. When independent proof is explicitly warranted,
+   **the verifier identity must differ from the builder identity**. Ordinary work creates no gate,
+   standing verifier, or scheduled proof burden.
+2. **ASSERTED ≠ DERIVED = BROKEN.** Machine-derived factual claims such as status, ordering, and
+   counts must trace to their source of truth. Editorial copy, visual style, and motion are not
+   verification targets. `registers/TRUTH-MATRIX.md` records only factual derivations that matter.
 3. **Done ≠ live.** A task whose value requires a deploy is NOT done until the deploy-owner is
-   notified (a `deploy_request` event naming code/data + SHA) and the deploy is verified live.
-4. **Evidence must postdate the final edit.** A verification run from before the last change is void.
-5. **Gates re-derive, never trust.** Any consumer of a gate artifact recomputes the verdict from
-   the underlying rows; a green flag contradicted by its rows is FABRICATED-GREEN and blocks.
-6. **Every gate must have failed in test.** A checker that has never fired on a seeded synthetic
-   violation is presumed broken (detector self-test doctrine).
+   notified (a `deploy_request` event naming code/data + SHA) and the real deploy outcome is
+   observed live.
+4. **Evidence is the completed operation.** Record the attempted action and observed result after
+   the final edit. If a rare critical probe is used, its durable receipt must postdate the edit;
+   the probe itself must not survive the commit.
+5. **Receipts compose.** Consumers inherit accepted dependency receipts. They do not replay them;
+   a release examines only a new critical integration seam introduced by composition.
+6. **Stop when the changed behavior works.** Once the real operation succeeds and no critical
+   boundary remains unobserved, completion is earned. Adding another check is process bloat.
 
 ## §3 Defect discipline (Instance → Invariant)
-1. **Classify before fixing.** Every defect gets a `registers/FAILURE-MODES.md` class row FIRST
-   (grow the taxonomy if none fits), and an `INC-` instance entry.
-2. **The fix is a class-wide detector, never a point patch.** An instance-targeted fix without a
-   class detector is forbidden. A named instance may become a CHECK (regression probe/canary) — never a FIX.
-3. **The found instance is never the only one.** Every class fix ships with the class query and its count.
-4. **Dual mandate, co-equal:** fix the stock (existing bad data/state) AND gate the flow (new writes).
-   An invariant arriving after its data gates the flow and reports the stock as a drainable metric.
-5. **Bank the probe.** Every resolved defect adds a never-again test or eval probe.
+1. **Observed failure becomes work.** Record the concrete failure as an `INC-` instance and open a
+   fresh repair task; classify it in `registers/FAILURE-MODES.md` when the class is useful for routing.
+2. **Restore the real operation.** Fix the causal path and retry the action that failed. The
+   successful retry is the ordinary completion receipt.
+3. **Do not bank tests.** A failure does not automatically create a regression suite, fixture, or
+   permanent checker. A rare critical recurring boundary may use a one-shot temporary diagnostic
+   probe under §1.5, deleted before commit.
+4. **Repair can be its own lane.** Projects may route observed failures to a dedicated error-fixing
+   agent so delivery agents keep completing planned work; the Hub keeps both lanes visible.
+5. **Stop after recovery.** Once the failed operation succeeds, close the repair task and return
+   throughput to the delivery queue.
 
 ## §4 Change discipline
 1. **Research precedes build.** No architectural work starts before its research is captured in
@@ -707,12 +895,15 @@ distillation of every hard lesson to date. Violating one is a defect even when t
 2. **Decisions are ADRs** — append-only, gap-free, rejected-alternatives on record, supersede-never-rewrite.
 3. **Registers are append-only**; amendments follow `README.md` §5. Published identifiers are immutable.
 4. **The ledger is LIVE:** the hub is updated AT THE MOMENT of the event — task claimed →
-   `in_progress`; decision made → ADR recorded; work verified → `done` with `verified_by`;
+   `in_progress`; decision made → ADR recorded; real operation completed → `done` with `verified_by`;
    deploy finished → deploy entity. Transitions are never batched or reconstructed afterwards;
    same-session is the outer bound for prose docs only. A governance layer that lags the work
-   layer is the A92 failure (221 tasks created, 14 transitioned) and is itself a defect. In
-   campaigns the LEADER carries this duty personally and perfectionistically (PROTOCOL §11).
+   layer is itself a defect (a real campaign once created 221 tasks and transitioned 14 — the
+   board was fiction). In campaigns the LEADER carries this duty personally (PROTOCOL §11).
 5. **Shared-kit changes** (anything vendored across projects) get a CHANGELOG entry in the kit.
+6. **Contracts never impersonate controls.** A documented gate, verifier, backup, canary, scanner,
+   or alert is reported as active only while its real critical boundary, trigger, and owner exist.
+   Documentation never creates a standing test obligation.
 
 ## §5 Autonomy discipline
 1. **Two attempts, then escalate** with what you tried. Timebox unfamiliar rabbit holes (~20 min).
@@ -724,49 +915,74 @@ distillation of every hard lesson to date. Violating one is a defect even when t
 ## §6 Project laws (append below; each cites its ADR)
 <!-- Crystallized, project-specific laws land here as they are born. Format:
 N. **<law>** (ADR-NNNN, YYYY-MM-DD): <one-paragraph statement>. -->
+1. **The Entry is its own boundary** (ADR-0001, 2026-08-16): its root, release, Hub and canonical
+   identity belong to `entry.zacoberg.com`; zacoberg.com is a doorway and redirect only.
+2. **Words are not data** (ADR-0003, 2026-08-16): visitor text never leaves the browser and cannot
+   appear in logs, analytics, telemetry, tasks or evidence.
+3. **Upstream before instance** (ADR-0002, 2026-08-16): a reusable Hub improvement lands in
+   `hub-scaffold` first and returns here as a whole-unit adoption; local divergence is a defect.
 ````
 <!-- /TPL -->
 
 ### 4.4 `PROJECT/HANDOFF.md`
 <!-- TPL:PROJECT/HANDOFF.md -->
 ````markdown
-# HANDOFF — living continuity file
+# HANDOFF — The Entry
 
-> canonical · owner: the principal agent (solo) or LEADER (campaign) · update: at every significant state change and ALWAYS before ending a session
+> canonical living snapshot · update at every significant state change
 
-This is the single resume entry point. A cold agent reads this first (`README.md` §0) and must be
-able to continue seamlessly from it alone plus the tails of any active channels. Keep it current —
-a stale handoff is a defect. Rewrite in place (it is a snapshot, not a ledger); history lives in
-the hub and the channels.
+## 0. Arrangement
 
-## 0. The arrangement
-Operating mode (SOLO / campaign per `pm/PROTOCOL.md` §0 with seat roster), who deploys what, and
-where the channels are. If a campaign is active: "read `pm/PROTOCOL.md`, then your seat's CHARTER,
-DIRECTIVES tail, and STATE."
+SOLO principal-agent build with parallel read-only audits. Work is governed by the event-sourced Hub.
+Canonical upstream for reusable Hub units: `C:/code/hub-scaffold` at recorded commit `fab19fe` or its
+newer successor after any upstream correction.
 
 ## 1. Standing doctrine deltas
-Nothing here duplicates `DOCTRINE.md` — list only recent laws not yet internalized by all seats,
-with their ADR numbers.
 
-## 2. What's live right now (all verified, with evidence)
-- Deployed code SHA + how it was verified.
-- Deployed data state + gate status (`runs/status.json`).
-- Domains/surfaces and their states.
+- ADR-0001: The Entry owns `entry.zacoberg.com`, its repository, release and Hub.
+- ADR-0002: Hub improvements are upstream-first; no Entry-only scaffold fork.
+- ADR-0003: visitor words never leave the browser.
 
-## 3. In-flight
-What is being worked RIGHT NOW, by whom, and what to verify when each lands.
+## 2. Live state
 
-## 4. Backlog (priority order)
-The next actionable items with enough context to start each. Deep specs stay in their own docs — link.
+- Standalone production: not deployed yet.
+- Legacy experience: `https://zacoberg.com/entry/` remains live until cutover.
+- Local Hub genesis: seeded with three ADRs and the complete extraction/release task graph.
 
-## 5. Environment quirks & access
-Pointers only (atlas + creds by key name), plus the quirks that burn cold agents.
+## 3. In flight
+
+- `entry:task:0008` — canonical Hub blockers and upstream adoption, owned by `codex-entry-upstream`.
+- `entry:task:0009` — Entry's realtime throughput cockpit, queued behind the upstream adoption.
+
+## 4. Backlog
+
+Follow `/hub/next.json`: elevate product, prove locally, cut portfolio links, provision and deploy,
+register everywhere, then perform an independent live release review.
+
+## 5. Environment and access
+
+- Deployment/access source: `C:/code/_deploy/ACCESS-DEPLOY-ATLAS.md`.
+- Secrets remain in `C:/code/creds.local.txt` by key name; none belong in this repository.
+- Hub runtime is persistent and untracked at `PROJECT/.hub/` locally and `$HUB_DIR` live.
 
 ## 6. Hard-won gotchas
-The "do not relearn these" list. Promote recurring ones into `DOCTRINE.md` §6 or the global gotcha docs.
 
-## 7. Session narrative (compressed)
-A few sentences of how the project got here — enough to reconstruct intent, not a diary.
+- The old page's timer used pre-mutation `keydown` state, breaking first-character, paste, IME and
+  mobile behavior. Drive release timing from the `input` event.
+- Never transplant zacoberg.com's archive analytics merely to retain a page-view counter.
+- Production uses one Uvicorn ASGI process: its async stream does not pin request threads, and its
+  process-local signal bus reaches every connected client. Multiple processes are valid only after
+  `HUB_REALTIME_BROKER` binds them to shared pub/sub.
+- Connected means every durable mutation is pushed as a canonical patch immediately. Disconnected
+  means cursor recovery is pending; there is no polling or manual-sync operating mode.
+- First provisioning must not mint the Hub token inside a disposable deploy worktree.
+
+## 7. Narrative
+
+The Entry began in March 2026 as one 625-line template inside zacoberg.com. In August it gained a
+portfolio doorway, revealing that its product identity and operational lifecycle deserved separation.
+This project was spun up cleanly, immediately rebased onto canonical hub-scaffold, and is being elevated
+without importing the parent site's unrelated data or tracking systems.
 ````
 <!-- /TPL -->
 
@@ -873,6 +1089,26 @@ lives in the per-effort files in this folder; this file is the index a cold agen
 ⚑ <keystone finding, one line each>
 <2–5 sentences of what was learned and what it changed.>
 -->
+
+## 2026-08-16 — Standalone extraction and canonical Hub adoption
+
+**Source:** direct source audit of `C:/code/website-dokku`, `C:/code/hub-scaffold`, sibling Hubs and
+deployment configuration · **Fed:** ADR-0001, ADR-0002, ADR-0003; tasks 0001–0008
+
+⚑ The original Entry has no model, API or stored visitor text: the entire artwork is one browser
+template, so extraction should preserve the privacy boundary rather than transplant the archive app.
+
+⚑ Its March implementation has correctness and inclusion gaps: pre-mutation key timing, uncancelled
+timers, no paste/IME/mobile release path, fixed 262K-particle cost, no hidden-tab pause, no reduced-motion
+or graphics fallback, runtime CDN code, and no product tests.
+
+⚑ Every existing project instance carries an older Hub generation. The canonical `hub-scaffold` is
+the only correct donor for the August realtime cockpit and interoperability surfaces.
+
+The chosen path is a clean first-class application with Entry-owned identity and assets, browser-local
+text, adaptive self-hosted rendering, an upstream-traceable Hub adoption, and an independently verified
+deployment. Shared archive analytics are deliberately omitted because importing them would create a
+large unrelated data and identity coupling.
 ````
 <!-- /TPL -->
 
@@ -948,21 +1184,34 @@ exists and has fired in test.
 
 > canonical · owner: worker maintains, verifier audits · update: whenever a field or surface is added/changed — this IS the acceptance checklist for new surfaces
 
-**The contract (DOCTRINE §2.2):** every field the product renders is an assertion. Each must have a
-deterministic derivation from gathered evidence, a class detector that would catch a lie, and a
-presentation rule that shows its certainty honestly (an unverified value must LOOK unverified —
-honest disclosure doesn't block ships; overclaim does).
+**The contract (DOCTRINE §2.2):** machine-derived factual claims trace deterministically to their
+source of truth and show uncertainty honestly. Editorial copy, visual style and motion are not test
+targets; the real rendered experience is their proof.
 
 ## Fields
 | Field | Derivation (source of truth) | Detector (class check) | Presentation rule |
 |---|---|---|---|
+| Product name | `PROJECT/project.json.brand` and template constant | identity coherence check | Always “The Entry”; never generic Plot copy |
+| Canonical origin | `PROJECT/project.json.live_url` | canonical/Host response check | `https://entry.zacoberg.com` only |
+| Build identity | `app/build_sha.txt` baked from deployed HEAD | live canary compares exact SHA | Hidden metadata; never self-asserted green |
+| Privacy promise | absence of product mutation endpoints and content-bearing browser requests | real browser network observation; a transient probe only when this critical boundary changes | “nothing is saved” appears only while invariant passes |
+| Release state | client state machine driven by current input/timers | real input, paste, IME and cancellation operation | announced through a polite live region; not color-only |
+| Hub connection | persistent SSE receives canonical patches; cursor recovery runs only after a disconnect | live connection and mutation behavior | Exactly Connected or Disconnected; no polling/manual state |
 
 ## Surfaces
 One entry per rendering surface (page, card, modal, feed, API, export). For each: which fields it
 renders and coverage status vs this table. A surface may not ship until its every field has a row.
 
-## Eval probes
-Where the never-again probes live for this table (test module / eval file), so regressions are mechanical.
+- `/`: product name, canonical origin, build identity, privacy promise, release state.
+- `/health/`: product name and build identity only; no visitor or infrastructure details.
+- `/hub/` and Hub JSON surfaces: canonical ledger-derived project state and connection state.
+- `/.well-known/agent-card.json`: project identity and supported agent interface only.
+
+## Operating evidence
+
+Use the affected real product, Hub, deploy, or registry path and retain its task receipt. A security,
+privacy, destructive-data, migration, protocol, or concurrency seam may justify one transient probe;
+delete it before commit. Do not turn copy, style, motion, or an ordinary fix into a permanent suite.
 ````
 <!-- /TPL -->
 
@@ -1049,71 +1298,64 @@ entities, `verify/gate/`, `runs/`). THIS folder holds dated, point-in-time audit
 ### 4.16 `PROJECT/verify/README.md` — the independent-verification contract
 <!-- TPL:PROJECT/verify/README.md -->
 ````markdown
-# verify/ — the independent verification lane
+# verify/ — transient critical-boundary proof contract
 
-> canonical contract · owner: THIS FILE + manifest contract = producer (worker); everything else under verify/ = verifier · update: green rule changes are versioned amendments here
+> canonical contract · owner: leader · update: only when the critical-boundary policy changes
 
-The out-of-process answer to false-green: a **verifier whose identity differs from the builder's**
-independently checks what the product asserts, and a **fail-closed gate** blocks ships until it is
-green. This file is the whole contract; the campaign wiring is `../pm/PROTOCOL.md` §8.
+This directory defines an exceptional lane, not a standing test system. The successful real
+operation is the default proof for every task. Copy, wording, style, spacing, color, animation
+polish, routine fixes, and other non-critical changes never activate this lane and receive no
+automated validation.
 
-## 1. Layout & write scope
-```
-verify/
-  MANIFEST-CONTRACT.md   producer-owned: exact manifest row shape + how to regenerate
-  manifest.jsonl         producer-generated: one row per (record, field) with rendered value + evidence
-  verdicts.jsonl         verifier-written: one verdict row per (record, field) checked
-  gate/<run_id>.json     verifier-written gate artifacts (immutable)
-  livecap/<doc_id>.txt   saved snapshots of live-web checks (URL + timestamp header)
-  tmp/                   verifier scratch (incl. its read-only DB copy)
-  tools/                 the harness: selfcheck (grounding validator), gate writer — fail-closed, exit≠0 on any error
-  _archive/              superseded + voided-<ts>/ material
-```
-One writer per file. The producer NEVER writes verdicts/gates; the verifier NEVER writes the
-manifest or contract, app code, or data — findings escalate, they don't self-heal.
+Permanent tests, fixtures, verifier scripts, calibration sets, generated manifests, scheduled
+runs, and CI verification workflows are prohibited. A release is not automatically a reason to
+verify completed work again.
 
-## 2. The manifest (producer side)
-- One row per verifiable claim: `{record_id, field, rendered_value, evidence:[{doc_id, text}], …}`
-  — exact shape defined in `MANIFEST-CONTRACT.md`. ALL evidence the system holds for the claim goes
-  in (an omitted evidence type systematically manufactures "insufficient" verdicts).
-- **Every generation is content-hashed and stamped** (`manifest_sha`) — sweeps and verdicts key on
-  `(record_id, field)` + `manifest_sha`, NEVER on line offsets. Regenerating mid-sweep is allowed;
-  the verifier re-keys, carried-forward verdicts stay valid only where the row content is unchanged.
+## 1. Activation boundary
 
-## 3. Verdicts (verifier side)
-- Row: `{record_id, field, lane, verdict, doc_id, quote, confidence, manifest_sha}` with
-  `verdict ∈ supported | refuted | insufficient` and `lane ∈ derivation | evidence | world`:
-  - **derivation** — rendered value vs the system-of-record;
-  - **evidence** — vs gathered documents;
-  - **world** — vs live reality (fetch it; save the snapshot to `livecap/` or the check doesn't count).
-- **Grounding law:** every `supported` quote must be verbatim string-contained in its cited source.
-  A failing quote is INVALID → counts as refuted + a `grounding_failure`. `tools/selfcheck` enforces
-  this mechanically and is run before any gate artifact is written.
-- Write verdicts BEFORE reporting them. Anti-stall: cap per-record effort; close `insufficient` and move on.
+Activate a transient verifier only when the leader names a concrete risk at one of these critical
+boundaries:
 
-## 4. The gate
-- Artifact: `gate/<run_id>.json` =
-  `{run_id, scope: delta|full|calibration, started, finished, manifest_sha, records_checked,
-    verdicts:{supported, refuted, insufficient, insufficient_disclosed}, grounding_failures,
-    red_ids, live_checks:{performed, confirmed, contradicted, unreachable}, rule, green}`.
-- **The green rule lives HERE, versioned** (never redefined in channel prose — the v1 campaign
-  redefined it five times in directives and voided artifacts each time):
+- security or privilege;
+- destructive writes or data integrity;
+- schema or data migration;
+- public protocol compatibility;
+- concurrency, leases, or fencing.
 
-  > **GREEN-RULE v1:** `green = (refuted == 0 AND grounding_failures == 0 AND undisclosed
-  > insufficient == 0)`. Zero means zero — no judgment layer. "Disclosed" is keyed on what the
-  > USER SEES (the rendered badge/state), not an internal status field: honest disclosure of
-  > uncertainty never blocks; OVERCLAIM always blocks.
+If the changed behavior can be safely exercised through its real operation, do that and stop. A
+temporary probe is justified only when the real operation cannot expose an unacceptable failure
+clearly enough.
 
-  Changing the rule = a versioned amendment block here + an ADR; artifacts carry the `rule` id they
-  were computed under; in-flight artifacts under the old rule are voided or re-derived, explicitly.
-- **Re-derivation law (DOCTRINE §2.5):** the ship gate recomputes green FROM THE VERDICT ROWS
-  (join to manifest, re-check containment, recount, latest-verdict-per-(record,field) within scope).
-  An artifact whose `green` disagrees with its rows is **FABRICATED-GREEN** and blocks hard.
-- **Fail-closed:** the deploy path requires the latest gate artifact to be green, fresh (covers
-  what's shipping), and re-derived. Missing, stale, or red ⇒ ship BLOCKED.
-- **The gate is itself gated:** self-test fixtures (a seeded refuted row, a seeded ungrounded quote,
-  a seeded fabricated-green artifact) must FAIL the gate in test; a calibration anchor set is
-  re-run on every full sweep to catch verifier drift.
+## 2. One-shot procedure
+
+1. Inherit the accepted receipts of every completed dependency. Never rerun child proof.
+2. Name only the newly created critical integration seam, if one exists.
+3. Prefer the real protected operation. If necessary, create one probe in system temporary space
+   or explicitly disposable task scratch—never as a tracked project file.
+4. Run it once against the final change and record a durable receipt containing the task, boundary,
+   action or exact command, target SHA/state, verifier identity, observed outcome, and timestamp.
+5. Delete the probe, fixture data, copied database, and all scratch before commit. Confirm only the
+   receipt remains, then fold the verifier seat.
+
+Receipts compose upward. A parent task or release accepts completed child receipts and, at most,
+observes the one new critical seam created by composition. A verifier must never launch another
+verifier or create checker fan-out.
+
+## 3. Failure routing
+
+An observed real failure is all the notice the project needs. Open a fresh repair task with the
+failed action and observed outcome. Route it to a dedicated error-fixing agent when the project has
+one so delivery agents continue unrelated work. After the repair, retry the failed real operation;
+its successful result closes the task. Do not preserve the diagnostic as a regression test.
+
+## 4. Stop rule
+
+When the changed real behavior succeeds, no critical boundary remains unobserved, the durable
+receipt is filed if one was required, and all temporary proof artifacts are gone, stop. More checks
+reduce throughput and are a process defect.
+
+`MANIFEST-CONTRACT.md` is dormant reference material unless a leader explicitly scopes it for a
+single critical boundary. It does not authorize a standing generator, sweep, harness, or gate.
 ````
 <!-- /TPL -->
 
@@ -1190,12 +1432,16 @@ Entry discipline:
 
 > template → canonical once filled · owner: whoever touches infra · update: same session as any infra change; re-verify the "verified" stamp when read cold
 
-**Verified against real config files on: <date> by <who>** — a runbook that hasn't been re-verified
+**Verified against real config files on: 2026-08-16 by codex-root** — a runbook that hasn't been re-verified
 against source is a rumor. Secrets stay in the atlas/creds files BY KEY NAME
 (`C:\code\_deploy\ACCESS-DEPLOY-ATLAS.md` + `C:\code\creds.local.txt`); this file holds structure, never values.
 
 ## Process & boot
-How the app runs (server, workers, migrate-on-boot), and the exact boot order.
+
+Django 6 on Python 3.12, served by Uvicorn ASGI behind Dokku. Boot order is migrate, then one Uvicorn
+process. ASGI holds concurrent SSE connections without occupying one synchronous request thread per
+client, and the single process keeps the built-in signal bus coherent. Scale-out first requires a
+shared `HUB_REALTIME_BROKER`; adding workers without it would fragment push delivery.
 
 ## Deploy paths
 - **Code:** command, owner (campaigns: seat per `pm/PROTOCOL.md` §7), gates it must pass, expected
@@ -1204,32 +1450,47 @@ How the app runs (server, workers, migrate-on-boot), and the exact boot order.
 - **Sequencing law:** code-first when a change spans both (new code tolerates old data; old code
   on new data produces user-visible lies).
 
+- **Code:** `bash deploy.sh`; it provisions from the durable main checkout, builds a clean detached
+  HEAD, ships, and observes the exact build through the real public origin. No permanent test or
+  repository-audit gate sits in the release pipeline.
+- **Data:** visitor content has no data plane. Django and Hub runtime live on the persistent app mount.
+
 ## Environment variables
 | Var | Purpose | Notes (key name in creds, never the value) |
 |---|---|---|
+| `SECRET_KEY` | Django signing | minted during provisioning |
+| `HUB_WRITE_TOKEN` | token-gated Hub mutations | minted during provisioning; local copy gitignored |
+| `HUB_DIR` | persistent append-only Hub store | `/app/data/.hub` |
+| `ALLOWED_HOSTS` | optional additional hostnames | canonical host is built in |
 
 ## Storage & mounts
-Persistent paths, ownership/uids, backup story (and its verification date).
+
+Dokku persistent storage mounts at `/app/data`; SQLite is `/app/data/db.sqlite3` and the Hub ledger is
+`/app/data/.hub`. Backup wiring is not asserted until implemented and proven.
 
 ## Front door & TLS
-DNS → edge → tunnel/origin chain; canary URLs; cache rules; the UA/CF gotchas that false-green canaries.
+
+Canonical host: `entry.zacoberg.com`. Final direct-origin/DNS/TLS topology is decided and recorded before
+provisioning. Canary must prove `/`, `/health/`, `/hub/cursor.json`, and the exact build SHA over HTTPS.
 
 ## Recovery
-The failure modes this infra has actually had (link `../registers/INCIDENTS.md`) and the proven
-recovery sequence for each.
+
+No standalone production incident exists yet. A failed first release leaves the legacy
+`zacoberg.com/entry/` route untouched; cutover occurs only after the independent origin is green.
 ````
 <!-- /TPL -->
 
 ### 4.21 `PROJECT/pm/PROTOCOL.md` — the multi-agent campaign law
 <!-- TPL:PROJECT/pm/PROTOCOL.md -->
 ````markdown
-# THE CAMPAIGN PROTOCOL — leader / worker / verifier / N-seat coordination (v2.1)
+# THE CAMPAIGN PROTOCOL — leader / worker / verifier / N-seat coordination (v2.2)
 
 > canonical · owner: leader · update: by ADR + versioned amendment only — NEVER redefine protocol semantics in channel prose
 
 Crystallized 2026-07-02 from a live-fire multi-agent campaign (referred to below as "v1") with
-every learned failure baked in as law. Content-agnostic: seats, channels, and gates — no app
-specifics. v2.1 adds §5's interrupt/preemption contract and §9 (steering & discipline).
+every learned failure baked in as law. Content-agnostic: seats, channels, and critical boundaries — no app
+specifics. v2.2 makes real-operation completion the default, makes all exceptional probes
+transient, and makes receipts compose without verification fan-out.
 
 ---
 
@@ -1238,8 +1499,8 @@ specifics. v2.1 adds §5's interrupt/preemption contract and §9 (steering & dis
 | Mode | Seats | Activate when |
 |---|---|---|
 | **SOLO** (default) | one principal agent | normal work. pm/ stays dormant; continuity = `../HANDOFF.md` + hub |
-| **PAIR** | LEADER + WORKER | a sustained queue where orchestration/verification and execution both saturate a session |
-| **TRIAD** | + VERIFIER | the product makes checkable claims at scale, or ships need an independent fail-closed gate |
+| **PAIR** | LEADER + WORKER | a sustained queue where orchestration and execution both saturate a session |
+| **TRIAD** | + transient VERIFIER | a declared critical boundary needs one independent receipt; fold the seat immediately after it reports |
 | **FLEET** | + WORKER-2..N / SPECIALIST(s) | independent workstreams that would serialize behind one worker |
 
 Escalate one step at a time; every added seat costs coordination overhead — add a seat only when
@@ -1251,14 +1512,15 @@ announced in DIRECTIVES + `../HANDOFF.md` §0.
 | Seat | Owns | May never |
 |---|---|---|
 | **OPERATOR** (human) | doctrine, product direction, operator-only decisions; may post anywhere as `who: operator` (`OP-n`) | — (absolute authority; misrouted operator posts get a HOLD + re-route by the leader, not silent compliance) |
-| **LEADER** (exactly 1) | orchestration · sequencing · issuing directives · **independent verification of every done** · stamps · CODE deploys · **the live ledger (§11)** · steering & discipline (§9) · answering blocked/question fast | delegate away verification-of-done; let the ledger/ADRs/docs lag the work layer even briefly |
-| **WORKER** (1..N) | implementation · tests · migrations · DATA deploys (as actor-tagged) · publishing producer contracts (manifest) | CODE deploys; editing another seat's files; unscoped kill patterns; editing directives channels; deviating from a directive without a `proposal` |
-| **VERIFIER** (0..1 standing) | independent verification per `../verify/README.md`: three-lane checks, verdicts, gate artifacts, `alert` escalations | deploys, ssh, app code, seeds/data patches, another seat's files; subagents if the operator has ordered watch-it-work |
+| **LEADER** (exactly 1) | orchestration · sequencing · issuing directives · risk classification and boundary-verifier dispatch · stamps · CODE deploys · **the live ledger (§11)** · steering & discipline (§9) · answering blocked/question fast | call implementer evidence independent; let the ledger/ADRs/docs lag the work layer even briefly |
+| **WORKER** (1..N) | implementation · migrations · product/data delivery · DATA deploys (as actor-tagged) · actual-operation receipts | CODE deploys; permanent tests/fixtures/checker workflows; editing another seat's files; unscoped kill patterns; editing directives channels; deviating from a directive without a `proposal` |
+| **VERIFIER** (transient only) | one explicitly scoped critical-boundary operation or disposable probe per `../verify/README.md`, its durable receipt, any `alert`, then exit | standing verification; permanent probes/fixtures/workflows; deploys, ssh, app code, seeds/data patches, or another seat's files |
 | **SPECIALIST** (transient) | one scoped pass (design, security, migration) under a written charter with an explicit end condition | outliving its charter — it folds back (§12) |
 
-**The verifier-identity invariant:** whoever verifies must not be whoever built. The leader
-verifies the worker; the verifier checks the product; the gate re-derives the verifier. Nobody
-stamps their own work.
+**The boundary-verifier identity invariant:** when work crosses a declared critical independent
+gate, whoever verifies must not be whoever built. Routine work remains in SOLO; copy, style,
+animation polish, and non-critical changes never activate a verifier. The temporary verifier exits
+as soon as its receipt lands.
 
 **The authority chain:** OPERATOR > DOCTRINE/CHARTER > LEADER directives > backlog order. A seat
 that believes a directive violates DOCTRINE or the CHARTER must say so (`question`/`proposal`)
@@ -1280,8 +1542,8 @@ pm/
 
 **One writer per file** — the only multi-writer file is `STATUS.jsonl`. The leader writes charters
 and directives; each seat writes only its own `STATE.md` and its designated product dirs
-(worker → code + `../verify/MANIFEST-CONTRACT.md` etc.; verifier → `../verify/**` minus the
-contract). Writing outside your scope is an incident (v1 lost a producer contract to a verifier
+(worker → product code/data; transient verifier → its scoped receipt and disposable scratch).
+Writing outside your scope is an incident (v1 lost a producer contract to a verifier
 overwrite). The leader's continuity file is `../HANDOFF.md` (there is no LEADER/DIRECTIVES.md —
 the operator directs the leader).
 
@@ -1325,16 +1587,16 @@ false leader callout in v1), `who` (seat id), `type`, `task`, `detail`. Event ty
 | `ready` | — | seat online, monitor armed (once per session start) |
 | `start` | — | task begun |
 | `progress` | — | meaningful forward motion (not filler) |
-| `done` | `evidence` (exact command + verdict-line output, post-final-edit) | completion CLAIM — credited only after leader verification (§6) |
+| `done` | `evidence` (real operation + observed outcome; critical probe receipt only when used) | completion record — credited by the leader under §6 |
 | `deploy_request` | `kind: code|data`, `sha`/data-scope | done-that-needs-a-deploy names its deploy (DOCTRINE §2.3) |
-| `deploy_done` | `kind`, `sha`, verification evidence | posted by the deploy owner after live verification |
+| `deploy_done` | `kind`, `sha`, observed live outcome | posted by the deploy owner after the real deploy operation |
 | `blocked` | `tried: […]` (≥2 attempts) | hard blocker; poster moves to other work |
 | `question` | — | decision/help request; poster MOVES ON meanwhile |
 | `proposal` | what + why + the alternative | request to deviate from a directive or improve the plan — posted BEFORE deviating, always; leader adjudicates on the seat's channel |
 | `finding` | grounded evidence | a discovery that changes the plan's premises (leader converts to note/gap/task — live, §11) |
 | `heartbeat` | real counts/position | ≥ every 15 min during long work; numbers, not vibes |
 | `alert` | grounded evidence | verifier finding escalation (§8) |
-| `gate_result` | `artifact` path, `green` bool, `rule` id | gate artifact written (consumers re-derive, never trust) |
+| `gate_result` | durable receipt reference, observed outcome, boundary id | exceptional critical-boundary result; no standing artifact generator |
 | `preempted` | paused task + resume point | checkpoint acknowledgment of an interrupt/halt (§5) |
 | `halt` | scope (`seat`/`campaign`) + reason | all-stop marker; only the issuer lifts it, by numbered directive |
 | `void` | artifact/rows voided + reason | tamper-evident invalidation (`../README.md` §5) |
@@ -1351,14 +1613,14 @@ cure is structural, not disciplinary).
 ### Directive anatomy
 - **Header:** `**<SEAT-PREFIX>-NNN — <TITLE>**` + urgency marker + source (`operator verbatim:
   "…"` when elevating operator words).
-- **Defect directives follow the six-part template** (DOCTRINE §3):
+- **Defect directives follow the five-part repair template** (DOCTRINE §3):
   1. DEFECT — instance, grounded (id + rendered-vs-evidence + quote)
   2. ROOT — which code path emitted it
-  3. CLASS FIX — the class-wide detector + self-test
-  4. CLASS QUERY — the count of siblings ("the found instance is never the only one")
-  5. IN-PLACE FIX — drain the stock
-  6. PROBE — bank the never-again test/eval row
-- **Acceptance criteria are mechanical** — a command and its expected verdict line, never adjectives.
+  3. REPAIR TASK — fresh Hub task and route, including the dedicated repair lane when available
+  4. FIX — restore the causal path and any already-known affected stock
+  5. RETRY — repeat the real failed operation and record the outcome
+- **Acceptance criteria name an observable outcome.** A command is optional, and copy, wording,
+  style, motion, and other non-critical work must not acquire a validation command.
 - **Every deploy step carries `actor:`** — a step tagged for another seat is a wait-for-signal, not an action.
 - **Directives override the backlog on conflict**; the leader records WHY in the directive.
 - **Answers to `question`s/`proposal`s** are appended to the same channel, referencing the event.
@@ -1381,21 +1643,27 @@ cure is structural, not disciplinary).
 - **Steering is cheap by design:** because every seat checkpoints into `STATE.md`, the leader
   (or operator) can redirect any seat at any time and lose at most one atomic unit of work.
 
-## §6 Verification & credit (the leader's core duty)
+## §6 Completion evidence & credit (the leader's core duty)
 
-1. A `done` is a **claim**. The leader independently: re-runs the stated verification extracting
-   the explicit verdict line (match `^(OK|FAILED)|Ran \d+ tests` — never trust the last stdout
-   line; test chatter fools tail-grabs), reads the implementing diff, and for user-facing work
-   checks the live surface itself.
-2. **Evidence freshness:** the run must postdate the final edit, and must exercise the REAL chain
-   (v1's deploy #2 looped prod 11 minutes because tests validated a middleware, not the proxy
-   chain in front of it — test the chain, not the unit, before ships).
-3. **Parse actual shapes.** Instruments lie by key-drift (`entities` vs rows, `data` vs `payload`
-   — three broken instruments shipped in v1). Prefer raw reads over assumed schemas when verifying.
-4. Credit = the `Leader-verified:` line. Mis-credits are retracted by a `correction` + channel note
-   — including the leader's own (self-verification errors get the same treatment).
-5. **Done ≠ live** (DOCTRINE §2.3): a verified done that needs a deploy stays open until its
-   `deploy_done` lands and is live-verified.
+1. **The real operation is the default proof.** The worker performs the changed behavior and
+   records the observed result. If it works and no critical boundary remains, the leader marks the
+   task done and stops. Copy, wording, style, animation polish, and other non-critical work receive
+   no test, automated copy validation, closer, or second pass.
+2. **Tests never accumulate.** Do not add permanent test files, fixtures, checker scripts,
+   calibration sets, scheduled runs, or CI verification workflows. Security, destructive-data,
+   migration, protocol-compatibility, and concurrency boundaries are the rare exceptions that may
+   justify one temporary probe.
+3. **A critical probe is disposable.** Create it in system temporary space or explicitly disposable
+   task scratch, run it once after the final edit, retain its command/scope/outcome receipt, delete
+   it before commit, and fold the verifier seat. The probe is not product code.
+4. **Receipts compose.** A completed dependency's receipt is inherited. Parent tasks and releases
+   never replay child proof; they observe only a new critical integration seam created by joining
+   those completed parts. Verifier-of-verifier fan-out is forbidden.
+5. **Real failure is sufficient notice.** When the actual operation breaks, create a fresh repair
+   task, route it to a dedicated error-fixing lane when available, and let delivery agents continue
+   unrelated work. The successful retry closes the repair task.
+6. **Done ≠ live** (DOCTRINE §2.3): work that needs a deploy stays open until its `deploy_done`
+   records the observed live outcome.
 
 ## §7 Deploy interlocks (code, not prose)
 
@@ -1410,41 +1678,42 @@ cure is structural, not disciplinary).
    release stage. A predeploy failure means the old artifact still serves — check before panicking.
 5. Every deploy appends a hub `deploy` entity (SHA+timestamp, unconditional) and a `deploy_done` event.
 
-## §8 The independent verification lane
+## §8 The independent verification lane (boundary-triggered)
 
-Wiring for the TRIAD+ modes (contract: `../verify/README.md`):
-1. Worker publishes the manifest + contract; verifier sweeps; gate artifacts block data ships fail-closed.
-2. **Ship sequence (locked):** worker posts wave-green `done` → leader verifies + runs CODE deploy
-   → worker regenerates manifest + publishes the ship's changed-record list → verifier runs the
-   fresh delta → gate green (re-derived) + **leader stamp** → worker runs the DATA deploy.
-3. **Stamps:** a gate artifact is provisional until the leader appends `Leader-verified:` on the
-   verifier's channel. The stamp is the authorization primitive.
-4. **Auto-routing:** alerts for ESTABLISHED failure-mode classes flow verifier → worker directly
-   (the worker consumes `alert` events; the leader is not a relay). The leader keeps: novel
-   classes, escalations, ambiguity, all stamps, and deploy triggers.
-5. The verifier is authorized to distrust gathered data and check the live world; snapshots make
-   live checks count.
+This lane exists only for an explicitly named critical boundary (contract:
+`../verify/README.md`). It is never activated for copy, style, motion, routine fixes, broad
+sampling, or release ceremony:
+1. The leader names the precise security, destructive-data, migration, protocol, or concurrency
+   seam and why the real operation alone cannot expose unacceptable failure.
+2. The verifier performs the protected real operation when safe; only when necessary, it creates
+   one disposable probe in temporary scratch and runs it once.
+3. The verifier appends a durable receipt with scope, command/action, observed outcome, target SHA,
+   and identity, deletes all probe/fixture/scratch artifacts before commit, then exits.
+4. Completed child receipts are inherited. A release receipt covers only a newly created critical
+   integration seam and never expands into nested verifier fan-out.
+5. A failure opens a fresh repair task and may auto-route to a dedicated repair worker. After the
+   repair, retry the failed real operation; do not install a standing regression workflow.
 
 ## §9 Steering & discipline (how the leader keeps seats in line)
 
 ### §9.1 Leader cadence
 - **Continuously:** monitor armed; `blocked`/`question`/`proposal` answered within minutes (an
-  unanswered blocker is a leader defect); dones verified as they land (§6); ledger live (§11).
-- **Per ship:** gate + stamp + live verification (§7/§8).
-- **Per session (and at least daily):** a ledger-parity sweep (created-vs-transitioned, stale
-  `in_progress`); backlog re-prioritized against the CHARTER; `../HANDOFF.md` re-cut; **one
-  spot-audit of intermediate work per active seat** — sample the middle of the work, not just the
-  dones (v1's fabrication was caught by mechanical audit of in-flight output, not by completion review).
+  unanswered blocker is a leader defect); evidence recorded as work lands (§6); ledger live (§11).
+- **Per ship:** perform the actual ship and record the observed live outcome; invoke §8 only for a
+  newly created critical integration seam.
+- **Per session (and at least daily):** reconcile the live ledger with actual starts/completions,
+  recover stale `in_progress` ownership, reprioritize the backlog against the CHARTER, and re-cut
+  `../HANDOFF.md`. This is queue maintenance, not a rerun of completed work.
 
 ### §9.2 Drift detection (what the leader watches for)
 - **Acceptance drift** — output solves a neighboring problem, not the directive's.
 - **Scope drift** — work beyond the directive without a `proposal`.
-- **Quality drift** — evidence getting thinner, verification commands getting weaker, prose
-  replacing numbers in heartbeats.
+- **Throughput drift** — agents adding non-critical checks, validators, or review fan-out after
+  changed behavior already works; prose replacing numbers in heartbeats.
 - **Behavioral drift** — write-scope violations, filler traffic, unscoped operations, banned-topic
   narration.
-Signals: the bus tail, diff reads, spot-audits, and the gate's own counters (a verifier whose
-supported-rate jumps discontinuously is drifting; v1 calibration anchors exist for exactly this).
+Signals: the bus tail, observable task movement, repeated failed real operations, and accumulated
+validation artifacts. A queue growing while agents repeatedly check completed work is drifting.
 
 ### §9.3 The discipline ladder (proportional, always on the seat's own channel)
 1. **NUDGE** — an inline note in the next routine directive. No ceremony.
@@ -1455,7 +1724,7 @@ supported-rate jumps discontinuously is drifting; v1 calibration anchors exist f
    versions — that churn is the ladder *working*).
 4. **SEAT RESET** — for fabrication, repeated hard-boundary violations, or unrecoverable
    confusion: archive the seat's channel + charter whole, `void` tainted outputs, spin up a fresh
-   charter + session (§12), and re-verify anything the old seat produced before reuse. Two resets
+   charter + session (§12), and reconcile affected work through its real operation before reuse. Two resets
    of the same seat design = the design is wrong — re-architect the seat (narrow its scope, add
    tooling, or split it) instead of resetting a third time.
 CORRECTION and above are recorded live (§11): an incident row if the drift produced defects, and
@@ -1464,8 +1733,9 @@ the pattern goes to `../registers/FAILURE-MODES.md` group H if it's new.
 ### §9.4 Watchdogs & liveness
 - **Silence watchdog:** heartbeat window = 15 min (or the seat's declared cadence). Silence past
   2 windows → the leader posts a `🔴` liveness-check directive; silence past 1 more → the seat is
-  presumed dead: expire its claims, salvage-and-verify whatever is on disk, respawn or reassign
-  (§12). Nothing is voided on death alone — dead seats' work is verified, not discarded.
+  presumed dead: expire its claims, salvage the scoped work, reconcile it through the real
+  operation, then respawn or reassign (§12). Nothing is voided on death alone—unfinished work
+  returns to the task or repair queue.
 - **Anti-thrash watchdog:** the same task failing twice on the bus triggers a stop-work +
   re-architecture directive (DOCTRINE §1.4). There is never a third identical attempt.
 - **Runaway watchdog:** high traffic with non-moving counts (heartbeats without progress) draws a
@@ -1497,11 +1767,12 @@ pm channels are operational traffic only; the ledger is the record.
 The cadence is per-event, never batched:
 - **No directive without a task** — issuing a directive creates/claims its hub task (`in_progress`) in the same act.
 - **No decision without an ADR** — recorded when the decision is made, with real prose (a stub entity is a defect).
-- **No `done` without verification** — the leader's verify pass (§6) and the hub transition
-  (`done` + `verified_by` + evidence) are one atomic act; likewise `blocked` ⇒ deps recorded.
+- **No `done` without completion evidence** — the real operation and observed outcome (§6) land
+  with the hub transition (`done` + `verified_by` + evidence). A transient critical receipt is
+  attached only when that boundary actually required one; likewise `blocked` ⇒ deps recorded.
 - **No deploy without its entity** — appended by the act of deploying, `audit_ok` computed.
-- **Doctrine born in traffic** → `../DOCTRINE.md` §6 + ADR before the traffic moves on; defect
-  classes → FAILURE-MODES + INCIDENTS at classification time; research → `../research/` +
+- **Doctrine born in traffic** → `../DOCTRINE.md` §6 + ADR before the traffic moves on; observed
+  failures → a fresh task + INCIDENTS, and useful repeated/novel classes → FAILURE-MODES; research → `../research/` +
   chronicle entry the session it lands; `../HANDOFF.md` re-cut at every significant state change.
 
 Governance parity is audited, not assumed: hub transitions must track real work in real time
@@ -1666,12 +1937,13 @@ bus with per-seat ACLs, adopt it by ADR — the event vocabulary and duties tran
 
 1. **Create the project repo/folder**; version-control it from the first commit.
 2. **Instantiate `PROJECT/`** from §4, byte-exact, plus the `schema/` files from §3.1.
-3. **Bind the substrate** (§2.2): if the environment has a suitable tracker/event system, map the
-   entity model onto it and record the mapping as ADR-0002; otherwise implement the reference
-   substrate (§2.3) — ledger, fold+validate writer, claims — in the environment's scripting
-   runtime (~200 lines; no dependencies beyond SHA-256 and a JSON-Schema validator).
-4. **Implement `plane_audit`** (§2.4) and wire it as a REQUIRED check (CI required status /
-   pre-receive / pipeline gate). Advisory wiring is a bootstrap failure.
+3. **Bind the substrate** (§2.2): when adopting from `hub-scaffold`, copy/mount the shipped
+   `hub_core` and Django adapter. In another environment, map the entity model onto a suitable
+   tracker/event system or implement the roles in §2.3. Record the mapping and all deviations as
+   ADR-0002; do not represent a planned binding as operational.
+4. **Activate the gate** (§2.4): run the reference `hubaudit` or implement an equivalent and wire it
+   as a REQUIRED check (CI required status / pre-receive / pipeline gate). Advisory wiring is a
+   bootstrap failure.
 5. **Genesis, live-ledger style:** record ADR-0001 "This project adopts the Project Plane"
    (accepted, full prose) + the first real tasks — through the write path, never by editing
    projections.
@@ -1695,13 +1967,14 @@ require PASS. Record the whole run as the project's first `runs/` artifact.
 | 2 | an entity with a dangling `idref` | audit HIGH |
 | 3 | an ADR numbered with a gap (e.g. 1 then 3) | audit WARN |
 | 4 | one byte modified in a mid-file ledger event | audit CRITICAL (chain) |
-| 5 | a gate artifact hand-edited to `green: true` over refuted rows | consumer re-derivation flags FABRICATED-GREEN and blocks |
+| 5 | a gate artifact hand-edited to `green: true` over refuted rows | when the independent verification lane is implemented, its consumer re-derivation flags FABRICATED-GREEN and blocks |
 | 6 | a completion attempted without a live claim (multi-agent binding) | write REJECTED |
 | 7 | clean state (all seeds removed) | audit exit 0 |
 
-Behavioral spot-checks: projections regenerate identically from the ledger after deletion; an
-append to a channel file via an editor-style rewrite is detectable (monitor flags it); the audit
-run itself appears in `runs/`.
+Behavioral spot-checks: projections regenerate identically from the ledger after deletion. If the
+file-channel protocol is activated, an editor-style rewrite is detectable by its monitor. If the
+project run recorder is implemented, the audit run appears in `runs/`. Mark unimplemented optional
+lanes as such; absence may be an accepted bootstrap scope, fabricated green may not.
 
 ## §8 Rebinding quick-reference (work environments)
 
@@ -1716,3 +1989,162 @@ run itself appears in `runs/`.
 The tracker may be the *entity store* (R2) only if it can enforce the unsatisfiability rules at
 write time; otherwise the ledger stays canonical and the tracker is a synced projection — declare
 which in ADR-0002.
+
+## §9 Hub Excellence Contract
+
+<!-- TPL:PROJECT/HUB-QUALITY.md -->
+````markdown
+# HUB QUALITY — the construction contract
+
+> canonical contract · owner: project operator · update: whenever the Hub's product, truth, flow, or coordination bar changes
+
+This is the minimum and aspirational bar for every Hub surface. A Hub should be phenomenally useful,
+visually unmistakable, alive with truthful realtime feedback, and tuned for extraordinary task
+throughput. Quality is established by using the real thing. Permanent tests, copy assertions, and
+ceremonial verifier ladders are not substitutes for an authored product.
+
+## 1. Product and visual excellence
+
+A Hub must have a distinctive project identity, deliberate hierarchy, strong spatial rhythm, clear
+information density, and coherent depth, color, type, motion, and interaction. It must feel authored
+for its project rather than like an interchangeable admin template. Delight is welcome when it makes
+state, causality, or attention easier to understand; decoration must never compete with truth.
+
+Every viewport has one dominant above-the-fold operational decision. A metric appears only once
+above the fold. Each visual region has at most one persistent animated signal; all other motion is
+caused by meaningful state change. Every generated Hub declares a project-specific mark, accent
+pairing, display voice, surface character, and optional visual motif before visual construction.
+
+When constructing a new Hub or making a material redesign, use the rendered product at its empty,
+ordinary, dense, loading, live, degraded, and error states. Ask: where does the eye land, what needs
+action, what changed, what is trustworthy, and can the next useful action be taken without hunting?
+This is product work, not a demand for a permanent visual test suite.
+
+## 2. Required invariants
+
+### 2.1 Truth-derived UI
+
+- The canonical snapshot/JSON island is the source of rendered assertions. DOM labels, totals,
+  progress, delivery state, and animation derive from it; markup is not a second ledger.
+- `done`, `landed`, `deployed`, and `live` remain separate claims with separate evidence. Unknown or
+  unavailable evidence renders **unmeasured**, never zero, success, or false green.
+- Every metric names its denominator, window, and freshness. Empty denominators remain unmeasured.
+
+### 2.2 Realtime truth
+
+- Realtime starts with a complete snapshot and monotonic cursor. Every canonical mutation publishes
+  once after commit into a persistent push stream; the connected client reconciles immediately to the
+  highest announced cursor. Normal operation has no interval polling and no manual sync control.
+- The UI names one transport truth: **Connected** or **Disconnected**. A disconnect never masquerades
+  as freshness; reconnect performs one ordered, deduplicated cursor catch-up and then returns to push.
+  Recovery reads are recovery only, not an alternate steady-state synchronization loop.
+- Serve long-lived streams through ASGI and a shared pub/sub source wherever multiple server processes
+  can write. An in-process signal bus is valid only for an explicitly single-process reference Hub.
+- The live mutation path does not replay avoidable history, spawn Git, or rerun repository audit.
+  Maintain a cursor-keyed materialized fold; compute heavyweight integrity views outside delivery.
+- Heartbeats, replays, and no-op deltas do not animate as work. Motion follows a real state transition.
+
+### 2.3 Accessible, responsive interaction
+
+- Target WCAG 2.2 AA. Preserve content and function at 320 CSS px without two-dimensional scrolling
+  except where the content intrinsically requires it; never encode meaning by color alone.
+- Every action is keyboard-operable with visible focus. Tabs use `tablist`/`tab`/`tabpanel`, one
+  selected tab, roving focus, arrow navigation, Home/End, and Enter/Space where activation is manual.
+- Modal dialogs put focus inside, contain Tab/Shift+Tab, close on Escape, make the background inert,
+  have an accessible name, and restore focus to the invoker.
+- Status changes are announced without stealing focus. Reduced-motion and forced-color modes retain
+  equivalent meaning and functionality.
+
+### 2.4 Motion grammar and layout stability
+
+Animation communicates entry, transition, dependency, progress, or attention. It is interruptible,
+does not endlessly celebrate ordinary activity, does not cause layout shift, and has a meaningful
+reduced-motion form. Live patches preserve reading position and focus.
+
+### 2.5 Performance and dependency floor
+
+At the 75th percentile of field visits, target LCP <= 2.5 s, INP <= 200 ms, and CLS <= 0.1 on mobile
+and desktop. Label field and lab evidence honestly; a lab run cannot establish a field pass. Record
+project-specific bundle, request, and realtime budgets. The base Hub has no runtime CDN dependency;
+an adopter exception requires an ADR, failure behavior, and offline/degraded proof.
+
+### 2.6 Flow that improves throughput
+
+Expose work in progress (started, not finished), throughput (finished per stated unit of time), work
+item age, cycle-time distribution, and a service-level expectation expressed as period plus
+probability. Also expose readiness, stalled/expired work, the dependency frontier, and arrival versus
+departure pressure where measurable. Missing data is **unmeasured**. Do not turn raw worker counts or
+ticket volume into a leaderboard; optimize finished value and bottleneck removal, not activity theater.
+
+### 2.7 Durable agent coordination
+
+Use one durable task lifecycle with atomic leases/fencing, idempotent mutation, heartbeats, explicit
+ownership, resumable plans, and attached evidence. Bound work in progress by the ready frontier;
+parallelize only independent work and return structured results. Carry task, agent, lease, and trace
+correlation across boundaries. Advertise MCP, A2A, streaming, or other capabilities only when the
+callable transport and behavior actually exist.
+
+## 3. Proof without test accumulation
+
+The default proof is the actual operation: make the change, exercise the changed path on the real
+surface, and observe whether it works. If it breaks, that observed failure is the notice and becomes
+fresh board input. The delivery agent records it without speculative repair or silently changing
+roles; the operator may later route it to a dedicated repair/error-fixing lane.
+
+- Do not create or run a test for copy, wording, spacing, color, ordinary style or animation tuning,
+  or another non-critical narrow fix. Do not validate page copy with assertions, snapshots, pixel
+  comparisons, screenshots-as-gates, or a second agent. Implement it on the page and move on.
+- A test is justified only for a rare critical boundary such as security or authorization, destructive
+  data integrity, a migration, public protocol compatibility, or concurrency/fencing. That test must
+  be a one-shot transient probe in temporary storage, run only for the named risk, and deleted before
+  commit. Retain its result as the task receipt; never retain the test artifact.
+- A completed child task's receipt composes into its parent. Parents and releases inherit those
+  receipts rather than rerunning child proof. A release may probe only the genuinely new integration
+  seam created by composing the children.
+- Never nest verifiers. A closer may not dispatch another closer, suite, or proof ladder. One boundary,
+  one smallest decisive operation, one receipt, then it exits.
+
+For a new Hub or material redesign, the following is a design-coverage guide, not a standing suite or
+a requirement for every edit:
+
+| Dimension | States to use when materially affected |
+|---|---|
+| Width | 320, 768, and 1440 CSS px |
+| Theme | light and dark, where both are supported |
+| User preference | normal motion, reduced motion, forced colors |
+| Input | keyboard and pointer paths |
+| Data/transport | empty, ordinary, dense, live update, degraded, and error |
+
+**Stop rule:** once the real changed behavior succeeds and no critical boundary was crossed, record
+the work and stop. Do not add a check, test, screenshot ritual, independent verifier, or release rerun
+merely to make simple work look more proven.
+
+## 4. Elevation workflow
+
+1. Research current primary standards and the project's audience and visual identity.
+2. Audit rendered states and live behavior; record concrete product defects.
+3. Write a design brief naming hierarchy, tokens, motion grammar, state semantics, and budgets.
+4. Implement from canonical data through the renderer, preserving local identity.
+5. Use the affected real paths. Keep their receipts; create a transient probe only for a critical
+   boundary, and remove that probe before commit.
+6. Curate generally useful improvements back into `hub-scaffold`; never bulk-merge an instance.
+
+Use `campaigns/elevate-hub.md` for the executable campaign. Exceptions belong in an ADR with owner,
+expiry/revisit trigger, user impact, and evidence. Upgrades preserve project identity and local theme,
+diff this contract explicitly, and upsert generic units without imposing redundant proof work.
+
+## 5. Primary standards
+
+- [WCAG 2.2](https://www.w3.org/TR/WCAG22/)
+- [WAI-ARIA tabs](https://www.w3.org/WAI/ARIA/apg/patterns/tabs/)
+- [WAI-ARIA modal dialogs](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/)
+- [Core Web Vitals thresholds](https://web.dev/articles/defining-core-web-vitals-thresholds)
+- [WHATWG server-sent events](https://html.spec.whatwg.org/dev/server-sent-events.html)
+- [The Kanban Guide](https://kanbanguides.org/the-kanban-guide/)
+- [DORA metrics](https://dora.dev/guides/dora-metrics/)
+- [OpenAI Agents SDK orchestration](https://openai.github.io/openai-agents-python/multi_agent/)
+- [MCP Tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks)
+- [A2A specification](https://a2a-protocol.org/dev/specification/)
+- [OpenTelemetry overview](https://opentelemetry.io/docs/specs/otel/overview/)
+````
+<!-- /TPL -->

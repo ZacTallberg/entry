@@ -1,20 +1,22 @@
 """Hub machine READ API. Every surface renders FROM the event-log snapshot (single source of
 truth); the HTML embeds the same payload. Doctrine sections 1-2 + the hub API contract.
 
-The LIVE endpoint emits only an authenticated cursor and a safe event envelope; the browser then
-reconciles from the same canonical snapshot the HTML and the JSON API serve. Animation is never
-allowed to become a second source of truth — an event says *something moved*, and the board is
-re-read to find out what.
+The LIVE endpoint carries canonical cumulative patches directly from the same materialized event
+projection the HTML and JSON API serve. Signals are wake-ups, never a second source of truth;
+reconnect cursor reconciliation closes the only interval in which a client could miss one.
 """
+import asyncio
 import json
+import threading
 import time
 
 from django.http import Http404, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
 
-from hub_core import adherence, cost, dag, failure_taxonomy, project, projections, telemetry, wip
+from hub_core import adherence, cost, dag, failure_taxonomy, flow, project, projections, telemetry, upcast, wip
+from hub_core.canonical import content_hash
 
-from . import delivery, hub_app
+from . import delivery, hub_app, realtime
 
 _COLLECTION = {"task": "tasks", "adr": "adrs", "feat": "feats", "gap": "gaps", "cap": "caps",
                "deploy": "deploys", "note": "notes"}
@@ -45,16 +47,19 @@ def _fmt_age(s):
 
 
 def _activity(events, state, limit=36):
-    """Recent canonical events as a payload-safe activity rail."""
-    rows = []
-    entities = state.get("entities", {})
-    for event in reversed(events):
+    """Recent canonical events rendered at event time, never rewritten by current state."""
+    rows, event_entities = [], {}
+    current = state.get("entities", {})
+    for event in events:
         aggregate = event.get("aggregate") or ""
-        entity = entities.get(aggregate, {})
         event_type = event.get("type") or ""
         if not event_type.startswith(("task.", "adr.", "gap.", "feat.", "cap.", "deploy.",
                                       "note.", "decision.")):
             continue
+        payload = upcast.apply(event_type, event.get("payload") or {})
+        entity = dict(event_entities.get(aggregate, {}))
+        entity.update(payload)
+        event_entities[aggregate] = entity
         row = {
             "seq": event.get("seq"),
             "ts": event.get("ts"),
@@ -63,27 +68,27 @@ def _activity(events, state, limit=36):
             "entity_type": aggregate.split(":")[1] if aggregate.count(":") >= 2 else None,
             "title": entity.get("title") or entity.get("name") or aggregate.rsplit(":", 1)[-1],
             "status": entity.get("status") or entity.get("maturity"),
+            "current_status": (current.get(aggregate) or {}).get("status")
+                              or (current.get(aggregate) or {}).get("maturity"),
             "agent": event.get("agent_id"),
             "version": event.get("result_version"),
         }
-        # Surface the completion PROOF: a done task carries the exit-0 receipt that granted it, so
-        # a watcher sees WHAT verified the work, not merely that a row turned green.
-        if entity.get("status") == "done":
-            runs = entity.get("verification_run") or []
+        # Surface an OPTIONAL critical-probe receipt when one exists. Ordinary done work stands on
+        # the successful real operation and emits no synthetic receipt merely to turn the row green.
+        if event_type == "task.transitioned" and payload.get("status") == "done":
+            runs = payload.get("verification_run") or []
             if runs:
                 r = runs[-1] if isinstance(runs, list) else runs
                 row["receipt"] = {"command": r.get("command"), "exit_code": r.get("exit_code"),
                                   "ran_by": r.get("ran_by")}
         rows.append(row)
-        if len(rows) >= limit:
-            break
-    return rows
+    return list(reversed(rows[-limit:]))
 
 
 def _inflight(state, stall_s=STALL_S):
     """The live fleet: open tasks currently held by a worker's lease.
 
-    Under the receipt gate a task can go todo->done directly, so the LEASE — not a status word —
+    Under the throughput-first model a task can go todo->done directly, so the LEASE — not a status word —
     is the true in-flight signal, and this reads the claims dir. An expired lease is not in
     flight (the task is already free to reclaim); a live lease older than stall_s is flagged so a
     stuck worker is visible rather than merely absent from the completions feed."""
@@ -107,12 +112,17 @@ def _inflight(state, stall_s=STALL_S):
         if lease.get("expires", 0) <= now:
             continue
         claimed = lease.get("claimed", 0)
+        heartbeat = lease.get("last_heartbeat", claimed)
         age = int(now - claimed) if claimed else None
+        heartbeat_age = int(now - heartbeat) if heartbeat else None
         rows.append({
             "task": task, "agent": lease.get("agent"),
             "title": ent.get("title") or task.rsplit(":", 1)[-1],
             "status": ent.get("status"), "age_s": age,
-            "stalled": bool(age is not None and age > stall_s),
+            "heartbeat_age_s": heartbeat_age,
+            "expires_in_s": max(0, int(lease.get("expires", 0) - now)),
+            "last_heartbeat": heartbeat,
+            "stalled": bool(heartbeat_age is not None and heartbeat_age > stall_s),
             **_plan_progress(ent),
         })
     rows.sort(key=lambda r: (r.get("age_s") or 0), reverse=True)
@@ -131,33 +141,33 @@ def _plan_progress(ent):
             "plan_pct": (round(done * 100 / total) if total else None)}
 
 
-def _readiness(state):
-    """Pipeline health: which unblocked todos are READY to complete (they carry a
-    verification_command a worker can run to a receipt) vs which NEED SPEC first. A worker that
-    pulls a needs-spec task stalls trying to write one, so the queue must distinguish them."""
-    flags = state.get("flags", {})
-    ready, needs_spec, snoozed = [], [], []
-    for t in state.get("by_type", {}).get("task", []):
-        if t.get("status") != "todo":
-            continue
-        f = flags.get(t["id"], {})
-        item = {"id": t["id"], "title": t.get("title"), "priority": t.get("priority")}
-        # A task whose durable timer has not fired is not READY and not BROKEN — it is waiting,
-        # and it says so with its wake time. Excluded-and-silent is how a snoozed task becomes a
-        # task that appears NOWHERE, which is the failure the dangling-dep rail exists to prevent.
-        if f.get("snoozed_until"):
-            snoozed.append(dict(item, not_before=f["snoozed_until"]))
-            continue
-        if not f.get("unblocked"):
-            continue
-        (ready if (t.get("verification_command") or "").strip() else needs_spec).append(item)
-    return {"ready": len(ready), "needs_spec": len(needs_spec), "snoozed": len(snoozed),
-            "ready_top": ready[:5], "needs_spec_top": needs_spec[:5], "snoozed_top": snoozed[:5]}
-
-
 # Governance amber that needs a human RULING, not code — surfaced on the attention rail so a
 # silent revert, a bypassed scope edit, or an out-of-order completion is something the operator
 # SEES, rather than something only the audit JSON carries.
+def _readiness(state, lease_rows=None):
+    """Pipeline health from the same classifier the claim seam enforces."""
+    flags = state.get("flags", {})
+    lease_map = {row.get("task"): row for row in
+                 (hub_app.leases() if lease_rows is None else lease_rows)}
+    groups = {name: [] for name in ("ready", "needs_spec", "snoozed", "blocked")}
+    for task in state.get("by_type", {}).get("task", []):
+        cls = flow.classify(task, flags.get(task["id"], {}), lease_map.get(task["id"]))
+        item = {"id": task["id"], "title": task.get("title"),
+                "priority": task.get("priority"), "flow_state": cls["state"],
+                "reason": cls["reason"], "stale_reclaim": cls["stale_reclaim"]}
+        if cls["available"]:
+            groups["ready"].append(item)
+        elif cls["state"] == "needs_spec":
+            groups["needs_spec"].append(item)
+        elif cls["state"] == "snoozed":
+            item["not_before"] = flags.get(task["id"], {}).get("snoozed_until")
+            groups["snoozed"].append(item)
+        elif cls["state"] in ("blocked", "poison"):
+            groups["blocked"].append(item)
+    return {**{name: len(rows) for name, rows in groups.items()},
+            **{name + "_top": rows[:5] for name, rows in groups.items()}}
+
+
 _ATTENTION_AMBER = ("scope:changed", "task:reverted", "deps:unmet")
 
 
@@ -241,9 +251,10 @@ def _attention(state, audit, inflight, adher=None, deliv=None):
     for t in tasks:
         if t.get("status") != "todo" or not flags.get(t["id"], {}).get("unblocked"):
             continue
-        if not (t.get("verification_command") or "").strip():
+        if t.get("work_kind") in ("product", "verification") and not str(
+                t.get("acceptance") or "").strip():
             add(5, "needs-spec",
-                "unblocked but no verification_command — spec it before a worker can pull it",
+                "unblocked executable work has no concrete acceptance — spec it before pull",
                 t["id"], t.get("title"))
 
     if _readiness(state).get("ready", 0) == 0 and not (inflight or []):
@@ -328,12 +339,10 @@ def _failure_modes(events, top=6):
 
 def _worker_health(state, events, inflight, window=25):
     """The fleet's own health, folded from what this board can actually see: completions per
-    seat, and the receipt outcomes behind them.
+    seat, plus outcomes for the rare critical probes workers explicitly recorded.
 
-    Rates carry their DENOMINATOR, never a bare percentage — a fleet with two recorded receipts
-    is not a 50%-failure fleet, and a board with none is not a healthy one. With nothing recorded
-    the block says so rather than rendering 0%, which reads as a clean fleet instead of an
-    unmeasured one."""
+    Probe rates carry their DENOMINATOR, never a bare percentage. No receipt is a normal state when
+    no critical probe was declared; it says nothing negative about ordinary completed work."""
     tasks_by_worker = {}
     for t in state.get("by_type", {}).get("task", []):
         if t.get("status") == "done" and (t.get("provenance") or {}).get("agent"):
@@ -391,11 +400,14 @@ def _fleet(events, state, inflight):
         if not et.startswith(("task.", "adr.", "gap.", "deploy.")):
             continue
         ent = ents.get(e.get("aggregate", ""), {})
+        payload = upcast.apply(et, e.get("payload") or {})
         if et == "task.transitioned":
-            action = "completed" if ent.get("status") == "done" else "moved"
+            action = "completed" if payload.get("status") == "done" else \
+                     "started" if payload.get("status") == "in_progress" else "moved"
         else:
             action = LABEL.get(et, et)
-        title = ent.get("title") or ent.get("name") or (e.get("aggregate", "").rsplit(":", 1)[-1])
+        title = payload.get("title") or payload.get("name") or ent.get("title") \
+                or ent.get("name") or (e.get("aggregate", "").rsplit(":", 1)[-1])
         last_ts.setdefault(ag, e.get("ts"))
         tr = trails.setdefault(ag, [])
         if len(tr) < 5:
@@ -417,9 +429,9 @@ def _fleet(events, state, inflight):
             "task_id": lease.get("task") if lease else None,
             "age_s": lease.get("age_s") if lease else None,
             "idle_s": idle_s, "trail": trails.get(ag, []),
-            "done_total": sum(1 for t in state.get("by_type", {}).get("task", [])
-                              if t.get("status") == "done"
-                              and (t.get("provenance") or {}).get("agent") == ag),
+            "done_total": sum(1 for e in events if e.get("agent_id") == ag
+                              and e.get("type") == "task.transitioned"
+                              and (e.get("payload") or {}).get("status") == "done"),
             **_plan_progress(ents.get(lease.get("task"), {}) if lease else {}),
         })
     rank = {"working": 0, "stalled": 0, "recent": 1, "idle": 2}
@@ -440,15 +452,20 @@ def _dag_block(state, workers):
 
 # Process-level snapshot memo keyed on the append-only head cursor (seq, hash) + the served probe
 # + a fingerprint of the CLAIMS dir. The ledger is append-only, so an unchanged head means an
-# unchanged fold and audit — without this, idle polls (the board's fallback, canaries, supervisors)
-# re-fold and re-verify the whole ledger to recompute a result that could not have changed.
+# unchanged fold and audit — without this, reconnect recovery and supervisors would re-fold and
+# re-verify the whole ledger to recompute a result that could not have changed.
 #
 # The snapshot is NOT a pure function of the head, though: the inflight/fleet blocks read lease
 # FILES, which change with no ledger event at all (claim, heartbeat, reap) — so the key carries a
 # stat fingerprint of claims/, or a fresh claim would stay invisible until the next append.
 # `served` is in the key because it feeds the build/coherence block; one probe must never be
 # handed another probe's cached verdict. Races just recompute, which is benign.
+_STATE_CACHE = {"seq": None, "hash": None, "events": None, "state": None}
+_STATE_LOCK = threading.RLock()
 _SNAP_CACHE = {"key": None, "value": None}
+_AUDIT_CACHE = {"key": None, "value": None}
+_DELIVERY_CACHE = {"values": {}, "latest": {}, "building": set()}
+_DELIVERY_LOCK = threading.RLock()
 
 
 def _leases_fp():
@@ -456,8 +473,16 @@ def _leases_fp():
     changes a (name, mtime_ns, size) triple. One scandir — trivial next to a ledger fold."""
     import os as _os
     try:
-        return tuple(sorted((e.name, e.stat().st_mtime_ns, e.stat().st_size)
-                            for e in _os.scandir(hub_app.CLAIMS) if e.name.endswith(".json")))
+        now = time.time()
+        stats = {e.name: (e.stat().st_mtime_ns, e.stat().st_size)
+                 for e in _os.scandir(hub_app.CLAIMS) if e.name.endswith(".json")}
+        semantic = []
+        for lease in hub_app.leases(now=now, include_expired=True):
+            name = hub_app._claim_path(lease.get("task", "")).name
+            heartbeat = lease.get("last_heartbeat", lease.get("claimed", 0))
+            semantic.append((name, lease.get("expires", 0) > now,
+                             bool(heartbeat and now - heartbeat > STALL_S), stats.get(name)))
+        return tuple(sorted(semantic))
     except OSError:
         return None  # absorbs: claims dir absent/entry vanished mid-scan — unfingerprintable just
                      # skips the memo and the fold recomputes
@@ -473,34 +498,222 @@ def _telemetry_fp():
         return None  # absorbs: no telemetry file yet — nothing to fingerprint, memo skipped
 
 
+def _events_through(store, after, target):
+    rows, cursor = [], after
+    while cursor < target:
+        batch = [event for event in store.events_after(cursor, limit=500)
+                 if event.get("seq", 0) <= target]
+        if not batch:
+            break
+        rows.extend(batch)
+        cursor = batch[-1]["seq"]
+    return rows
+
+
+def _projected(store, cursor):
+    """Return ``(events, state)`` at cursor from the materialized append-only read model."""
+    seq, head_hash = cursor.get("seq", 0), cursor.get("hash", "")
+    with _STATE_LOCK:
+        cached_seq = _STATE_CACHE["seq"]
+        cached_hash = _STATE_CACHE["hash"]
+        incremental = cached_seq is not None and seq > cached_seq
+        pending = _events_through(store, cached_seq, seq) if incremental else []
+        contiguous = bool(
+            incremental and pending and pending[0].get("seq") == cached_seq + 1
+            and pending[0].get("prev_hash", "") == cached_hash
+            and pending[-1].get("seq") == seq and pending[-1].get("hash", "") == head_hash
+        )
+
+        if cached_seq is None or seq < cached_seq or (seq == cached_seq and head_hash != cached_hash) \
+                or (incremental and not contiguous):
+            events = _events_through(store, 0, seq)
+            state = project.state(events)
+        elif incremental:
+            events = list(_STATE_CACHE["events"] or ()) + pending
+            entities = project.advance(
+                (_STATE_CACHE["state"] or {}).get("entities", {}), pending
+            )
+            state = project.derive(entities)
+            state["entities"] = entities
+        else:
+            # Time may cross a not_before boundary without a write. Re-derive over held entities;
+            # no event history or audit is touched.
+            entities = dict((_STATE_CACHE["state"] or {}).get("entities", {}))
+            state = project.derive(entities)
+            state["entities"] = entities
+            events = _STATE_CACHE["events"] or []
+
+        _STATE_CACHE.update({"seq": seq, "hash": head_hash, "events": events, "state": state})
+        return events, state
+
+
+def _unmeasured_delivery(state, served=None, prior=None):
+    """Current delivery shape without putting repository subprocesses on the push path."""
+    prior = prior or {}
+    prior_records = prior.get("records") or {}
+    records, unlanded, available = {}, [], []
+    for task in state.get("by_type", {}).get("task", []):
+        if task.get("status") != "done":
+            continue
+        task_id = task["id"]
+        commits = [str(c) for c in ((task.get("provenance") or {}).get("commits") or [])
+                   if str(c).strip()]
+        old = prior_records.get(task_id) or {}
+        if old.get("commits") == commits:
+            record = dict(old)
+        else:
+            runs = task.get("verification_run") or []
+            if isinstance(runs, dict):
+                runs = [runs]
+            verified = any(isinstance(run, dict) and run.get("exit_code") == 0 for run in runs)
+            record = {
+                "state": "verified" if verified else "unverified",
+                "state_reason": "delivery ancestry is materializing off the realtime path",
+                "verified": verified, "landed": None, "deployed": None, "live": None,
+                "commits": commits,
+            }
+        records[task_id] = record
+        if record.get("landed") is False:
+            unlanded.append(task_id)
+        if record.get("live") is True:
+            available.append(task_id)
+    landing_complete = bool(records) and all(r.get("landed") is not None for r in records.values())
+    release_complete = bool(records) and all(r.get("deployed") is not None for r in records.values())
+    live_complete = bool(records) and all(r.get("live") is not None for r in records.values())
+    measured = {"verified": True, "landing": landing_complete,
+                "release": release_complete, "live": live_complete}
+    notes = {
+        "verified": None,
+        "landing": None if landing_complete else "delivery ancestry is materializing off the realtime path",
+        "release": None if release_complete else "release ancestry is materializing off the realtime path",
+        "live": None if live_complete else "live ancestry is materializing off the realtime path",
+    }
+    return {
+        "records": records,
+        "counts": {"done": len(records),
+                   "verified": sum(1 for r in records.values() if r.get("verified")),
+                   "landed": sum(1 for r in records.values() if r.get("landed") is True),
+                   "landed_unmeasured": sum(1 for r in records.values() if r.get("landed") is None),
+                   "unlanded": len(unlanded),
+                   "deployed": sum(1 for r in records.values() if r.get("deployed") is True),
+                   "live": len(available)},
+        "measured": measured, "notes": notes, "unlanded": unlanded, "available": available,
+        "live_attested": False,
+        "live_identity": {"source": "caller-supplied ?served" if served else None,
+                          "sha": served or None},
+        "integration_ref": prior.get("integration_ref") or "HEAD",
+    }
+
+
+def _cache_delivery(key, served, value):
+    with _DELIVERY_LOCK:
+        _DELIVERY_CACHE["values"][key] = value
+        _DELIVERY_CACHE["latest"][served] = value
+        if len(_DELIVERY_CACHE["values"]) > 12:
+            _DELIVERY_CACHE["values"].pop(next(iter(_DELIVERY_CACHE["values"])), None)
+
+
+def _delivery_fast(state, cursor, served):
+    key = (cursor.get("seq", 0), cursor.get("hash", ""), served)
+    with _DELIVERY_LOCK:
+        exact = _DELIVERY_CACHE["values"].get(key)
+        if exact is not None:
+            return exact, True
+        prior = _DELIVERY_CACHE["latest"].get(served)
+        should_build = key not in _DELIVERY_CACHE["building"]
+        if should_build:
+            _DELIVERY_CACHE["building"].add(key)
+    provisional = _unmeasured_delivery(state, served=served, prior=prior)
+    if should_build:
+        # Ancestry measurement is useful but can spawn many git commands. Keep it completely off
+        # the delta/SSE response path; its own completion wakes the cockpit with a second patch.
+        def materialize():
+            try:
+                measured = delivery.block(state, served=served)
+                _cache_delivery(key, served, measured)
+                realtime.publish(hub_app.HUB_DIR,
+                                 {"kind": "projection.delivery", "cursor": cursor.get("seq", 0)},
+                                 channel=hub_app.PROJECT_KEY)
+            finally:
+                with _DELIVERY_LOCK:
+                    _DELIVERY_CACHE["building"].discard(key)
+
+        threading.Thread(target=materialize, name="hub-delivery-projection", daemon=True).start()
+    return provisional, False
+
+
+def _live_blocks(events, state, audit, deliv, cursor):
+    last = events[-1] if events else {}
+    inflight = _inflight(state)
+    # Re-arm semantic timers after a process restart. Timers wake exactly at stall/expiry; they do
+    # not sample the claims directory on an interval.
+    for lease in hub_app.leases():
+        hub_app._schedule_lease_truth(lease)
+    adher = adherence.score(events, state, leases=inflight)
+    hub_dir = hub_app.HUB_DIR
+    return {
+        "transport": "event-stream",
+        "realtime": hub_app.realtime_info(),
+        "cursor": {"seq": cursor.get("seq", last.get("seq", 0)),
+                   "hash": cursor.get("hash", last.get("hash", "")), "ts": last.get("ts")},
+        "activity": _activity(events, state),
+        "inflight": inflight,
+        "readiness": _readiness(state, inflight),
+        "progress": _progress(events, state, deliv),
+        "delivery": deliv,
+        "adherence": adher,
+        "dag": _dag_block(state, len(inflight)),
+        "fleet": _fleet(events, state, inflight),
+        "worker_health": _worker_health(state, events, inflight),
+        "failure_modes": _failure_modes(events),
+        "attention": _attention(state, audit, inflight, adher, deliv),
+        "telemetry": telemetry.read_aggregate(hub_dir),
+        "cost": cost.cost_block(hub_dir, state),
+        "wip": hub_app.wip_status(len(inflight)),
+    }
+
+
 def _snapshot(served=None):
     s = hub_app.store()
     try:
         cur = s.latest_cursor()
         # git head rides in the key because the delivery legs (rail + hero) depend on what the
         # integration branch carries, which changes with no board event at all — a landing.
-        key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(), hub_app._git_head())
+        # Several non-stream callers still cross time-only boundaries (not_before and rolling
+        # throughput windows). The push lane uses exact semantic lease timers; this bucket only
+        # prevents a standalone full-snapshot caller from retaining a stale time-derived view.
+        git_head = hub_app._git_head()
+        key = (cur["seq"], cur["hash"], served, _leases_fp(), _telemetry_fp(),
+               git_head, int(time.time() // 5))
         if _SNAP_CACHE["key"] == key:
             return _SNAP_CACHE["value"]
-        events = s.events()
-        state = project.state(events)
-        audit = hub_app.run_audit(s, served=served)
+        events, state = _projected(s, cur)
+        # Realtime lease/telemetry refreshes must not repeatedly pay for a repository audit whose
+        # inputs did not change. Structural audit truth changes with the ledger or build identity;
+        # cache on exactly those inputs and keep the five-second live cockpit refresh lightweight.
+        audit_key = (cur["seq"], cur["hash"], served, git_head)
+        if _AUDIT_CACHE["key"] == audit_key:
+            audit = _AUDIT_CACHE["value"]
+        else:
+            audit = hub_app.run_audit(s, served=served)
+            _AUDIT_CACHE["key"], _AUDIT_CACHE["value"] = audit_key, audit
         build = hub_app.build_meta(served)
         last = events[-1] if events else {}
         inflight = _inflight(state)
         adher = adherence.score(events, state, leases=inflight)
-        # WHERE THE WORK ACTUALLY IS, per task, from recorded evidence. Computed ONCE and handed to
-        # both the hero and the rail, so the cockpit cannot grow two answers to "is this landed"
-        # — and so an unmeasurable leg reaches the operator as an honest unknown, not silent green.
-        deliv = delivery.block(state, served=served)
+        # Repository ancestry can require many Git calls. First paint uses the truthful cached or
+        # provisional view; the completed materialization publishes its own live patch.
+        # Until then, an unmeasured leg stays an honest unknown rather than silent green.
+        deliv, _ = _delivery_fast(state, cur, served)
         hub_dir = hub_app.HUB_DIR
         live = {
             "transport": "event-stream",
+            "realtime": hub_app.realtime_info(),
             "cursor": {"seq": last.get("seq", 0), "hash": last.get("hash", ""),
                        "ts": last.get("ts")},
             "activity": _activity(events, state),
             "inflight": inflight,
-            "readiness": _readiness(state),
+            "readiness": _readiness(state, inflight),
             "progress": _progress(events, state, deliv),
             # Per-task delivery: done / landed / deployed / live are four different questions, and
             # each leg reports UNMEASURED rather than false where it could not be asked.
@@ -523,8 +736,7 @@ def _snapshot(served=None):
             "cost": cost.cost_block(hub_dir, state),
             # The adaptive WIP ceiling the claim seam enforces, so the cockpit shows the fleet's
             # own concurrency budget rather than the operator guessing at it.
-            "wip": wip.status(events, len(inflight)),
-            "fallback_poll_ms": 2500,
+            "wip": hub_app.wip_status(len(inflight)),
         }
         snap = projections.hub_snapshot(state, build=build, audit=audit, live=live)
         if hub_app.worker_launch_enabled():
@@ -545,18 +757,19 @@ def _snapshot(served=None):
 
 
 def _etag(snap):
-    """The snapshot's ETag is its head-cursor hash: the ledger is append-only and hash-chained, so
-    an unchanged head hash means byte-identical content. `served` is folded in because it feeds
-    the coherence block — two different probes must not share one ETag."""
-    cur = (snap.get("live") or {}).get("cursor") or {}
-    served = ((snap.get("build") or {}).get("served_sha")) or ""
-    return '"%s.%s"' % (cur.get("hash", ""), served)
+    """A validator for the WHOLE representation, including lease-only and telemetry changes.
+
+    The ledger head alone is insufficient: heartbeat rewrites, lease expiry, and OTLP appends all
+    change the live cockpit without appending a board event. Hashing the already-built snapshot is
+    bounded by the response size and makes a 304 a truthful byte-representation claim.
+    """
+    return '"%s"' % content_hash(snap)
 
 
 def hub_json(request):
     _, snap = _snapshot(request.GET.get("served"))
     etag = _etag(snap)
-    # 304 on a matching If-None-Match: an idle poll or a re-grounding pull gets an empty body
+    # 304 on a matching If-None-Match: a reconnect re-ground or supervisor read gets an empty body
     # when nothing changed, instead of the full snapshot every time.
     resp = HttpResponse(status=304) if request.headers.get("If-None-Match") == etag \
         else JsonResponse(snap)
@@ -564,44 +777,42 @@ def hub_json(request):
     return resp
 
 
-def delta_json(request):
-    """The incremental read: everything that CHANGED since the client's cursor, not the whole
-    board. A client holding a base snapshot patches the changed entities in place and advances its
-    cursor, so a live board moves KBs per event instead of re-sending the entire fold.
-    since >= head yields an empty changed set."""
-    state, snap = _snapshot(request.GET.get("served"))
-    s = hub_app.store()
+def _delta_payload(since, served=None):
+    """Build the exact canonical push patch without audit or repository work."""
+    store = hub_app.store()
     try:
-        head = s.latest_cursor()
-        try:
-            since = max(0, int(request.GET.get("since", "0")))
-        except (TypeError, ValueError):
-            since = 0
+        target = store.latest_cursor()
+        events, state = _projected(store, target)
         changed_aggs, seen = [], set()
-        for ev in s.events_after(since, limit=10_000):
-            agg = ev.get("aggregate")
-            if agg and agg not in seen:
-                seen.add(agg)
-                changed_aggs.append(agg)
+        for event in _events_through(store, since, target["seq"]):
+            aggregate = event.get("aggregate")
+            if aggregate and aggregate not in seen:
+                seen.add(aggregate)
+                changed_aggs.append(aggregate)
     finally:
-        s.close()
-    entities = state.get("entities", {})
-    flags = state.get("flags", {})
-    changed = [{**entities[a], **flags.get(a, {})} for a in changed_aggs if a in entities]
-    audit = snap.get("audit") or {}
-    live = snap.get("live") or {}
-    return JsonResponse({
+        store.close()
+    entities, flags = state.get("entities", {}), state.get("flags", {})
+    changed = [{**entities[aggregate], **flags.get(aggregate, {})}
+               for aggregate in changed_aggs if aggregate in entities]
+    audit = _AUDIT_CACHE.get("value") or {"ok": None, "violations": []}
+    deliv, delivery_materialized = _delivery_fast(state, target, served)
+    live = _live_blocks(events, state, audit, deliv, target)
+    return {
         "changed": changed, "removed": [],
-        "cursor": {"seq": head["seq"], "hash": head["hash"]},
-        "audit": {"ok": audit.get("ok")},
-        # The cockpit blocks ride the delta too. Without them a live board patched entity rows
-        # while its hero, fleet and attention rail stayed frozen at page-load values until the
-        # next full sync — the most-watched part of the page was the last to move.
-        "live": {k: live.get(k) for k in ("cursor", "progress", "adherence", "fleet", "inflight",
-                                          "attention", "readiness", "activity", "dag",
-                                          "worker_health", "wip", "delivery")},
-        "metadata": {"since": since, "changed": len(changed)},
-    })
+        "cursor": {"seq": int(target.get("seq", 0)), "hash": target.get("hash", "")},
+        "audit": {"ok": audit.get("ok")}, "live": live,
+        "metadata": {"since": since, "changed": len(changed),
+                     "delivery_materialized": delivery_materialized},
+    }
+
+
+def delta_json(request):
+    """Reconnect/recovery read. Steady-state clients receive this payload inside SSE."""
+    try:
+        since = max(0, int(request.GET.get("since", "0")))
+    except (TypeError, ValueError):
+        since = 0
+    return JsonResponse(_delta_payload(since, served=request.GET.get("served")))
 
 
 def type_json(request, type):
@@ -653,71 +864,99 @@ def schema_json(request, type):
     return HttpResponse(p.read_text(encoding="utf-8"), content_type="application/json")
 
 
-def _event_envelope(event):
-    """Expose enough event identity to drive reconciliation, never raw payload content. The
-    browser learns THAT something moved and re-reads the canonical board to learn what."""
-    return {
-        "seq": event.get("seq"),
-        "ts": event.get("ts"),
-        "event": event.get("type"),
-        "aggregate": event.get("aggregate"),
-        "version": event.get("result_version"),
-        "agent": event.get("agent_id"),
-    }
-
-
 @require_GET
 def live_events(request):
-    """Server-Sent Events cursor with a bounded lifetime.
+    """Persistent push stream carrying canonical patches, not polling hints.
 
-    One connection lasts under a minute and emits heartbeats to defeat proxy buffering, then lets
-    EventSource reconnect with ``Last-Event-ID``. The browser always reconciles from a fresh
-    canonical read after an event, which is what makes reconnects, missed deltas and out-of-order
-    delivery safe rather than merely unlikely."""
+    Mutations wake this stream through the realtime bus. The patch is built from the subscriber's
+    last emitted cursor through one exact canonical head and is applied directly by the browser.
+    Cursor catch-up happens once on connection/reconnection; steady state performs no interval
+    query. Heartbeats are transport keepalives only and never trigger a read.
+    """
     raw_since = request.headers.get("Last-Event-ID") or request.GET.get("since") or "0"
     try:
         requested = max(0, int(raw_since))
     except (TypeError, ValueError):
         requested = 0
 
-    def stream():
+    served = request.GET.get("served")
+
+    def initial_cursor():
         store = hub_app.store()
         try:
             head = store.latest_cursor()
-            cursor = min(requested, head["seq"]) if requested else head["seq"]
-            yield "retry: 1500\n\n"
-            yield (f"id: {cursor}\nevent: ready\n"
-                   f"data: {json.dumps({'seq': cursor, 'ts': head.get('ts')}, separators=(',', ':'))}\n\n")
-            deadline = time.monotonic() + 52
-            heartbeat_at = time.monotonic() + 8
-            while time.monotonic() < deadline:
-                pending = store.events_after(cursor, limit=100)
-                if pending:
-                    for event in pending:
-                        cursor = event["seq"]
-                        payload = json.dumps(_event_envelope(event), separators=(",", ":"))
-                        yield f"id: {cursor}\nevent: hub\ndata: {payload}\n\n"
-                    heartbeat_at = time.monotonic() + 8
-                    continue
-                if time.monotonic() >= heartbeat_at:
-                    yield (f"id: {cursor}\nevent: heartbeat\n"
-                           f"data: {json.dumps({'seq': cursor}, separators=(',', ':'))}\n\n")
-                    heartbeat_at = time.monotonic() + 8
-                time.sleep(0.45)
-            yield f"id: {cursor}\nevent: reconnect\ndata: {{\"seq\":{cursor}}}\n\n"
+            return min(requested, head["seq"]), head
         finally:
             store.close()
 
-    response = StreamingHttpResponse(stream(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    def ready_frame(cursor, head):
+        payload = {"seq": cursor, "ts": head.get("ts"),
+                   "realtime": hub_app.realtime_info()}
+        return (f"id: {cursor}\nevent: ready\n"
+                f"data: {json.dumps(payload, separators=(',', ':'))}\n\n")
+
+    def patch_frame(payload):
+        cursor = int((payload.get("cursor") or {}).get("seq", 0))
+        return (f"id: {cursor}\nevent: patch\n"
+                f"data: {json.dumps(payload, separators=(',', ':'))}\n\n")
+
+    def stream():
+        subscription = realtime.subscribe(hub_app.HUB_DIR, channel=hub_app.PROJECT_KEY)
+        cursor, head = initial_cursor()
+        try:
+            yield "retry: 1500\n\n"
+            yield ready_frame(cursor, head)
+            # Re-ground lease/telemetry projections even when the ledger cursor did not advance
+            # while disconnected.
+            payload = _delta_payload(cursor, served=served)
+            cursor = payload["cursor"]["seq"]
+            yield patch_frame(payload)
+            while True:
+                signals = subscription.wait(timeout=15)
+                if signals:
+                    payload = _delta_payload(cursor, served=served)
+                    cursor = payload["cursor"]["seq"]
+                    yield patch_frame(payload)
+                else:
+                    yield (f"id: {cursor}\nevent: heartbeat\n"
+                           f"data: {json.dumps({'seq': cursor}, separators=(',', ':'))}\n\n")
+        except GeneratorExit:
+            return
+
+    async def async_stream():
+        subscription = realtime.subscribe_async(hub_app.HUB_DIR, channel=hub_app.PROJECT_KEY)
+        cursor, head = await asyncio.to_thread(initial_cursor)
+        try:
+            yield "retry: 1500\n\n"
+            yield ready_frame(cursor, head)
+            payload = await asyncio.to_thread(_delta_payload, cursor, served)
+            cursor = payload["cursor"]["seq"]
+            yield patch_frame(payload)
+            while True:
+                signals = await subscription.wait(timeout=15)
+                if signals:
+                    payload = await asyncio.to_thread(_delta_payload, cursor, served)
+                    cursor = payload["cursor"]["seq"]
+                    yield patch_frame(payload)
+                else:
+                    yield (f"id: {cursor}\nevent: heartbeat\n"
+                           f"data: {json.dumps({'seq': cursor}, separators=(',', ':'))}\n\n")
+        finally:
+            subscription.close()
+
+    content = async_stream() if hasattr(request, "scope") else stream()
+    response = StreamingHttpResponse(content, content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache, no-store, no-transform, must-revalidate"
     response["X-Accel-Buffering"] = "no"
+    response["X-Hub-Realtime-Scope"] = hub_app.realtime_info()["scope"]
     return response
 
 
 def next_json(request):
     """DISCOVER: ranked unblocked tasks without a live lease, including stale reclaims.
 
-    A worker's entrypoint — pull the top task, claim it, complete it with a receipt. The board
+    A worker's entrypoint — pull the top task, claim it, and complete the real operation. A receipt
+    accompanies completion only when the task declared a transient critical probe. The board
     sequences the fleet by readiness and priority; there is no dedicated leader. Non-ready todos
     are returned SEPARATELY with the reason, never silently withheld: a worker handed a stub
     stalls trying to write its own acceptance."""
@@ -730,30 +969,29 @@ def next_json(request):
     finally:
         s.close()
     state = project.state(events)
-    wip_st = wip.status(events, len(_inflight(state)))
+    live_leases = hub_app.leases()
+    wip_st = hub_app.wip_status(len(live_leases))
     if wip_st["saturated"]:
         # At saturation the rail answers 429 rather than handing out work the claim seam would
         # refuse to lease. A GET records nothing — the recorded signals come from the claim seam.
         return JsonResponse({"error": "board_saturated", **wip_st}, status=429)
     flags = state.get("flags", {})
     entities = state.get("entities", {})
-    now = time.time()
-
-    def available(t):
-        lease = hub_app._read_lease(t["id"])
-        held = bool(lease and lease.get("expires", 0) > now)
-        # A crashed worker can leave projected status=in_progress after its lease expires. Offer
-        # that task again once its dependencies are satisfied; a live lease always removes it.
-        return (t.get("status") in ("todo", "in_progress")
-                and not flags.get(t["id"], {}).get("deps_unmet") and not held)
-
+    lease_map = {row.get("task"): row for row in live_leases}
     tasks = state["by_type"].get("task", [])
-    cand = [t for t in tasks if available(t)]
     ready, needs_spec = [], []
-    for t in cand:
-        (ready if (t.get("verification_command") or "").strip() else needs_spec).append(t)
+    for t in tasks:
+        cls = flow.classify(t, flags.get(t["id"], {}), lease_map.get(t["id"]))
+        if cls["available"]:
+            ready.append(dict(t, flow_state=cls["state"], flow_reason=cls["reason"],
+                              stale_reclaim=cls["stale_reclaim"]))
+        elif cls["state"] == "needs_spec":
+            needs_spec.append(dict(t, needs=cls["reason"], flow_state=cls["state"]))
     from hub_core import schedule
-    ready = schedule.order_ready(ready, flags)
+    busy_touches = set()
+    for lease in live_leases:
+        busy_touches.update(schedule.normalized_touches(entities.get(lease.get("task"), {})))
+    ready = schedule.order_ready(ready, flags, busy_touches=busy_touches)
 
     # BLOCKED-ON-DANGLING: an unmet dep referencing NO entity can never be satisfied by work
     # completing — it is a spec defect, not a wait. Without this rail such a task appears NOWHERE.
@@ -773,8 +1011,7 @@ def next_json(request):
         n = max(1, min(int(request.GET.get("n", "1")), 50))
     except ValueError:
         n = 1
-    rows = [dict(t, available=True, stale_reclaim=t.get("status") == "in_progress")
-            for t in ready[:n]]
+    rows = [dict(t, available=True) for t in ready[:n]]
     return JsonResponse({"data": rows, "needs_spec": needs_spec[:n], "snoozed": snoozed[:n],
                          "metadata": {"available": len(ready), "unblocked": len(ready),
                                       "ready": len(ready), "needs_spec": len(needs_spec),

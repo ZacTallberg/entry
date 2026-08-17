@@ -22,19 +22,22 @@ is the canonical `hub-scaffold` cockpit mounted at `/hub/`.
 ```bash
 DEBUG=1 SECRET_KEY=local python manage.py migrate
 DEBUG=1 SECRET_KEY=local python manage.py seedhub
-DEBUG=1 SECRET_KEY=local python manage.py runserver
+DEBUG=1 SECRET_KEY=local python -m uvicorn project_site.asgi:application --host 127.0.0.1 --port 8000
 ```
 
 The product is at `/`, health at `/health/`, A2A discovery at
-`/.well-known/agent-card.json`, and the Hub at `/hub/`.
+`/.well-known/agent-card.json`, and the Hub at `/hub/`. The Hub is served through ASGI so its
+persistent event stream applies canonical task and lease changes immediately. Connected means
+current; Disconnected means reconnect recovery is pending. There is no polling cycle or manual
+sync control.
 
-## Verification
+## Operating proof
 
 ```bash
-DEBUG=1 SECRET_KEY=gate python manage.py check
-DEBUG=1 SECRET_KEY=gate python manage.py test
-DEBUG=1 SECRET_KEY=gate python manage.py hubaudit
+DEBUG=1 SECRET_KEY=local python -m uvicorn project_site.asgi:application --host 127.0.0.1 --port 8000
 ```
 
-Deployment is owned by `deploy.sh`; infrastructure and recovery details live in
-`PROJECT/ops/INFRA-INVENTORY.md`.
+Use the real product and Hub paths as the default proof. Copy, style, motion, and other ordinary
+changes do not receive tests. A rare critical boundary may use one transient probe that is removed
+before commit; its receipt, not the probe, remains with the task. Deployment is owned by
+`deploy.sh`; infrastructure and recovery details live in `PROJECT/ops/INFRA-INVENTORY.md`.

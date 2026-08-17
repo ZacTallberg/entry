@@ -8,9 +8,10 @@ against source is a rumor. Secrets stay in the atlas/creds files BY KEY NAME
 
 ## Process & boot
 
-Django 6 on Python 3.12, served by threaded Gunicorn behind Dokku. Boot order is migrate, idempotent
-Hub genesis seed, then Gunicorn. Two worker processes with multiple threads keep the long-lived SSE
-connection from starving the product front door.
+Django 6 on Python 3.12, served by Uvicorn ASGI behind Dokku. Boot order is migrate, then one Uvicorn
+process. ASGI holds concurrent SSE connections without occupying one synchronous request thread per
+client, and the single process keeps the built-in signal bus coherent. Scale-out first requires a
+shared `HUB_REALTIME_BROKER`; adding workers without it would fragment push delivery.
 
 ## Deploy paths
 - **Code:** command, owner (campaigns: seat per `pm/PROTOCOL.md` §7), gates it must pass, expected
@@ -20,7 +21,8 @@ connection from starving the product front door.
   on new data produces user-visible lies).
 
 - **Code:** `bash deploy.sh`; it provisions from the durable main checkout, builds a clean detached
-  HEAD, runs `hubaudit` and product checks, ships, and proves the exact build at the public origin.
+  HEAD, ships, and observes the exact build through the real public origin. No permanent test or
+  repository-audit gate sits in the release pipeline.
 - **Data:** visitor content has no data plane. Django and Hub runtime live on the persistent app mount.
 
 ## Environment variables

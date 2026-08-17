@@ -9,6 +9,7 @@ COPY . /app
 # collectstatic at build (SECRET_KEY not needed for it under DEBUG); whitenoise serves /static.
 RUN DEBUG=1 SECRET_KEY=build python manage.py collectstatic --noinput
 EXPOSE 5000
-# migrate ON BOOT guarantees the tables exist (prevents the `no such table` outage), THEN gunicorn.
-# SECRET_KEY / ALLOWED_HOSTS injected by dokku config (fail-closed).
-CMD sh -c "python manage.py migrate --noinput && exec gunicorn project_site.wsgi --bind 0.0.0.0:${PORT} --workers 2 --timeout 90 --log-file -"
+# Migrate on boot, then keep the push-first Hub on one coherent ASGI process. Uvicorn serves many
+# concurrent product and SSE connections asynchronously; horizontal workers require a configured
+# shared HUB_REALTIME_BROKER before they are safe. Secrets are injected by Dokku.
+CMD sh -c "python manage.py migrate --noinput && exec uvicorn project_site.asgi:application --host 0.0.0.0 --port ${PORT} --workers 1 --proxy-headers --forwarded-allow-ips='*'"

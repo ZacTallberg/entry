@@ -13,8 +13,8 @@ substitutes at scaffold time):
     HUB_DONE_STRICTNESS completion proof dial: tracked or strict.       Default "tracked".
     HUB_SETTINGS_FILE settings.py path the AST security audit scans.   Default: the module file
                       of DJANGO_SETTINGS_MODULE.
-    HUB_WRITE_TOKEN   general write bearer token; verification commands make it
-                      command-execution-grade (see SECURITY.md). Fail-closed when empty.
+    HUB_WRITE_TOKEN   general write bearer token; grants terminal board authority, not shell
+                      execution. Fail-closed when empty.
     HUB_WORKER_LAUNCH_ENABLED   expose the optional grant-backed local launcher. Default False.
     HUB_WORKER_PROTOCOL         custom URL scheme registered on the workstation. Default hub-worker.
     HUB_WORKER_LAUNCH_ISSUER_URL explicit HTTPS consume endpoint (recommended in production).
@@ -27,10 +27,12 @@ import functools
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import hub_core
 from hub_core import audit as _audit
+from hub_core import identity as _identity
 from hub_core import project as _project
 
 
@@ -47,8 +49,71 @@ BASE_DIR = Path(_dj_setting("BASE_DIR") or os.environ.get("HUB_BASE_DIR") or Pat
 PROJECT = BASE_DIR / "PROJECT"
 HUB_DIR = Path(os.environ.get("HUB_DIR") or (PROJECT / ".hub"))
 SCHEMA_DIR = PROJECT / "schema"
-PROJECT_KEY = _dj_setting("HUB_PROJECT_KEY", "{{PROJECT_KEY}}")
-BRAND = _dj_setting("HUB_BRAND", "{{BRAND}}")
+_IDENTITY = _identity.load()
+PROJECT_KEY = _dj_setting("HUB_PROJECT_KEY", _IDENTITY["key"])
+BRAND = _dj_setting("HUB_BRAND", _IDENTITY["brand"])
+
+
+def _publish_realtime(kind, **identity):
+    """Publish only mutation identity after durability; canonical content stays on the read API.
+
+    Kept lazy so pure/CLI imports of ``hub_app`` do not require Django's streaming surface.  A
+    broker outage is deliberately non-transactional: the ledger/lease is already the truth, and a
+    reconnect cursor repairs notification loss.
+    """
+    try:
+        from . import realtime
+        realtime.publish(HUB_DIR, {"kind": kind, **identity}, channel=PROJECT_KEY)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Hub realtime wake-up failed after durable mutation")
+
+
+def publish_event(event):
+    """Broadcast the safe event envelope used by SSE, never its entity payload."""
+    _publish_realtime(
+        "ledger.appended",
+        event={
+            "seq": event.get("seq"),
+            "ts": event.get("ts"),
+            "event": event.get("type"),
+            "aggregate": event.get("aggregate"),
+            "version": event.get("result_version"),
+            "agent": event.get("agent_id"),
+        },
+    )
+
+
+def realtime_info():
+    from . import realtime
+    return realtime.info(HUB_DIR, channel=PROJECT_KEY)
+
+
+def _schedule_lease_truth(lease):
+    """Wake readers exactly when a lease becomes stalled or expires; no clock polling."""
+    try:
+        from . import realtime
+        task = lease.get("task")
+        agent = lease.get("agent")
+        expires = float(lease.get("expires") or 0)
+        heartbeat = float(lease.get("last_heartbeat") or lease.get("claimed") or 0)
+        now = time.time()
+        stall_at = heartbeat + 900
+        if heartbeat and now < stall_at < expires:
+            realtime.schedule(HUB_DIR, "lease-stall:" + task, stall_at,
+                              {"kind": "lease.stalled", "task": task, "agent": agent},
+                              channel=PROJECT_KEY)
+        else:
+            realtime.cancel_scheduled(HUB_DIR, "lease-stall:" + task)
+        if expires > now:
+            realtime.schedule(HUB_DIR, "lease-expiry:" + task, expires,
+                              {"kind": "lease.expired", "task": task, "agent": agent},
+                              channel=PROJECT_KEY)
+        else:
+            realtime.cancel_scheduled(HUB_DIR, "lease-expiry:" + task)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Hub lease truth timer could not be scheduled")
 
 
 def worker_launch_enabled() -> bool:
@@ -63,7 +128,8 @@ def worker_protocol() -> str:
     """Return a syntactically safe custom URL scheme (the Windows adapter must use the same one)."""
     import re
 
-    value = str(_dj_setting("HUB_WORKER_PROTOCOL", "hub-worker") or "hub-worker").lower()
+    value = str(_dj_setting("HUB_WORKER_PROTOCOL", _IDENTITY["worker_scheme"])
+                or _IDENTITY["worker_scheme"]).lower()
     return value if re.fullmatch(r"hub-[a-z0-9][a-z0-9+.-]{0,26}", value) else "hub-worker"
 
 
@@ -314,11 +380,9 @@ def _claim_path(task_id):
 
 def _read_lease(task_id):
     p = _claim_path(task_id)
-    if not p.exists():
-        return None
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except ValueError:
+    except (OSError, ValueError):
         return None
 
 
@@ -339,13 +403,59 @@ def claim(task_id, agent, ttl_s=900):
                 return {"ok": False, "reason": "held", "held_by": cur.get("agent"), "expires": cur.get("expires")}
             # Retrying the same claim must not silently invalidate the fencing token already held
             # by this worker. Renew the lease in place and return that same token.
+            cur["last_heartbeat"] = now
             cur["expires"] = now + ttl_s
             _write_lease(task_id, cur)
-            return {"ok": True, **cur}
+            _publish_realtime("lease.heartbeat", task=task_id, agent=agent,
+                              expires=cur["expires"])
+            _schedule_lease_truth(cur)
+            return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **cur}
         lease = {"task": task_id, "agent": agent, "token": _uuid.uuid4().hex,
-                 "claimed": now, "expires": now + ttl_s}
+                 "claimed": now, "last_heartbeat": now, "expires": now + ttl_s}
         _write_lease(task_id, lease)
-        return {"ok": True, **lease}
+        _publish_realtime("lease.claimed", task=task_id, agent=agent,
+                          expires=lease["expires"])
+        _schedule_lease_truth(lease)
+        return {"ok": True, "heartbeat_after_s": max(1, ttl_s // 3), **lease}
+
+
+def leases(*, now=None, include_expired=False):
+    """Read lease sidecars safely, newest claims first.
+
+    A vanished/torn file is an absent lease, never a request-wide failure.  Heartbeat and claim
+    timestamps remain separate so presence cannot masquerade as task progress.
+    """
+    now = _time.time() if now is None else float(now)
+    rows = []
+    try:
+        paths = list(CLAIMS.glob("*.json"))
+    except OSError:
+        return rows
+    for path in paths:
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if include_expired or row.get("expires", 0) > now:
+            rows.append(row)
+    rows.sort(key=lambda row: (row.get("claimed", 0), row.get("task", "")), reverse=True)
+    return rows
+
+
+def wip_status(active=None):
+    """The configured, enforced WIP contract.
+
+    Adaptive control is intentionally not claimed here: a controller is only real once its loss
+    signals are wired.  The same setting feeds the claim gate and every read projection.
+    """
+    try:
+        ceiling = int(_dj_setting("HUB_WIP_LIMIT", 8))
+    except (TypeError, ValueError):
+        ceiling = 8
+    ceiling = max(1, min(256, ceiling))
+    active = len(leases()) if active is None else int(active)
+    return {"ceiling": ceiling, "active": active, "saturated": active >= ceiling,
+            "source": "configured"}
 
 
 def lease_valid(task_id, token):
@@ -358,9 +468,15 @@ def heartbeat(task_id, token, ttl_s=900):
         cur = _read_lease(task_id)
         if not cur or cur.get("token") != token or cur.get("expires", 0) <= _time.time():
             return {"ok": False, "reason": "no/stale lease"}
-        cur["expires"] = _time.time() + ttl_s
+        now = _time.time()
+        cur["last_heartbeat"] = now
+        cur["expires"] = now + ttl_s
         _write_lease(task_id, cur)
-        return {"ok": True, "expires": cur["expires"]}
+        _publish_realtime("lease.heartbeat", task=task_id, agent=cur.get("agent"),
+                          expires=cur["expires"])
+        _schedule_lease_truth(cur)
+        return {"ok": True, "expires": cur["expires"], "last_heartbeat": now,
+                "heartbeat_after_s": max(1, ttl_s // 3)}
 
 
 def release_lease(task_id, token) -> bool:
@@ -381,4 +497,11 @@ def release_lease(task_id, token) -> bool:
                 _write_lease(task_id, cur)
             except OSError:
                 return False
+        _publish_realtime("lease.released", task=task_id, agent=cur.get("agent"), expires=0)
+        try:
+            from . import realtime
+            realtime.cancel_scheduled(HUB_DIR, "lease-stall:" + task_id)
+            realtime.cancel_scheduled(HUB_DIR, "lease-expiry:" + task_id)
+        except Exception:
+            pass
         return True

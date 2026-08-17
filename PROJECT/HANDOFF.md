@@ -5,7 +5,7 @@
 ## 0. Arrangement
 
 SOLO principal-agent build with parallel read-only audits. Work is governed by the event-sourced Hub.
-Canonical upstream for reusable Hub units: `C:/code/hub-scaffold` at recorded commit `64f7b00` or its
+Canonical upstream for reusable Hub units: `C:/code/hub-scaffold` at recorded commit `fab19fe` or its
 newer successor after any upstream correction.
 
 ## 1. Standing doctrine deltas
@@ -22,8 +22,8 @@ newer successor after any upstream correction.
 
 ## 3. In flight
 
-- `entry:task:0001` — standalone project and canonical Hub adoption, owned by `codex-root`.
-- Canonical Hub blockers discovered during adoption are tracked separately as `entry:task:0008`.
+- `entry:task:0008` — canonical Hub blockers and upstream adoption, owned by `codex-entry-upstream`.
+- `entry:task:0009` — Entry's realtime throughput cockpit, queued behind the upstream adoption.
 
 ## 4. Backlog
 
@@ -41,7 +41,11 @@ register everywhere, then perform an independent live release review.
 - The old page's timer used pre-mutation `keydown` state, breaking first-character, paste, IME and
   mobile behavior. Drive release timing from the `input` event.
 - Never transplant zacoberg.com's archive analytics merely to retain a page-view counter.
-- Sync Gunicorn workers are incompatible with a long-held SSE stream; production must be threaded.
+- Production uses one Uvicorn ASGI process: its async stream does not pin request threads, and its
+  process-local signal bus reaches every connected client. Multiple processes are valid only after
+  `HUB_REALTIME_BROKER` binds them to shared pub/sub.
+- Connected means every durable mutation is pushed as a canonical patch immediately. Disconnected
+  means cursor recovery is pending; there is no polling or manual-sync operating mode.
 - First provisioning must not mint the Hub token inside a disposable deploy worktree.
 
 ## 7. Narrative

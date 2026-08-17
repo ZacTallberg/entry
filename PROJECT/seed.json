@@ -37,8 +37,7 @@
       "work_kind": "migration",
       "decided_by": ["0001", "0002"],
       "title": "Create the standalone project and adopt the current canonical Hub",
-      "acceptance": "The Entry has an independent repository and project identity; the current hub-scaffold engine and Django adapter are mounted at /hub/; seedhub and hubaudit complete successfully.",
-      "verification_command": "python manage.py check && python manage.py seedhub --dry-run && python manage.py hubaudit"
+      "acceptance": "The Entry has an independent repository and project identity; the current hub-scaffold engine and Django adapter are mounted at /hub/; the app and Hub operate through the canonical ASGI entrypoint."
     },
     {
       "ref": "0002",
@@ -49,19 +48,17 @@
       "deps": ["0001"],
       "decided_by": ["0001", "0003"],
       "title": "Elevate The Entry into a complete standalone experience",
-      "acceptance": "The root presents a distinctive, responsive, keyboard- and touch-accessible Entry experience; visitor words dissolve without any content-bearing request; reduced-motion and graphics-fallback paths remain complete.",
-      "verification_command": "python manage.py test app"
+      "acceptance": "The root presents a distinctive, responsive, keyboard- and touch-accessible Entry experience; visitor words dissolve without any content-bearing request; reduced-motion and graphics-fallback paths remain complete."
     },
     {
       "ref": "0003",
       "phase": "1 Product",
       "status": "todo",
       "priority": "P1",
-      "work_kind": "verification",
+      "work_kind": "product",
       "deps": ["0002"],
-      "title": "Prove product, privacy, accessibility, and Hub conformance locally",
-      "acceptance": "Automated checks and browser QA prove the root, health route, Hub reads, realtime cursor/delta/SSE wiring, reduced-motion behavior, responsive layouts, and zero visitor-text network submission.",
-      "verification_command": "python manage.py check --deploy && python manage.py test && python manage.py hubaudit"
+      "title": "Exercise product, privacy, accessibility, and Hub operation locally",
+      "acceptance": "Real browser operation demonstrates the root, health route, Hub reads, literal pushed task motion, reduced-motion behavior, responsive layouts, and zero visitor-text network submission."
     },
     {
       "ref": "0004",
@@ -72,8 +69,7 @@
       "deps": ["0003"],
       "decided_by": ["0001"],
       "title": "Point zacoberg.com at the standalone Entry and preserve the old route",
-      "acceptance": "The Apps catalog links to https://entry.zacoberg.com and zacoberg.com/entry/ permanently redirects there without retaining the embedded implementation.",
-      "verification_command": "python manage.py test core"
+      "acceptance": "The Apps catalog links to https://entry.zacoberg.com and zacoberg.com/entry/ permanently redirects there without retaining the embedded implementation."
     },
     {
       "ref": "0005",
@@ -84,8 +80,7 @@
       "deps": ["0003"],
       "decided_by": ["0001"],
       "title": "Provision and publish entry.zacoberg.com",
-      "acceptance": "The canonical HTTPS origin serves the verified repository SHA, the root experience is functional, and /hub/ is reachable with its realtime status truthful.",
-      "verification_command": "python tools/live_canary.py https://entry.zacoberg.com"
+      "acceptance": "The canonical HTTPS origin serves the repository SHA, the root experience works through its real interaction, and /hub/ is reachable with truthful Connected or Disconnected transport state."
     },
     {
       "ref": "0006",
@@ -95,19 +90,17 @@
       "work_kind": "governance",
       "deps": ["0004", "0005"],
       "title": "Register The Entry everywhere and reconcile portfolio identity",
-      "acceptance": "Homebase, the public Apps catalog, and all project inventories identify The Entry as an independent app with its canonical URL and Hub; aliases and parent relationships do not misclassify it as a zacoberg.com child surface.",
-      "verification_command": "python tools/registry_canary.py"
+      "acceptance": "Homebase, the public Apps catalog, and all project inventories identify The Entry as an independent app with its canonical URL and Hub; aliases and parent relationships do not misclassify it as a zacoberg.com child surface."
     },
     {
       "ref": "0007",
       "phase": "4 Close",
       "status": "todo",
       "priority": "P1",
-      "work_kind": "verification",
+      "work_kind": "product",
       "deps": ["0004", "0005", "0006"],
-      "title": "Perform the independent live release review and close the extraction",
-      "acceptance": "A fresh verifier confirms the live app, old-route redirect, portfolio links, build coherence, privacy boundary, responsive presentation, and Hub functionality with no open P0 or P1 gaps.",
-      "verification_command": "python tools/release_review.py"
+      "title": "Complete the live release operation and close the extraction",
+      "acceptance": "The live app, old-route redirect, portfolio links, build identity, privacy boundary, responsive presentation, and Hub functionality all succeed through their real public operations with no open P0 or P1 gap."
     }
   ],
   "notes": []

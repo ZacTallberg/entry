@@ -74,6 +74,7 @@ TEMPLATES = [{
     ]},
 }]
 WSGI_APPLICATION = "project_site.wsgi.application"
+ASGI_APPLICATION = "project_site.asgi.application"
 
 DATABASES = {
     "default": {"ENGINE": "django.db.backends.sqlite3", "NAME": str(DATA_DIR / "db.sqlite3"),
@@ -116,3 +117,7 @@ HUB_BRAND = "The Entry"
 HUB_BUILD_STAMP = "app/build_sha.txt"
 HUB_DONE_STRICTNESS = "strict"
 HUB_WORKER_LAUNCH_ENABLED = False
+
+# The Hub's default realtime bus is deliberately process-local. Entry runs one async process so
+# every connected cockpit observes every durable mutation immediately; scale-out must first bind
+# HUB_REALTIME_BROKER to shared pub/sub rather than silently fragmenting the live signal plane.

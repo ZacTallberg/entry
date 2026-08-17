@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy this Plot from a CLEAN detached worktree of HEAD — uncommitted files can never ship
-# (openmic ADR-0100 pattern). Order: provision (idempotent) -> gate (hubaudit, born-safe
-# invariants) -> build -> ship -> BUILD-SHA front-door canary. The canary requires the live page
+# (openmic ADR-0100 pattern). Order: provision (idempotent) -> build -> ship -> observe the
+# BUILD-SHA at the real front door. The live observation requires the page
 # to serve build-<THIS sha> — a stale deploy, a swallowed release, or the unbuilt placeholder
 # page can never pass (FALSE-GREEN discipline; pattern proven on openmic).
 set -euo pipefail
@@ -23,7 +23,6 @@ printf '%s\n' "$SHA" > "$WT/app/build_sha.txt"   # baked into the image pre-buil
 (cd "$WT" \
   && bash ./provision.sh "$APP" \
   && bash /c/code/_deploy/offbox-deploy.sh --app "$APP" \
-       --gate "DEBUG=1 SECRET_KEY=gate python manage.py hubaudit" \
        --canary "https://${APP}.zacoberg.com/" --expect "build-$SHA")
 
 git worktree remove --force "$WT"

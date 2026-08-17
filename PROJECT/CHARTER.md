@@ -19,8 +19,8 @@ let it disappear. The sentence a stranger should repeat is: **write into the dar
 - A responsive text-to-motion artwork with an explicit release action and contemplative auto-release.
 - Browser-local, non-persistent visitor words.
 - Adaptive graphics, reduced-motion and graphics-fallback experiences.
-- Current canonical Hub cockpit: event ledger, strict completion, realtime SSE/delta/cursor,
-  delivery truth, MCP and truthful discovery.
+- Current canonical Hub cockpit: event ledger, direct push patches with reconnect recovery,
+  connected/disconnected truth, high-throughput task flow, delivery truth, MCP and discovery.
 - Independent build, deployment, HTTPS origin, health proof, and portfolio identity.
 
 ## 4. Non-goals
@@ -35,13 +35,14 @@ let it disappear. The sentence a stranger should repeat is: **write into the dar
 - Motion is organic, input-responsive and quiet when idle; it never obstructs writing.
 - The experience remains usable without WebGL and honors `prefers-reduced-motion`.
 - Public routes disclose no private board data beyond the intentionally publishable task plane.
-- `hubaudit`, product checks, browser QA and the deployed-artifact canary must agree.
+- Real product and Hub operations are the default proof. Only a rare critical boundary earns one
+  transient probe, removed before commit; copy, style and motion never receive tests.
 
 ## 6. Definition of done
 
 1. The root, health route, Hub, realtime cursor/delta/SSE, MCP and discovery surfaces are reachable.
-2. Automated and browser checks prove that typed text produces no content-bearing network request.
-3. Phone and desktop layouts, keyboard/touch input, reduced motion and graphics fallback are exercised.
+2. The real browser network path shows that typed text produces no content-bearing request.
+3. Phone and desktop layouts, keyboard/touch input, reduced motion and graphics fallback work.
 4. The live build SHA equals the repository and deploy record; HTTPS is healthy.
 5. zacoberg.com redirects its old Entry route and links the standalone origin.
 6. Homebase recognizes The Entry as an independent project with its own Hub.
@@ -49,7 +50,9 @@ let it disappear. The sentence a stranger should repeat is: **write into the dar
 
 ## 7. Run model & cost ceiling
 
-One small public Django service with two threaded Gunicorn workers and persistent SQLite/Hub storage.
+One small public Django service with one asynchronous Uvicorn ASGI process and persistent SQLite/Hub
+storage. One async process keeps the default realtime bus coherent; horizontal processes require a
+shared `HUB_REALTIME_BROKER` before rollout.
 No paid model, data, or rendering APIs run in the visitor path. Graphics execute only on the visitor's
 device and adapt downward when the device or preference asks for less.
 

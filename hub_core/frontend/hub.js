@@ -2,9 +2,10 @@
  * hub.js — hub client RENDERER (shared kit)
  * --------------------------------------------------
  * Renders the entire hub UI from the canonical <script id="hub-data"> JSON island (the SAME
- * payload /hub.json serves — UI == API by construction), then keeps it LIVE: an SSE cursor tells
- * the page that something moved, and the page re-reads the canonical board to find out what.
- * Animation is never allowed to become a second source of truth.
+ * payload /hub.json serves — UI == API by construction), then keeps it LIVE: SSE carries an
+ * ordered canonical patch straight into the renderer. HTTP delta/snapshot reads exist only to
+ * recover a cursor gap after reconnect. Animation is never allowed to become a second source of
+ * truth.
  *
  * The board is a COCKPIT, not a table dump. What an operator needs to see without asking:
  * who is working right now and on what step, what needs a human, how fast the fleet is draining
@@ -30,7 +31,6 @@
     rocket: '<path d="M5 15c-2 1-2 5-2 5s4 0 5-2"/><path d="M9 15l-3-3c2-7 7-9 12-9 0 5-2 10-9 12z"/><circle cx="14.5" cy="9.5" r="1.5"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
     close: '<path d="M6 6l12 12M18 6L6 18"/>',
-    refresh: '<path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 4v4h-4"/>',
     check: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>',
     xc: '<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8v.5"/>',
@@ -52,6 +52,8 @@
     s.setAttribute("stroke-linecap", "round");
     s.setAttribute("stroke-linejoin", "round");
     if (cls) s.setAttribute("class", cls);
+    s.setAttribute("aria-hidden", "true");
+    s.setAttribute("focusable", "false");
     s.innerHTML = P[name] || P.info; // static trusted markup only — never snapshot text
     return s;
   }
@@ -161,6 +163,18 @@
     for (var i = runs.length - 1; i >= 0; i--) if (runs[i] && runs[i].exit_code === 0) return runs[i];
     return runs.length ? runs[runs.length - 1] : null;
   }
+  function completionProof(task) {
+    var command = String((task && task.verification_command) || "").trim();
+    var receipt = receiptOf(task);
+    var passed = !!(receipt && receipt.exit_code === 0);
+    return {
+      command: command,
+      declared: !!command,
+      receipt: receipt,
+      passed: passed,
+      complete: !command || passed
+    };
+  }
   function taskProgress(task) {
     var plan = (task && task.plan) || [];
     if (!plan.length) return null;
@@ -169,16 +183,21 @@
              step: (plan.filter(function (s) { return s && !s.done; })[0] || {}).step || null };
   }
   function taskStatusBadge(task) {
-    // A done task says HOW it was granted. Under the receipt gate `done` means an exit-0
-    // verification_run was submitted with it — a done row with no receipt behind it is a
-    // different claim, and the badge must not render them identically.
+    // `done` means the real operation completed. A receipt is required only when this task
+    // explicitly declared a rare critical-boundary probe; ordinary work is never downgraded for
+    // correctly having no verification artifact.
     var b = badge("task", task.status);
     if (task.status !== "done") return b;
-    var r = receiptOf(task);
-    var proven = !!(r && r.exit_code === 0);
-    b.setAttribute("title", proven ? ("granted by receipt: " + (r.command || "") + " → exit 0")
-                                   : "done recorded WITHOUT a passing receipt");
-    if (!proven) b.className = "badge b-warn";
+    var proof = completionProof(task), r = proof.receipt;
+    if (proof.passed) {
+      b.setAttribute("title", "Completed · critical probe passed: " + (r.command || proof.command) + " → exit 0");
+    } else if (proof.declared) {
+      b.setAttribute("title", r ? ("Completed · declared critical probe recorded exit " + r.exit_code)
+                                : "Completed · declared critical probe has no recorded receipt");
+      b.className = "badge b-warn";
+    } else {
+      b.setAttribute("title", "Completed through the real operation · no separate critical probe declared");
+    }
     return b;
   }
 
@@ -187,17 +206,26 @@
   function COLS_TASK() {
     return [
       { label: "ID", k: "legacy_ref", cls: "col-id", cell: function (r) { return txt(r.legacy_ref || localId(r.id), "col-id"); } },
-      { label: "Status", k: "status", cell: function (r) { return el("td", null, [taskStatusBadge(r)]); } },
-      { label: "Live", k: "id", sortVal: function (r) { return leaseOf(r.id) ? 0 : 1; }, cell: function (r) {
+      { label: "Status", k: "status", cls: "col-status", cell: function (r) { return el("td", { class: "col-status" }, [taskStatusBadge(r)]); } },
+      { label: "Held by", k: "id", cls: "col-pickup", sortVal: function (r) { return leaseOf(r.id) ? 0 : 1; }, cell: function (r) {
           var lease = leaseOf(r.id);
-          if (!lease) return txt("", "cell-sub");
-          return el("td", null, [el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : ""),
+          if (!lease) return txt("—", "cell-sub col-pickup");
+          return el("td", { class: "col-pickup" }, [el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : ""),
             title: lease.agent + " has held this " + fmtAge(lease.age_s) }, [
             el("span", { class: "lease-dot", "aria-hidden": "true" }),
             doc.createTextNode(lease.agent || "worker")
           ])]);
         } },
-      { label: "Phase", k: "phase", cell: function (r) { return txt(r.phase, "cell-sub"); } },
+      { label: "Phase", k: "phase", cls: "col-phase", cell: function (r) { return txt(r.phase, "cell-sub col-phase"); } },
+      { label: "Priority", k: "priority", cls: "col-priority", cell: function (r) { return el("td", { class: "col-priority" }, [
+          el("span", { class: "priority priority-" + (r.priority || "P3"), text: r.priority || "—" })]); } },
+      { label: "Plan", k: "plan", cls: "col-progress", sortVal: function (r) { var p = taskProgress(r); return p ? p.pct : -1; }, cell: function (r) {
+          var p = taskProgress(r);
+          if (!p) return txt("unplanned", "cell-sub col-progress");
+          return el("td", { class: "col-progress task-progress-cell" }, [
+            el("span", { class: "mini-progress", "aria-hidden": "true" }, [el("span", { style: "width:" + p.pct + "%" })]),
+            el("span", { class: "mini-progress-label", text: p.done + "/" + p.total })]);
+        } },
       { label: "Title", k: "title", cls: "col-title", cell: function (r) { return txt(r.title, "col-title"); } }
     ];
   }
@@ -286,19 +314,21 @@
     var counts = facetCounts(tab, field);
     tab._facetBar.textContent = "";
     var keys = Object.keys(counts).sort();
+    tab._facetBar.classList.toggle("is-empty", keys.length < 2);
     if (keys.length < 2) return;                      // a single-value facet narrows nothing
     tab._facetBar.appendChild(el("span", { class: "facet-label", text: field }));
     keys.forEach(function (v) {
       var on = tab._facet === v;
       var chip = el("button", { class: "facet-chip" + (on ? " is-on" : ""), type: "button",
-        "aria-pressed": on ? "true" : "false" }, [
+        "aria-pressed": on ? "true" : "false", "data-focus-key": "facet:" + tab.key + ":" + v }, [
         doc.createTextNode(v + " "), el("span", { class: "facet-n", text: String(counts[v]) })
       ]);
       chip.addEventListener("click", function () { setFacet(tab.key, v); });
       tab._facetBar.appendChild(chip);
     });
     if (tab._facet) {
-      var clear = el("button", { class: "facet-chip is-clear", type: "button", text: "clear" });
+      var clear = el("button", { class: "facet-chip is-clear", type: "button", text: "clear",
+        "data-focus-key": "facet:" + tab.key + ":clear" });
       clear.addEventListener("click", function () { setFacet(tab.key, tab._facet); });
       tab._facetBar.appendChild(clear);
     }
@@ -312,9 +342,10 @@
 
   /* ============================ TABLE RENDER ============================ */
   function buildTableTab(tab) {
-    var pane = el("div", { class: "tab-content", id: "tab-" + tab.key, role: "tabpanel" });
+    var pane = el("div", { class: "tab-content", id: "tab-" + tab.key, role: "tabpanel",
+      "aria-labelledby": "tab-btn-" + tab.key, tabindex: "0" });
     var search = el("input", { type: "search", placeholder: "Filter " + tab.label.toLowerCase() + "…", "aria-label": "Filter " + tab.label });
-    var countEl = el("span", { class: "stat-value", text: String(tab.rows.length) });
+    var countEl = el("span", { class: "stat-value", role: "status", "aria-live": "polite", text: String(tab.rows.length) });
     var toolbar = el("div", { class: "toolbar" }, [
       el("div", { class: "search-box" }, [icon("search", "s-icon"), search]),
       el("div", { class: "toolbar-spacer" }),
@@ -323,15 +354,19 @@
     var facetBar = el("div", { class: "facet-bar" });
     var thead = el("tr");
     tab.cols.forEach(function (c, i) {
-      var th = el("th", { class: (c.cls && c.cls.indexOf("num") >= 0 ? "num sortable" : "sortable") }, [
+      var sortButton = el("button", { class: "sort-btn", type: "button" }, [
         doc.createTextNode(c.label + " "), el("span", { class: "sort-ind", "aria-hidden": "true", text: "↕" })
       ]);
-      th.addEventListener("click", function () { sortBy(tab, i); });
+      var th = el("th", { scope: "col", "aria-sort": "none",
+        class: ((c.cls || "") + (c.cls && c.cls.indexOf("num") >= 0 ? " num" : "") + " sortable").trim() }, [sortButton]);
+      sortButton.addEventListener("click", function () { sortBy(tab, i); });
       thead.appendChild(th);
     });
     var tbody = el("tbody");
-    var table = el("table", { class: "data-table" }, [el("thead", null, [thead]), tbody]);
-    var wrap = el("div", { class: "table-wrapper" }, [table]);
+    var table = el("table", { class: "data-table" + (tab.key === "tasks" ? " task-table" : "") }, [
+      el("caption", { class: "sr-only", text: tab.label + " on the canonical Hub board" }),
+      el("thead", null, [thead]), tbody]);
+    var wrap = el("div", { class: "table-wrapper" + (tab.key === "tasks" ? " task-table-wrapper" : "") }, [table]);
     var stage = tab.key === "tasks" ? el("div", { class: "task-stage" }) : null;
     pane.append(toolbar, facetBar,
       el("div", { class: "content-area" }, [el("div", { class: "full-table-view" }, [stage, wrap].filter(Boolean))]));
@@ -426,7 +461,12 @@
       shown++;
       var tr = el("tr", { id: tab.type + "-" + localId(r.id), tabindex: "0", "data-hub-row": "",
         "data-entity-id": r.id, role: "button", "aria-label": (r.title || r.name || localId(r.id)) });
-      tab.cols.forEach(function (c) { tr.appendChild(c.cell(r)); });
+      tab.cols.forEach(function (c) {
+        var cell = c.cell(r);
+        cell.setAttribute("data-label", c.label);
+        if (c.cls) c.cls.split(/\s+/).forEach(function (name) { if (name) cell.classList.add(name); });
+        tr.appendChild(cell);
+      });
       tr.addEventListener("click", function () { openEntity(tab.type, r); });
       tr.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openEntity(tab.type, r); } });
       tr.addEventListener("focus", function () { activate(tab.key); });
@@ -448,6 +488,7 @@
       th.classList.toggle("sort-desc", on && tab._sortDir === "desc");
       var ind = th.querySelector(".sort-ind");
       if (ind) ind.textContent = on ? (tab._sortDir === "asc" ? "↑" : "↓") : "↕";
+      th.setAttribute("aria-sort", on ? (tab._sortDir === "asc" ? "ascending" : "descending") : "none");
     });
   }
   function sortBy(tab, idx) {
@@ -459,10 +500,17 @@
 
   /* ============================ COCKPIT ============================ */
   function eventLabel(event) {
+    if (event.event === "task.transitioned") {
+      return event.status === "done" ? "Task completed"
+        : event.status === "in_progress" ? "Task started"
+        : event.status === "blocked" ? "Task blocked"
+        : event.status === "canceled" ? "Task canceled"
+        : event.status === "todo" ? "Task returned to the queue"
+        : "Task state changed";
+    }
     var labels = {
       "task.created": "Task entered the system",
       "task.updated": "Task progress changed",
-      "task.transitioned": "Task completed",
       "decision.logged": "Decision recorded",
       "deploy.created": "Release recorded",
       "adr.upserted": "Architecture decision changed",
@@ -476,16 +524,21 @@
     "board-drained": "Board drained", "stalled-lease": "Stalled worker",
     "dangling-dep": "Unsatisfiable dep", "governance-amber": "Needs a ruling",
     "blocked": "Blocked", "needs-spec": "Needs spec", "circuit-open": "Circuit open",
-    "adherence-drift": "Board drifting"
+    "adherence-drift": "Board drifting", "unlanded": "Not landed",
+    "delivery-unmeasured-landing": "Landing unknown",
+    "delivery-unmeasured-release": "Release unknown",
+    "delivery-unmeasured-live": "Live state unknown"
   };
   var ATTN_TONE = {
     "board-drained": "fail", "stalled-lease": "warn", "dangling-dep": "warn",
     "governance-amber": "warn", "blocked": "info", "needs-spec": "info",
-    "circuit-open": "fail", "adherence-drift": "warn"
+    "circuit-open": "fail", "adherence-drift": "warn", "unlanded": "warn",
+    "delivery-unmeasured-landing": "warn", "delivery-unmeasured-release": "warn",
+    "delivery-unmeasured-live": "warn"
   };
   function attentionItem(it) {
     var tone = ATTN_TONE[it.kind] || "info";
-    var node = el("button", { class: "attn-item t-" + tone, type: "button",
+    var node = el("button", { class: "attn-item t-" + tone, type: "button", "data-focus-key": "attention:" + (it.id || it.kind),
       "aria-label": (ATTN_LABEL[it.kind] || it.kind) + ": " + (it.title || it.reason) }, [
       el("span", { class: "attn-kind b-" + tone, text: ATTN_LABEL[it.kind] || it.kind }),
       el("span", { class: "attn-body" }, [
@@ -499,6 +552,8 @@
       node.addEventListener("click", function () { openAuditViolation(it.route.violation); });
     } else if (it.route && it.route.focus === "adherence") {
       node.addEventListener("click", function () { focusCard("adherenceCard"); });
+    } else if (it.route && it.route.focus === "delivery") {
+      node.addEventListener("click", function () { focusCard("deliveryCard"); });
     } else {
       node.disabled = true;
       node.title = "nothing to open for this item";
@@ -557,9 +612,11 @@
       el("span", { class: "activity-meta", text: "event " + (event.seq || "—") + (event.agent ? " · " + event.agent : "") })
     ];
     if (event.receipt) {
-      copy.push(el("span", { class: "activity-receipt", text:
-        "verified: " + (event.receipt.command || "") + "  exit " + event.receipt.exit_code +
-        (event.receipt.ran_by ? "  by " + event.receipt.ran_by : "") }));
+      copy.push(el("span", { class: "activity-receipt",
+        title: event.receipt.command || "Critical-probe receipt",
+        text: "critical probe " + (event.receipt.exit_code === 0 ? "passed" : "recorded") +
+          (event.receipt.ran_by ? " · " + event.receipt.ran_by : "") +
+          " · exit " + event.receipt.exit_code }));
     }
     var node = el("button", { class: "activity-item" + (newest ? " is-new" : ""), type: "button",
       "data-seq": String(event.seq || ""), "data-entity-id": event.aggregate || "",
@@ -632,6 +689,7 @@
       var d = (a.dimensions || {})[name] || {};
       var tone = d.pct == null ? "ghost" : d.pct >= 90 ? "pass" : d.pct >= 70 ? "warn" : "fail";
       var row = el("button", { class: "adh-row t-" + tone, type: "button",
+        "data-focus-key": "adherence:" + name,
         title: (a.meaning || {})[name] || name,
         "aria-label": name + " " + (d.pct == null ? "unmeasured" : d.pct + "%") }, [
         el("span", { class: "adh-key" }, [el("span", { class: "adh-swatch", "aria-hidden": "true" }),
@@ -812,46 +870,79 @@
     return el("div", { class: "progress-velocity progress-telemetry", text: text });
   }
 
-  function progressHero(P, rd, fleet, tel, cost, wipSt) {
+  function deliveryCard(deliv) {
+    if (!deliv || !deliv.counts) return null;
+    var c = deliv.counts, measured = deliv.measured || {}, notes = deliv.notes || {};
+    var legs = [
+      { key: "done", label: "Completed", value: c.done, measured: true },
+      { key: "landing", label: "Landed", value: c.landed, measured: measured.landing !== false },
+      { key: "release", label: "Released", value: c.deployed, measured: measured.release !== false },
+      { key: "live", label: "Live", value: c.live, measured: measured.live !== false }
+    ];
+    var flow = el("div", { class: "delivery-flow" });
+    legs.forEach(function (leg, i) {
+      var complete = leg.measured && c.done > 0 && leg.value === c.done;
+      flow.appendChild(el("div", { class: "delivery-leg " + (!leg.measured ? "is-unknown" : complete ? "is-complete" : "is-partial"),
+        title: leg.measured ? (leg.value + " of " + c.done) : (notes[leg.key] || "unmeasured") }, [
+        el("span", { class: "delivery-n", text: leg.measured ? String(leg.value == null ? 0 : leg.value) : "?" }),
+        el("span", { class: "delivery-l", text: leg.label }),
+        el("span", { class: "delivery-of", text: "of " + c.done })
+      ]));
+      if (i < legs.length - 1) flow.appendChild(el("span", { class: "delivery-arrow", "aria-hidden": "true", text: "→" }));
+    });
+    var notesList = legs.filter(function (leg) { return !leg.measured && notes[leg.key]; }).map(function (leg) {
+      return el("li", { text: leg.label + ": " + notes[leg.key] });
+    });
+    return el("section", { class: "card delivery-card", id: "deliveryCard", "aria-labelledby": "deliveryTitle" }, [
+      el("div", { class: "card-header" }, [
+        el("div", { class: "card-title", id: "deliveryTitle" }, [icon("route"), doc.createTextNode("Delivery truth")]),
+        el("span", { class: "badge b-" + (c.live === c.done && c.done ? "pass" : "warn"), text: c.done ? (c.live + "/" + c.done + " live") : "nothing done yet" })
+      ]),
+      el("div", { class: "card-body" }, [flow, notesList.length ? el("ul", { class: "delivery-notes" }, notesList) : null].filter(Boolean))
+    ]);
+  }
+
+  function progressHero(P, rd, fleet, tel, cost, wipSt, attention) {
     P = P || {};
     var pct = P.pct || 0;
     var perHr = P.last_1h || 0;
     var ready = (rd && rd.ready) || 0;
-    var working = (fleet || []).filter(function (c) { return c.status === "working" || c.status === "stalled"; }).length;
+    var working = (fleet || []).filter(function (c) { return c.status === "working"; }).length;
+    var stalled = (fleet || []).filter(function (c) { return c.status === "stalled"; }).length;
+    var attentionN = (attention || []).length;
     var etaMin = (perHr > 0 && ready > 0) ? Math.round(ready / (perHr / 60)) : null;
     var vel = "≈ " + perHr + " tasks/hr"
       + (working ? "  ·  " + working + (working === 1 ? " worker working" : " workers working") : "")
+      + (stalled ? "  ·  " + stalled + " stalled" : "")
       + (ready ? "  ·  " + ready + " ready" + (etaMin != null ? " (≈ " + fmtAge(etaMin * 60) + " to drain)" : "") : "  ·  ready queue drained");
     if (wipSt && wipSt.ceiling) {
       vel += "  ·  WIP " + wipSt.active + "/" + wipSt.ceiling + (wipSt.saturated ? " (saturated)" : "");
     }
     var telLine = telemetryLine(tel, cost);
+    var constraint = stalled ? stalled + (stalled === 1 ? " worker needs intervention" : " workers need intervention")
+      : attentionN ? attentionN + (attentionN === 1 ? " operator decision is waiting" : " operator decisions are waiting")
+      : ready ? ready + (ready === 1 ? " task is ready for pickup" : " tasks are ready for pickup")
+      : working ? working + (working === 1 ? " worker is advancing the board" : " workers are advancing the board")
+      : "The queue is clear and no work is waiting";
     var stats = el("div", { class: "progress-stats" }, [
-      el("div", { class: "pstat" }, [el("span", { class: "pstat-num", "data-countup": "ct", text: String(P.completed_total || 0) }), el("span", { class: "pstat-lbl", text: "completed, total" })]),
-      el("div", { class: "pstat is-up" }, [el("span", { class: "pstat-num", "data-countup": "h1", text: "+" + (P.last_1h || 0) }), el("span", { class: "pstat-lbl", text: "last hour" })]),
-      el("div", { class: "pstat" }, [el("span", { class: "pstat-num", "data-countup": "h24", text: "+" + (P.last_24h || 0) }), el("span", { class: "pstat-lbl", text: "last 24h" })]),
-      el("div", { class: "pstat" + (rd && rd.needs_spec ? " is-alert" : "") }, [
-        el("span", { class: "pstat-num", text: String((rd && rd.needs_spec) || 0) }),
-        el("span", { class: "pstat-lbl", text: "need spec before a worker can pull" })]),
-      /* LANDED IS A MEASUREMENT, NOT A SUBTRACTION. Where the ancestry probe cannot run there is
-         no number to print: the tile renders "? / done" with the caveat, because done-minus-zero-
-         unlanded would assert every done task is on the branch from a question nobody asked. */
-      P.landing_measured === false
-        ? el("div", { class: "pstat is-unmeasured", title: P.landing_note || "landing unverifiable in this context" }, [
-            el("span", { class: "pstat-num", text: "? / " + (P.done || 0) }),
-            el("span", { class: "pstat-lbl", text: "landed — unverifiable here" })])
-        : el("div", { class: "pstat" + (P.unlanded ? " is-alert" : (P.landed_unmeasured ? " is-unmeasured" : "")) }, [
-            el("span", { class: "pstat-num", text: (P.landed != null ? P.landed : "?") + " / " + (P.done || 0) }),
-            el("span", { class: "pstat-lbl", text: P.unlanded ? "landed (" + P.unlanded + " NOT on the branch)"
-              : P.landed_unmeasured ? "landed (" + P.landed_unmeasured + " never measured)" : "landed on the branch" })]),
-      /* The one tile that speaks about PRODUCTION. Unmeasured liveness prints "?" rather than
-         borrowing the landed number. */
-      el("div", { class: "pstat" + (P.live != null && !P.live_attested ? " is-unmeasured" : "") }, [
-        el("span", { class: "pstat-num", text: (P.live != null ? P.live : "?") + " / " + (P.done || 0) }),
-        el("span", { class: "pstat-lbl", text: P.live == null ? "live — unprobed here"
-          : P.live_attested ? "live in production" : "live — unattested probe" })])
+      el("div", { class: "pstat" + (working ? " is-live" : "") }, [
+        el("span", { class: "pstat-num", text: String(working) }), el("span", { class: "pstat-lbl", text: "active now" })]),
+      el("div", { class: "pstat" + (ready ? " is-ready" : "") }, [
+        el("span", { class: "pstat-num", text: String(ready) }), el("span", { class: "pstat-lbl", text: "ready next" })]),
+      el("div", { class: "pstat" + (attentionN ? " is-alert" : "") }, [
+        el("span", { class: "pstat-num", text: String(attentionN) }), el("span", { class: "pstat-lbl", text: "need attention" })]),
+      el("div", { class: "pstat is-rate" }, [
+        el("span", { class: "pstat-num", text: String(perHr) }), el("span", { class: "pstat-lbl", text: "completed / hour" })])
     ]);
     return el("section", { class: "card progress-hero" }, [
+      el("div", { class: "hero-command" }, [
+        el("div", { class: "hero-command-copy" }, [
+          el("span", { class: "live-orb", "aria-hidden": "true" }),
+          el("span", { class: "hero-command-kicker", text: "Flow state" }),
+          el("strong", { text: constraint })
+        ]),
+        el("span", { class: "hero-command-mode", text: working ? "in motion" : ready ? "ready" : attentionN ? "decision" : "clear" })
+      ]),
       el("div", { class: "progress-top" }, [
         el("div", { class: "progress-pctwrap" }, [
           el("span", { class: "progress-pct", "data-countup": "pct", text: pct + "%" }),
@@ -901,24 +992,25 @@
         el("time", { class: "trail-time rel-time", datetime: t.ts || "", "data-ts": t.ts || "", text: relativeTime(t.ts) })
       ]);
     })));
-    var card = el("button", { class: "agent-card s-" + c.status, type: "button",
+    var interactive = c.task_id && BY_ID[c.task_id];
+    var card = el(interactive ? "button" : "article", { class: "agent-card s-" + c.status,
+      type: interactive ? "button" : null,
       "data-seq": String((c.trail && c.trail[0] && c.trail[0].seq) || ""),
       "data-agent": c.agent,
       "aria-label": c.agent + " " + c.status + (c.task ? " on " + c.task : "") }, kids);
-    if (c.task_id && BY_ID[c.task_id]) card.addEventListener("click", function () { openEntity("task", BY_ID[c.task_id]); });
+    if (interactive) card.addEventListener("click", function () { openEntity("task", BY_ID[c.task_id]); });
     return card;
   }
 
   function workerHealthRow(h) {
     if (!h) return null;
-    var parts = [];
+    var parts = [h.seats_with_done_work + (h.seats_with_done_work === 1 ? " seat" : " seats") + " with completed work"];
     if (h.receipts) {
-      parts.push("receipts " + (h.receipts - h.failed) + "/" + h.receipts + " green"
-        + (h.fail_rate_pct == null ? "" : " (" + h.fail_rate_pct + "% failed)"));
+      parts.push("critical probes " + (h.receipts - h.failed) + "/" + h.receipts + " passed"
+        + (h.failed ? " (" + h.failed + " needs attention)" : ""));
     } else {
-      parts.push("no receipts recorded in the last " + h.window + " — outcome unmeasured");
+      parts.push("no critical-probe receipts in the last " + h.window + " events — ordinary completions need none");
     }
-    parts.push(h.seats_with_done_work + (h.seats_with_done_work === 1 ? " seat" : " seats") + " with done work");
     if (h.stalled_now) parts.push(h.stalled_now + " stalled now");
     var top = (h.tasks_per_worker || []).slice(0, 4).map(function (r) {
       return String(r.worker || "").replace(/^worker-/, "") + " " + r.done;
@@ -953,7 +1045,8 @@
 
   function fleetView(fleet, health) {
     fleet = fleet || [];
-    var working = fleet.filter(function (c) { return c.status === "working" || c.status === "stalled"; }).length;
+    var working = fleet.filter(function (c) { return c.status === "working"; }).length;
+    var stalled = fleet.filter(function (c) { return c.status === "stalled"; }).length;
     var body = el("div", { class: "fleet-grid" });
     if (fleet.length) fleet.forEach(function (c) { body.appendChild(agentCard(c)); });
     else body.appendChild(el("div", { class: "fleet-empty", text: "No workers active. Launch one to start the fleet." }));
@@ -962,7 +1055,7 @@
     return el("section", { class: "card fleet-card", id: "fleetCard", "aria-labelledby": "fleetTitle" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title", id: "fleetTitle" }, [icon("users"),
-          doc.createTextNode("Fleet" + (working ? "  ·  " + working + " working now" : ""))]),
+          doc.createTextNode("Fleet" + (working ? "  ·  " + working + " working now" : "") + (stalled ? "  ·  " + stalled + " stalled" : ""))]),
         launch
       ]),
       el("div", { class: "card-body fleet-body" }, [workerHealthRow(health), body].filter(Boolean))
@@ -977,6 +1070,7 @@
       var list = el("div", { class: "ready-items" });
       (items || []).forEach(function (it) {
         var b = el("button", { class: "ready-item", type: "button", text: it.title || localId(it.id),
+                               "data-entity-id": it.id,
                                title: it.id + (it.not_before ? (" · waits until " + it.not_before) : "") });
         if (BY_ID[it.id]) b.addEventListener("click", function () { openEntity("task", BY_ID[it.id]); });
         else b.disabled = true;
@@ -992,7 +1086,7 @@
       ]));
     }
     group("ready to pull", rd.ready, rd.ready_top, "pass", "unblocked and specced — a worker can take these now");
-    group("need spec", rd.needs_spec, rd.needs_spec_top, "warn", "unblocked but no verification_command — a worker would stall");
+    group("need spec", rd.needs_spec, rd.needs_spec_top, "warn", "unblocked executable work needs concrete acceptance");
     group("waiting on a timer", rd.snoozed, rd.snoozed_top, "info", "deferred, not drained — they return on their own");
     if (!rows.length) rows.push(el("p", { class: "cell-sub", text: "No todo work on the board." }));
     return el("section", { class: "card ready-card", id: "readyCard", "aria-labelledby": "readyTitle" }, [
@@ -1025,21 +1119,36 @@
     return el("div", { class: "donut" }, [s]);
   }
 
+  function overviewHeading(kicker, title, copy) {
+    return el("div", { class: "overview-heading" }, [
+      el("span", { class: "overview-heading-kicker", text: kicker }),
+      el("div", { class: "overview-heading-copy" }, [
+        el("h2", { text: title }),
+        el("p", { text: copy })
+      ])
+    ]);
+  }
+
   function buildOverview() {
-    var pane = el("div", { class: "tab-content", id: "tab-overview", role: "tabpanel" });
+    var pane = el("div", { class: "tab-content", id: "tab-overview", role: "tabpanel",
+      "aria-labelledby": "tab-btn-overview", tabindex: "0" });
     var scroll = el("div", { class: "overview-scroll" });
     var au = D.audit || {}, b = D.build || {}, L = live();
     var activity = L.activity || [];
 
-    scroll.appendChild(progressHero(L.progress, L.readiness, L.fleet, L.telemetry, L.cost, L.wip));
-    scroll.appendChild(attentionRail(L.attention));
-    scroll.appendChild(fleetView(L.fleet, L.worker_health));
-
-    var mid = el("div", { class: "ov-grid" }, [adherenceCard(L.adherence), readinessRail(L.readiness)]);
-    scroll.appendChild(mid);
+    scroll.appendChild(progressHero(L.progress, L.readiness, L.fleet, L.telemetry, L.cost, L.wip, L.attention));
+    scroll.appendChild(overviewHeading("Now", "Execution and intervention",
+      "See who is advancing work and the decisions that can change throughput immediately."));
+    scroll.appendChild(el("div", { class: "operations-grid" }, [
+      fleetView(L.fleet, L.worker_health), attentionRail(L.attention)
+    ]));
 
     var dc = dagCard(L.dag);
-    if (dc) scroll.appendChild(dc);
+    scroll.appendChild(overviewHeading("Next", "The pullable frontier",
+      "Ready work and dependency shape reveal the fastest truthful path forward."));
+    scroll.appendChild(el("div", { class: "next-grid" }, [readinessRail(L.readiness), dc].filter(Boolean)));
+
+    var delivery = deliveryCard(L.delivery);
 
     // activity feed
     var feed = el("div", { class: "activity-feed" });
@@ -1056,11 +1165,14 @@
       ]),
       feed
     ]);
+    scroll.appendChild(overviewHeading("Outcome", "From completion to reality",
+      "Follow delivered work through the branch, release, live state, and canonical event record."));
+    scroll.appendChild(el("div", { class: "outcome-grid" }, [delivery, actCard].filter(Boolean)));
 
     // audit card
     var auBody = el("div", { class: "card-body" });
     auBody.appendChild(el("p", { class: "cell-sub", style: "margin-bottom:12px",
-      text: "Computed per request (never a cached boolean) · exit " + (au.exit_code) + " · critical " + ((au.counts || {}).critical || 0) + " · high " + ((au.counts || {}).high || 0) + " · warn " + ((au.counts || {}).warn || 0) }));
+      text: "Structural snapshot · exit " + (au.exit_code) + " · critical " + ((au.counts || {}).critical || 0) + " · high " + ((au.counts || {}).high || 0) + " · warn " + ((au.counts || {}).warn || 0) }));
     if ((au.violations || []).length) {
       au.violations.slice(0, 12).forEach(function (v) {
         auBody.appendChild(el("div", { class: "callout " + (v.severity === "warn" ? "warn" : "fail") }, [
@@ -1072,7 +1184,7 @@
     } else {
       auBody.appendChild(el("div", { class: "callout info" }, [
         el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.pass }),
-        el("div", { text: "No violations — independently verified." })]));
+        el("div", { text: "No structural violations in this snapshot." })]));
     }
     var auCard = el("section", { class: "card", id: "auditCard" }, [
       el("div", { class: "card-header" }, [
@@ -1096,21 +1208,33 @@
       el("div", { class: "card-body ov-donutrow" }, [donut((L.progress || {}).pct || 0, au.ok), phBody])
     ]);
 
-    scroll.appendChild(el("div", { class: "ov-grid" }, [actCard, phCard]));
-
     var fm = failureModes(L.failure_modes);
-    scroll.appendChild(el("div", { class: "ov-grid" }, [auCard, fm].filter(Boolean)));
 
     function ci(label, val) { return el("span", { class: "ci" }, [doc.createTextNode(label + " "), el("code", { text: val == null ? "—" : String(val) })]); }
-    scroll.appendChild(el("section", { class: "card" }, [
+    var coCard = el("section", { class: "card" }, [
       el("div", { class: "card-header" }, [
         el("div", { class: "card-title" }, [icon("rocket"), doc.createTextNode("Build coherence")]),
         el("span", { class: "badge b-" + (b.coherent === true ? "pass" : (b.coherent === false ? "fail" : "stale")),
-                     text: b.coherent === true ? "coherent" : (b.coherent === false ? "drift" : "unverified") })]),
+                     text: b.coherent === true ? "coherent" : (b.coherent === false ? "drift" : "unmeasured") })]),
       el("div", { class: "card-body" }, [el("div", { class: "coherence-strip" }, [
         ci("repo", b.repo), ci("deploy", b.deploy), ci("stamped sha", b.sha), ci("HEAD", b.head), ci("served", b.served_sha)
       ])])
-    ]));
+    ]);
+
+    var adherence = adherenceCard(L.adherence);
+    var integrityCards = [adherence, phCard, auCard, fm, coCard].filter(Boolean);
+    var integrity = el("details", { class: "integrity-drawer" }, [
+      el("summary", { class: "integrity-summary" }, [
+        el("span", { class: "integrity-summary-icon", "aria-hidden": "true" }, [icon("stack")]),
+        el("span", { class: "integrity-summary-copy" }, [
+          el("strong", { text: "Integrity and system depth" }),
+          el("span", { text: "Adherence, phases, structural audit, failure modes, and build identity" })
+        ]),
+        el("span", { class: "badge b-" + (au.ok ? "pass" : "warn"), text: au.ok ? "structurally clear" : "attention" })
+      ]),
+      el("div", { class: "integrity-grid" }, integrityCards)
+    ]);
+    scroll.appendChild(integrity);
 
     pane.appendChild(scroll);
     return pane;
@@ -1132,7 +1256,8 @@
     return el("div", { class: "chip-row" }, ids.map(function (id) { return chip(type, id); }));
   }
 
-  function openEntity(type, r) {
+  var _openModalEntity = null;
+  function openEntity(type, r, liveRefresh) {
     var role = type === "deploy" ? (r.audit_ok ? "pass" : "fail") : roleOf(type, r.status || r.maturity);
     var iconName = { task: "checks", adr: "branch", feat: "package", gap: "warning", cap: "stack", deploy: "rocket" }[type] || "info";
     var title = r.title || r.name || (r.number != null ? ("ADR " + r.number) : localId(r.id));
@@ -1163,9 +1288,10 @@
     if (detailRows.filter(Boolean).length) grid.appendChild(section("Detail", iconName, detailRows));
     body.appendChild(grid);
 
-    // LIVE: what is happening to this task right now, and what proved it done.
+    // LIVE: what is happening now, plus the optional transient probe when this task explicitly
+    // declared a critical boundary. Ordinary done work stands on the completed operation itself.
     if (type === "task") {
-      var lease = leaseOf(r.id), prog = taskProgress(r), rec = receiptOf(r);
+      var lease = leaseOf(r.id), prog = taskProgress(r), proof = completionProof(r), rec = proof.receipt;
       var liveRows = [];
       if (lease) {
         liveRows.push(row("Held by", el("span", { class: "lease-chip" + (lease.stalled ? " is-stalled" : "") }, [
@@ -1177,16 +1303,22 @@
           el("div", { class: "cell-sub", text: "step " + prog.done + "/" + prog.total + (prog.step ? (" — " + prog.step) : "") })
         ])));
       }
-      if (r.verification_command) liveRows.push(rowMono("Verification command", r.verification_command));
+      if (proof.declared) liveRows.push(rowMono("Declared critical probe", proof.command));
       if (rec) {
-        liveRows.push(row("Receipt", el("div", { class: "receipt-box" + (rec.exit_code === 0 ? " ok" : " bad") }, [
+        liveRows.push(row("Critical-probe receipt", el("div", { class: "receipt-box" + (rec.exit_code === 0 ? " ok" : " bad") }, [
           el("div", { class: "mono", text: rec.command || "" }),
-          el("div", { class: "cell-sub", text: "exit " + rec.exit_code + (rec.ran_by ? (" · ran by " + rec.ran_by) : "") + (rec.ran_at ? (" · " + rec.ran_at) : "") })
-        ])));
-      } else if (r.status === "done") {
-        liveRows.push(row("Receipt", el("div", { class: "callout warn" }, [
+          el("div", { class: "cell-sub", text: "exit " + rec.exit_code + (rec.ran_by ? (" · ran by " + rec.ran_by) : "") + (rec.ran_at ? (" · " + rec.ran_at) : "") }),
+          rec.output_sha256 ? el("div", { class: "cell-sub mono", text: "output sha256 " + rec.output_sha256 }) : null
+        ].filter(Boolean))));
+      } else if (r.status === "done" && proof.declared) {
+        liveRows.push(row("Critical-probe receipt", el("div", { class: "callout warn" }, [
           el("span", { class: "b-glyph", "aria-hidden": "true", text: GLYPH.warn }),
-          el("div", { text: "This task is done with no recorded verification_run. Under the receipt gate, done is granted by an exit-0 receipt — this one was recorded another way." })])));
+          el("div", { text: "This task declared a critical probe, but no matching receipt was recorded." })])));
+      } else if (r.status === "done") {
+        liveRows.push(row("Completion", el("div", { class: "receipt-box ok" }, [
+          el("div", { text: "Real operation completed" }),
+          el("div", { class: "cell-sub", text: "No separate critical probe was declared or required." })
+        ])));
       }
       if (liveRows.length) body.appendChild(el("div", { class: "detail-grid one" }, [section("Live", "pulse", liveRows)]));
     }
@@ -1214,8 +1346,13 @@
         pv.commits && pv.commits.length ? rowMono("Commits", pv.commits.join(", ")) : null
       ])]));
     }
-    openModal(role, title, r.id, iconName, body);
-    try { history.replaceState(null, "", "#" + type + "-" + localId(r.id)); } catch (e) {}
+    if (liveRefresh) {
+      refreshModal(role, title, r.id, iconName, body);
+    } else {
+      _openModalEntity = { type: type, id: r.id };
+      openModal(role, title, r.id, iconName, body);
+      try { history.replaceState(null, "", "#" + type + "-" + localId(r.id)); } catch (e) {}
+    }
   }
 
   // The element that opened the dialog, so closing can hand focus back where it came from.
@@ -1255,6 +1392,34 @@
     doc.addEventListener("keydown", _trapTab, true);
     var c = doc.getElementById("modalClose"); if (c) c.focus();
   }
+  function refreshModal(role, title, subtitle, iconName, bodyNode) {
+    var m = doc.getElementById("universalModal");
+    if (!m || !m.classList.contains("show")) return;
+    var b = doc.getElementById("modalBody");
+    var top = b ? b.scrollTop : 0, left = b ? b.scrollLeft : 0;
+    var focus = elementKey(doc.activeElement);
+    var box = doc.getElementById("modalIcon");
+    box.className = "modal-icon t-" + role; box.textContent = ""; box.appendChild(icon(iconName));
+    doc.getElementById("modalTitle").textContent = title;
+    doc.getElementById("modalSubtitle").textContent = subtitle || "";
+    if (b) { b.textContent = ""; b.appendChild(bodyNode); b.scrollTop = top; b.scrollLeft = left; }
+    var restored = findElement(focus);
+    if (restored && restored !== doc.activeElement) {
+      try { restored.focus({ preventScroll: true }); } catch (e) { restored.focus(); }
+    }
+  }
+  function refreshOpenEntityModal() {
+    if (!_openModalEntity) return;
+    var m = doc.getElementById("universalModal");
+    if (!m || !m.classList.contains("show")) return;
+    var current = BY_ID[_openModalEntity.id];
+    if (!current) {
+      closeModal();
+      announce("The open Hub entity is no longer available.");
+      return;
+    }
+    openEntity(_openModalEntity.type, current, true);
+  }
   function closeModal() {
     var m = doc.getElementById("universalModal");
     if (m) m.classList.remove("show");
@@ -1263,6 +1428,7 @@
     doc.removeEventListener("keydown", _trapTab, true);
     if (_modalOpener && doc.contains(_modalOpener)) { try { _modalOpener.focus(); } catch (e) {} } // absorbs: element detached
     _modalOpener = null;
+    _openModalEntity = null;
   }
 
   /* ============================ TOAST + STATUS ============================ */
@@ -1277,20 +1443,26 @@
   function celebrateTask(task) {
     var existing = doc.querySelector(".completion-celebration");
     if (existing) existing.remove();
-    var rec = receiptOf(task);
-    var proven = !!(rec && rec.exit_code === 0);
-    var particles = el("span", { class: "completion-particles", "aria-hidden": "true" });
-    for (var i = 0; i < 12; i++) particles.appendChild(el("i", { style: "--particle:" + i }));
-    // The loudest moment on the board must not overstate what happened. `done` was either GRANTED
-    // by an exit-0 receipt or merely recorded, and the celebration says which.
-    var celebration = el("div", { class: "completion-celebration" + (proven ? "" : " not-proven"), role: "status", "aria-live": "assertive" }, [
+    var proof = completionProof(task);
+    var boardDrained = (((live().progress || {}).pct || 0) >= 100);
+    var particles = null;
+    if (boardDrained) {
+      particles = el("span", { class: "completion-particles", "aria-hidden": "true" });
+      for (var i = 0; i < 12; i++) particles.appendChild(el("i", { style: "--particle:" + i }));
+    }
+    // Celebrate real delivery by default. Only a task that declared a critical probe and lacks its
+    // passing receipt gets the warning treatment; an absent, undeclared test is not a defect.
+    var headline = proof.passed ? "Task complete · critical probe passed"
+      : proof.declared ? "Task complete · critical probe needs attention"
+      : "Task complete · work delivered";
+    var celebration = el("div", { class: "completion-celebration" + (proof.complete ? "" : " not-proven") + (boardDrained ? " is-milestone" : ""), role: "status", "aria-live": "assertive" }, [
       particles,
-      el("span", { class: "completion-check", "aria-hidden": "true", text: proven ? "✓" : "◌" }),
+      el("span", { class: "completion-check", "aria-hidden": "true", text: proof.complete ? "✓" : "◌" }),
       el("span", { class: "completion-copy" }, [
-        el("strong", { text: proven ? "Task complete · verified" : "Task complete · no receipt" }),
+        el("strong", { text: headline }),
         el("span", { text: task.title || localId(task.id) })
       ])
-    ]);
+    ].filter(Boolean));
     doc.body.appendChild(celebration);
     (global.requestAnimationFrame || setTimeout)(function () { celebration.classList.add("show"); });
     setTimeout(function () {
@@ -1303,20 +1475,22 @@
     source: null,
     cursor: ((live().cursor) || {}).seq || 0,
     lastEventAt: ((live().cursor) || {}).ts || null,
-    state: "connecting",
     connected: false,
     failures: 0,
+    dataHealthy: true,
+    lastAppliedAt: Date.now(),
+    snapshotJSON: JSON.stringify(D),
     syncing: false,
-    queued: false,
-    fallbackTimer: null,
-    reconnectTimer: null,
-    integrityTimer: null
+    reconcilePending: false,
+    snapshotRequired: false,
+    signaledCursor: ((live().cursor) || {}).seq || 0,
+    patchQueue: []
   };
   function setStatus(state, text, meta) {
     var p = doc.getElementById("statusPill"); if (!p) return;
-    p.className = "status-pill" + (state ? " " + state : "");
-    p.setAttribute("data-state", state || "live");
-    LIVE.state = state || "live";
+    var visual = state === "connected" ? "live" : state === "disconnected" ? "error" : state;
+    p.className = "status-pill" + (visual ? " " + visual : "");
+    p.setAttribute("data-state", state || "disconnected");
     var s = doc.getElementById("statusText"); if (s) s.textContent = text;
     var m = doc.getElementById("statusMeta"); if (m && meta != null) m.textContent = meta;
   }
@@ -1328,7 +1502,11 @@
   function tickLiveMeta() {
     var meta = doc.getElementById("statusMeta");
     if (!meta) return;
-    meta.textContent = "seq " + LIVE.cursor + " · " + (LIVE.lastEventAt ? relativeTime(LIVE.lastEventAt) : "awaiting event");
+    meta.textContent = "seq " + LIVE.cursor + " · " + (LIVE.lastEventAt ? relativeTime(LIVE.lastEventAt) : "awaiting event")
+      + (!LIVE.dataHealthy ? " · recovery active" : "");
+  }
+  function renderConnectionStatus() {
+    setStatus(LIVE.connected ? "connected" : "disconnected", LIVE.connected ? "Connected" : "Disconnected");
   }
   function paintBackdrop() {
     // The ambient field is a READOUT, not decoration: its brightness and tempo come from how many
@@ -1336,7 +1514,7 @@
     // board nobody is working on is nearly still — which is the honest thing for it to look like.
     var L = live();
     var working = (L.fleet || []).filter(function (c) {
-      return c.status === "working" || c.status === "stalled";
+      return c.status === "working";
     }).length;
     var band = working >= 3 ? "many" : String(Math.min(2, working));
     var attn = L.attention || [];
@@ -1372,21 +1550,97 @@
     });
     return changed;
   }
+  function elementKey(node) {
+    if (!node || node === doc.body || node === doc.documentElement) return null;
+    if (node.id) return { kind: "id", value: node.id };
+    var attrs = ["data-focus-key", "data-entity-id", "data-task-id", "data-agent", "data-seq"];
+    for (var i = 0; i < attrs.length; i++) {
+      if (node.getAttribute && node.getAttribute(attrs[i])) {
+        return { kind: "attr", name: attrs[i], value: node.getAttribute(attrs[i]) };
+      }
+    }
+    return null;
+  }
+  function findElement(key, root) {
+    if (!key) return null;
+    root = root || doc;
+    if (key.kind === "id") {
+      var byIdentity = doc.getElementById(key.value);
+      return byIdentity && (root === doc || root.contains(byIdentity)) ? byIdentity : null;
+    }
+    var nodes = root.querySelectorAll("[" + key.name + "]");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute(key.name) === key.value) return nodes[i];
+    }
+    return null;
+  }
+  function captureViewState() {
+    var panes = {};
+    TABS.forEach(function (tab) {
+      var pane = doc.getElementById("tab-" + tab.key);
+      if (!pane) return;
+      var table = pane.querySelector(".table-wrapper");
+      panes[tab.key] = {
+        top: pane.scrollTop, left: pane.scrollLeft,
+        tableTop: table ? table.scrollTop : 0, tableLeft: table ? table.scrollLeft : 0
+      };
+    });
+    return {
+      pageX: global.scrollX || 0, pageY: global.scrollY || 0,
+      focus: elementKey(doc.activeElement), opener: elementKey(_modalOpener), panes: panes
+    };
+  }
+  function restoreViewState(state) {
+    if (!state) return;
+    TABS.forEach(function (tab) {
+      var saved = state.panes[tab.key], pane = doc.getElementById("tab-" + tab.key);
+      if (!saved || !pane) return;
+      pane.scrollTop = saved.top; pane.scrollLeft = saved.left;
+      var table = pane.querySelector(".table-wrapper");
+      if (table) { table.scrollTop = saved.tableTop; table.scrollLeft = saved.tableLeft; }
+    });
+    var restored = findElement(state.focus);
+    if (restored && restored !== doc.activeElement) {
+      try { restored.focus({ preventScroll: true }); } catch (e) { restored.focus(); }
+    }
+    if (state.opener) _modalOpener = findElement(state.opener) || _modalOpener;
+    try { global.scrollTo(state.pageX, state.pageY); } catch (e) {}
+  }
   function refreshOverview() {
     var old = _panes.overview;
     if (!old || !old.parentNode) return;
     var scroll = old.querySelector(".overview-scroll");
     var top = scroll ? scroll.scrollTop : 0;
     var active = old.classList.contains("active");
+    function keyOf(node) {
+      if (!node || !old.contains(node)) return null;
+      if (node.id) return "id:" + node.id;
+      var attrs = ["data-focus-key", "data-entity-id", "data-task-id", "data-agent", "data-seq"];
+      for (var i = 0; i < attrs.length; i++) {
+        if (node.getAttribute && node.getAttribute(attrs[i])) return attrs[i] + ":" + node.getAttribute(attrs[i]);
+      }
+      return null;
+    }
+    function findKey(root, key) {
+      if (!key) return null;
+      if (key.slice(0, 3) === "id:") return doc.getElementById(key.slice(3));
+      var cut = key.indexOf(":"), attr = key.slice(0, cut), value = key.slice(cut + 1);
+      var nodes = root.querySelectorAll("[" + attr + "]");
+      for (var i = 0; i < nodes.length; i++) if (nodes[i].getAttribute(attr) === value) return nodes[i];
+      return null;
+    }
+    var focusKey = keyOf(doc.activeElement);
+    var openerKey = keyOf(_modalOpener);
     var fresh = buildOverview();
     if (active) fresh.classList.add("active");
+    fresh.classList.add("live-refresh");
     old.parentNode.replaceChild(fresh, old);
     _panes.overview = fresh;
     var freshScroll = fresh.querySelector(".overview-scroll");
     if (freshScroll) freshScroll.scrollTop = top;
-    // A live patch must not replay the arrival animation — the page would flinch every time a
-    // worker heartbeated. The cards animate on mount only.
-    [].forEach.call(fresh.querySelectorAll(".card, .ov-grid"), function (n) { n.style.animation = "none"; });
+    var restored = findKey(fresh, focusKey);
+    if (restored) { try { restored.focus({ preventScroll: true }); } catch (e) { restored.focus(); } }
+    if (openerKey) _modalOpener = findKey(fresh, openerKey) || _modalOpener;
     primeLaunchControls();
     paintBackdrop();
   }
@@ -1464,11 +1718,13 @@
       var current = BY_ID[id];
       if (current && ["done", "blocked", "in_progress"].indexOf(changes[id]) >= 0) {
         if (changes[id] === "done") celebrateTask(current);
-        var rec = changes[id] === "done" ? receiptOf(current) : null;
-        var proven = !!(rec && rec.exit_code === 0);
-        toast((changes[id] === "done" ? (proven ? "Completed (verified): " : "Completed (no receipt): ")
+        var proof = changes[id] === "done" ? completionProof(current) : null;
+        var completionCopy = proof && proof.passed ? "Completed · critical probe passed: "
+          : proof && proof.declared ? "Completed · critical probe needs attention: "
+          : "Completed: ";
+        toast((changes[id] === "done" ? completionCopy
               : changes[id] === "blocked" ? "Blocked: " : "Started: ") + (current.title || localId(id)),
-          changes[id] === "done" ? (proven ? "success" : "info") : (changes[id] === "blocked" ? "error" : "info"));
+          changes[id] === "done" ? (proof.complete ? "success" : "error") : (changes[id] === "blocked" ? "error" : "info"));
       }
     });
   }
@@ -1484,8 +1740,33 @@
     });
   }
 
+  function derivePhases() {
+    var map = {};
+    (D.tasks || []).forEach(function (task) {
+      var name = task.phase || "Unphased";
+      var row = map[name] || (map[name] = { name: name, done: 0, total: 0 });
+      row.total += 1;
+      if (task.status === "done") row.done += 1;
+    });
+    D.phases = Object.keys(map).sort(function (a, b) {
+      return a.localeCompare(b, undefined, { numeric: true });
+    }).map(function (name) {
+      var row = map[name];
+      row.pct = row.total ? Math.round(100 * row.done / row.total) : 0;
+      return row;
+    });
+  }
+  function publishClientState() {
+    var json = JSON.stringify(D);
+    var island = doc.getElementById("hub-data");
+    if (island) island.textContent = json;
+    LIVE.snapshotJSON = json;
+    if (global.HubPalette && global.HubPalette.refresh) global.HubPalette.refresh(D);
+  }
+
   function applySnapshot(next, reason) {
     if (!next || !next.tasks) throw new Error("incomplete Hub snapshot");
+    var viewState = captureViewState();
     var changes = taskDelta(D.tasks || [], next.tasks || []);
     var oldActivity = ((live().activity || [])[0] || {}).seq || 0;
     var prevProg = live().progress || {};
@@ -1494,19 +1775,22 @@
     rebuildIndex();
     rerenderTabs(changes);
     refreshOverview();
+    refreshOpenEntityModal();
     reactCockpit(prevProg, prevFleet);
-    var island = doc.getElementById("hub-data");
-    if (island) island.textContent = JSON.stringify(D);
+    publishClientState();
+    restoreViewState(viewState);
     reactToChanges(changes);
 
     var cursor = live().cursor || {};
-    LIVE.cursor = cursor.seq || LIVE.cursor;
+    if (typeof cursor.seq === "number") LIVE.cursor = cursor.seq;
     LIVE.lastEventAt = cursor.ts || LIVE.lastEventAt;
     var n = Object.keys(changes).length;
     if (n) announce(n + (n === 1 ? " task changed." : " tasks changed."));
     else if (((live().activity || [])[0] || {}).seq > oldActivity) announce("New canonical Hub activity received.");
-    if (LIVE.connected) setStatus("live", "Live");
-    else if (reason === "fallback") setStatus("degraded", "Polling");
+    LIVE.dataHealthy = true;
+    LIVE.lastAppliedAt = Date.now();
+    resolveWorkerWatches();
+    renderConnectionStatus();
     tickLiveMeta();
   }
 
@@ -1517,7 +1801,9 @@
     // carries the changed rows, never the whole board. The cockpit blocks ride along in
     // payload.live so the hero, fleet and rail move with the entities instead of lagging a full
     // sync behind — the most-watched part of the page must not be the last to update.
+    var viewState = captureViewState();
     var changed = payload.changed || [];
+    var removed = (payload.removed || []).map(function (item) { return typeof item === "string" ? item : item && item.id; }).filter(Boolean);
     var prevTasks = (D.tasks || []).slice();
     var prevProg = live().progress || {};
     var prevFleet = fleetSeqMap(live().fleet);
@@ -1529,32 +1815,54 @@
       for (i = 0; i < rows.length; i++) { if (rows[i].id === ent.id) break; }
       if (i < rows.length) rows[i] = ent; else rows.push(ent);
     });
+    if (removed.length) {
+      Object.keys(TYPE_COLLECTION).forEach(function (type) {
+        var key = TYPE_COLLECTION[type];
+        D[key] = (D[key] || []).filter(function (ent) { return removed.indexOf(ent.id) < 0; });
+      });
+    }
     if (payload.live) {
       D.live = D.live || {};
       Object.keys(payload.live).forEach(function (k) {
         if (payload.live[k] != null) D.live[k] = payload.live[k];
       });
     }
+    if (payload.audit) D.audit = Object.assign({}, D.audit || {}, payload.audit);
+    derivePhases();
     var changes = taskDelta(prevTasks, D.tasks || []);
     rebuildIndex();
     rerenderTabs(changes);
     refreshOverview();
+    refreshOpenEntityModal();
     reactCockpit(prevProg, prevFleet);
     reactToChanges(changes);
+    publishClientState();
+    restoreViewState(viewState);
     var cursor = payload.cursor || {};
     LIVE.cursor = Math.max(LIVE.cursor, cursor.seq || 0);
-    if (LIVE.connected) setStatus("live", "Live");
+    var liveCursor = ((payload.live || {}).cursor) || {};
+    LIVE.lastEventAt = liveCursor.ts || cursor.ts || LIVE.lastEventAt;
+    LIVE.dataHealthy = true;
+    LIVE.lastAppliedAt = Date.now();
+    resolveWorkerWatches();
+    renderConnectionStatus();
     tickLiveMeta();
   }
 
-  function syncDelta(reason) {
-    // FALLBACK to the full snapshot on: no base cursor, HTTP failure, parse error, or a cursor
-    // GAP (the server head regressed below ours — a reset we cannot patch over).
-    if (LIVE.syncing) { LIVE.queued = true; return Promise.resolve(); }
-    var since = LIVE.cursor || 0;
-    if (!since) return syncSnapshot(reason);
-    LIVE.syncing = true;
-    return fetch("delta.json?since=" + encodeURIComponent(since), {
+  function timedFetch(url, options) {
+    if (!global.AbortController) return fetch(url, options);
+    var controller = new global.AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 9000);
+    options = Object.assign({}, options || {}, { signal: controller.signal });
+    return fetch(url, options).then(function (response) {
+      clearTimeout(timer); return response;
+    }, function (error) {
+      clearTimeout(timer); throw error;
+    });
+  }
+
+  function readDelta(since) {
+    return timedFetch("delta.json?since=" + encodeURIComponent(since), {
       credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
     }).then(function (response) {
       if (!response.ok) throw new Error("HTTP " + response.status);
@@ -1563,103 +1871,158 @@
       var seq = payload && payload.cursor ? payload.cursor.seq : null;
       if (typeof seq !== "number" || seq < since) throw new Error("cursor gap");
       applyDelta(payload);
-      LIVE.failures = 0;
-    }).catch(function () {
-      LIVE.syncing = false;                       // let the recovery full-sync take the slot
-      return syncSnapshot((reason || "delta") + "-fallback");
-    }).then(function (v) {
-      LIVE.syncing = false;
-      if (LIVE.queued) { LIVE.queued = false; syncDelta("queued"); }
-      return v;
     });
   }
-  function syncSnapshot(reason) {
-    if (LIVE.syncing) { LIVE.queued = true; return Promise.resolve(); }
-    LIVE.syncing = true;
-    var button = doc.getElementById("refreshBtn");
-    if (button) button.classList.add("is-syncing");
-    return fetch("?format=json", {
+  function recoverSnapshot(reason) {
+    return timedFetch("?format=json", {
       credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json" }
     }).then(function (response) {
       if (!response.ok) throw new Error("HTTP " + response.status);
       return response.json();
     }).then(function (snapshot) {
-      applySnapshot(snapshot, reason || "sync");
-      LIVE.failures = 0;
-    }).catch(function (error) {
-      LIVE.failures += 1;
-      setStatus("degraded", "Degraded");
-      announce("Live Hub synchronization is degraded. Retrying automatically.");
-      if (reason === "manual") toast("Sync failed; automatic recovery is active.", "error");
-    }).then(function () {
-      LIVE.syncing = false;
-      if (button) button.classList.remove("is-syncing");
-      if (LIVE.queued) { LIVE.queued = false; syncSnapshot("queued"); }
+      applySnapshot(snapshot, reason || "recovery");
+      LIVE.signaledCursor = Math.max(LIVE.signaledCursor, LIVE.cursor);
     });
   }
-
-  function stopFallback() {
-    if (LIVE.fallbackTimer) clearTimeout(LIVE.fallbackTimer);
-    LIVE.fallbackTimer = null;
+  function noteEventSignal(signal) {
+    signal = signal || {};
+    var seq = Number(signal.seq);
+    if (isFinite(seq)) LIVE.signaledCursor = Math.max(LIVE.signaledCursor, seq);
+    if (signal.ts) LIVE.lastEventAt = signal.ts;
   }
-  function startFallback() {
-    if (LIVE.fallbackTimer) return;
-    var poll = function () {
-      LIVE.fallbackTimer = null;
-      syncSnapshot("fallback").then(function () {
-        // Base cadence comes from the snapshot — the server owns the poll budget.
-        var base = live().fallback_poll_ms || 2500;
-        if (LIVE.state !== "live") LIVE.fallbackTimer = setTimeout(poll, Math.min(12000, base + LIVE.failures * 1250));
-      });
-    };
-    LIVE.fallbackTimer = setTimeout(poll, 600);
+  function applyStreamPatch(payload) {
+    if (!payload || !payload.cursor || typeof payload.cursor.seq !== "number" || !Array.isArray(payload.changed)) {
+      reconnectForRecovery("A malformed live patch was rejected; reconnecting from the last canonical cursor.");
+      return false;
+    }
+    noteEventSignal(payload.cursor);
+    if (LIVE.syncing) { LIVE.patchQueue.push(payload); return true; }
+    if (payload.cursor.seq < LIVE.cursor) {
+      reconnectForRecovery("The live cursor regressed; reconnecting for a canonical snapshot.");
+      return false;
+    }
+    applyDelta(payload);
+    return true;
+  }
+  function drainPatchQueue() {
+    var queue = LIVE.patchQueue.splice(0);
+    queue.forEach(function (payload) {
+      if (payload.cursor && payload.cursor.seq >= LIVE.cursor) applyDelta(payload);
+    });
+  }
+  function reconcileCanonical(reason) {
+    if (LIVE.syncing) return Promise.resolve();
+    if (!LIVE.snapshotRequired && !LIVE.reconcilePending && LIVE.signaledCursor <= LIVE.cursor) return Promise.resolve();
+    var snapshotFirst = LIVE.snapshotRequired;
+    LIVE.snapshotRequired = false;
+    LIVE.reconcilePending = false;
+    LIVE.syncing = true;
+    var work = snapshotFirst ? recoverSnapshot(reason) : readDelta(LIVE.cursor).catch(function () {
+      return recoverSnapshot((reason || "event") + "-recovery");
+    });
+    var succeeded = false;
+    return work.then(function () {
+      succeeded = true;
+      LIVE.failures = 0;
+      LIVE.dataHealthy = true;
+    }, function () {
+      LIVE.failures += 1;
+      LIVE.dataHealthy = false;
+      LIVE.reconcilePending = false;
+      LIVE.snapshotRequired = false;
+      LIVE.signaledCursor = LIVE.cursor;
+      announce("The live event stream is connected, but canonical recovery could not complete yet.");
+    }).then(function () {
+      LIVE.syncing = false;
+      drainPatchQueue();
+      renderConnectionStatus();
+      tickLiveMeta();
+      if (succeeded && (LIVE.snapshotRequired || LIVE.reconcilePending)) {
+        reconcileCanonical("coalesced");
+      }
+    });
+  }
+  function requestRecovery(signal, reason, force, snapshotRequired) {
+    signal = signal || {};
+    var seq = Number(signal.seq);
+    if (snapshotRequired) {
+      LIVE.snapshotRequired = true;
+      if (isFinite(seq)) LIVE.signaledCursor = seq;
+    } else if (isFinite(seq)) {
+      LIVE.signaledCursor = Math.max(LIVE.signaledCursor, seq);
+    }
+    if (signal.ts) LIVE.lastEventAt = signal.ts;
+    LIVE.reconcilePending = LIVE.reconcilePending || !!force || LIVE.signaledCursor > LIVE.cursor;
+    if (LIVE.reconcilePending && !LIVE.syncing) reconcileCanonical(reason || "recovery");
+  }
+  function reconnectForRecovery(message) {
+    LIVE.dataHealthy = false;
+    if (message) announce(message);
+    disconnectLive();
+    connectLive();
   }
   function disconnectLive() {
-    if (LIVE.source) LIVE.source.close();
+    var source = LIVE.source;
     LIVE.source = null;
+    if (source) source.close();
     LIVE.connected = false;
-    if (LIVE.reconnectTimer) clearTimeout(LIVE.reconnectTimer);
-    LIVE.reconnectTimer = null;
+    renderConnectionStatus();
   }
   function connectLive() {
-    disconnectLive();
-    if (doc.hidden) return;
-    if (!global.EventSource) { setStatus("degraded", "Polling"); startFallback(); return; }
-    setStatus("connecting", LIVE.failures ? "Reconnecting" : "Connecting");
-    var source = new global.EventSource("live/events?since=" + encodeURIComponent(LIVE.cursor));
+    if (LIVE.source || !global.EventSource) { renderConnectionStatus(); return; }
+    var source;
+    try { source = new global.EventSource("live/events?since=" + encodeURIComponent(LIVE.cursor)); }
+    catch (error) { renderConnectionStatus(); return; }
     LIVE.source = source;
     source.onopen = function () {
+      if (source !== LIVE.source) return;
       LIVE.connected = true; LIVE.failures = 0;
-      stopFallback(); setStatus("live", "Live"); tickLiveMeta();
+      renderConnectionStatus(); tickLiveMeta();
     };
     source.addEventListener("ready", function (event) {
-      // Never bump the cursor past unconsumed events: if the stream starts ahead of our state,
-      // pull the gap as a delta (which advances the cursor only after patching).
+      if (source !== LIVE.source) return;
       try {
         var data = JSON.parse(event.data);
-        if ((data.seq || 0) > LIVE.cursor) syncDelta("ready");
+        LIVE.lastEventAt = data.ts || LIVE.lastEventAt;
+        if (Number(data.seq) < LIVE.cursor) requestRecovery(data, "cursor-reset", true, true);
+        else if (Number(data.seq) > LIVE.cursor || !LIVE.dataHealthy) requestRecovery(data, "cursor-catch-up", !LIVE.dataHealthy);
       } catch (error) {}
       tickLiveMeta();
     });
-    source.addEventListener("heartbeat", function () {
-      if (LIVE.state !== "live") setStatus("live", "Live");
+    source.addEventListener("heartbeat", function (event) {
+      if (source !== LIVE.source) return;
+      renderConnectionStatus();
       tickLiveMeta();
     });
+    source.addEventListener("patch", function (event) {
+      if (source !== LIVE.source) return;
+      try {
+        var payload = JSON.parse(event.data);
+        if (applyStreamPatch(payload)) pulseBeacon();
+      } catch (error) {
+        reconnectForRecovery("A malformed live patch was rejected; reconnecting from the last canonical cursor.");
+      }
+    });
     source.addEventListener("hub", function (event) {
-      try { LIVE.lastEventAt = (JSON.parse(event.data).ts) || LIVE.lastEventAt; } catch (error) {}
-      pulseBeacon();
-      syncDelta("event");
+      if (source !== LIVE.source) return;
+      var data = {};
+      try { data = JSON.parse(event.data); } catch (error) {}
+      noteEventSignal(data);
+      // Identity-only envelopes are advisory compatibility signals. The canonical `patch` event
+      // carries the state itself; HTTP reads remain confined to reconnect/gap recovery.
     });
     source.addEventListener("reconnect", function () {
+      if (source !== LIVE.source) return;
       disconnectLive();
-      LIVE.reconnectTimer = setTimeout(connectLive, 300);
+      connectLive();
     });
     source.onerror = function () {
-      disconnectLive();
+      if (source !== LIVE.source) return;
+      LIVE.connected = false;
       LIVE.failures += 1;
-      setStatus("reconnecting", "Reconnecting");
-      startFallback();
-      LIVE.reconnectTimer = setTimeout(connectLive, Math.min(10000, 900 + LIVE.failures * 700));
+      renderConnectionStatus();
+      // EventSource owns transport reconnection and preserves Last-Event-ID. Its next ready event
+      // performs exactly one cursor catch-up when the canonical head is ahead.
     };
   }
   function pulseBeacon() {
@@ -1669,15 +2032,9 @@
   }
   function startLive() {
     tickLiveMeta();
+    renderConnectionStatus();
     connectLive();
-    LIVE.integrityTimer = setInterval(function () {
-      if (!doc.hidden) syncSnapshot("integrity");
-    }, 30000);
     setInterval(tickRelativeTimes, 5000);
-    doc.addEventListener("visibilitychange", function () {
-      if (doc.hidden) { disconnectLive(); stopFallback(); setStatus("paused", "Paused"); }
-      else { syncSnapshot("visible"); connectLive(); }
-    });
     global.addEventListener("beforeunload", disconnectLive);
   }
 
@@ -1753,28 +2110,30 @@
             result.ok ? "info" : "error");
     });
   }
+  var _workerWatches = [];
+  function resolveWorkerWatches() {
+    var now = (live().inflight || []).length;
+    _workerWatches.slice().forEach(function (watch) {
+      if (now <= watch.before) return;
+      clearTimeout(watch.timer);
+      _workerWatches.splice(_workerWatches.indexOf(watch), 1);
+      toast(watch.count > 1 ? "Workers are on the board — leases claimed." : "Worker is on the board — lease claimed.", "success");
+      flashClass(doc.getElementById("fleetCard"), "bumped", 1400);
+    });
+  }
   function watchForWorker(count) {
     // A launch is a HAND-OFF to a process outside the browser, and the board cannot see whether
     // it started. So it watches its own canonical signal — a new live lease appearing — and says
     // so either way rather than leaving the operator staring at an unchanged page.
     var before = (live().inflight || []).length;
-    var deadline = Date.now() + 45000;
-    setStatus("connecting", "Waiting for worker");
-    var timer = setInterval(function () {
-      var now = (live().inflight || []).length;
-      if (now > before) {
-        clearInterval(timer);
-        toast(count > 1 ? "Workers are on the board — leases claimed." : "Worker is on the board — lease claimed.", "success");
-        flashClass(doc.getElementById("fleetCard"), "bumped", 1400);
-        if (LIVE.connected) setStatus("live", "Live");
-        return;
-      }
-      if (Date.now() > deadline) {
-        clearInterval(timer);
-        if (LIVE.connected) setStatus("live", "Live");
-        toast("No lease appeared in 45s. Register the worker protocol handler, or check that the queue has ready work.", "error");
-      }
-    }, 1500);
+    var watch = { before: before, count: count, timer: null };
+    watch.timer = setTimeout(function () {
+      var index = _workerWatches.indexOf(watch);
+      if (index < 0) return;
+      _workerWatches.splice(index, 1);
+      toast("No lease appeared in 45s. Register the worker protocol handler, or check that the queue has ready work.", "error");
+    }, 45000);
+    _workerWatches.push(watch);
   }
   function primeLaunchControls() {
     if (!launchCfg().enabled) return;
@@ -1786,7 +2145,6 @@
       ["pointerenter", "focusin", "touchstart"].forEach(function (name) {
         anchor.addEventListener(name, function () { prepareLaunch(anchor); }, { passive: true });
       });
-      prepareLaunch(anchor);
     });
   }
   function initLaunchControls() {
@@ -1802,28 +2160,45 @@
   function activate(key) {
     TABS.forEach(function (t) {
       var on = t.key === key;
-      if (t._btn) { t._btn.classList.toggle("active", on); t._btn.setAttribute("aria-selected", on ? "true" : "false"); }
+      if (t._btn) {
+        t._btn.classList.toggle("active", on);
+        t._btn.setAttribute("aria-selected", on ? "true" : "false");
+        t._btn.setAttribute("tabindex", on ? "0" : "-1");
+      }
       if (_panes[t.key]) _panes[t.key].classList.toggle("active", on);
     });
     try { var u = new URL(location.href); u.searchParams.set("tab", key); history.replaceState(null, "", u.pathname + u.search + location.hash); } catch (e) {}
   }
 
+  function tabKeydown(event, key) {
+    var index = TABS.findIndex(function (tab) { return tab.key === key; });
+    var next = index;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % TABS.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + TABS.length) % TABS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = TABS.length - 1;
+    else return;
+    event.preventDefault();
+    activate(TABS[next].key);
+    TABS[next]._btn.focus();
+  }
+
   function build() {
     doc.body.classList.add("hub-app");
     var bm = doc.getElementById("brandMark"); if (bm) bm.appendChild(icon("cube"));
-    var rb = doc.getElementById("refreshIco"); if (rb) rb.appendChild(icon("refresh"));
     var tabsBar = doc.getElementById("tabsBar"), panes = doc.getElementById("tabPanes");
     if (!tabsBar || !panes) return;
     TABS.forEach(function (t) {
-      var btn = el("button", { class: "tab-btn", role: "tab", "data-tab": t.key, "aria-selected": "false" }, [icon(t.icon), doc.createTextNode(" " + t.label)]);
+      var btn = el("button", { class: "tab-btn", id: "tab-btn-" + t.key, type: "button", role: "tab",
+        "data-tab": t.key, "aria-controls": "tab-" + t.key, "aria-selected": "false", tabindex: "-1" },
+        [icon(t.icon), doc.createTextNode(" " + t.label)]);
       if (t.rows) { t._badge = el("span", { class: "tab-badge", text: String(t.rows.length) }); btn.appendChild(t._badge); }
       btn.addEventListener("click", function () { activate(t.key); });
+      btn.addEventListener("keydown", function (event) { tabKeydown(event, t.key); });
       t._btn = btn; tabsBar.appendChild(btn);
       var pane = t.build ? t.build(t) : buildTableTab(t);
       _panes[t.key] = pane; panes.appendChild(pane);
     });
-    var refresh = doc.getElementById("refreshBtn");
-    if (refresh) refresh.addEventListener("click", function () { syncSnapshot("manual"); });
     initLaunchControls();
     var mo = doc.getElementById("universalModal");
     if (mo) mo.addEventListener("click", function (e) { if (e.target === mo) closeModal(); });
@@ -1831,7 +2206,7 @@
     doc.addEventListener("keydown", function (e) { if (e.key === "Escape") closeModal(); });
     tickClock(); setInterval(tickClock, 1000);
     paintBackdrop();
-    setStatus("connecting", "Connecting");
+    renderConnectionStatus();
 
     global.HubCommands = [
       { id: "cmd:overview", title: "Go to Overview", sub: "tab", run: function () { activate("overview"); } },
@@ -1842,8 +2217,7 @@
       { id: "cmd:dag", title: "Dependency frontier", sub: "verb", run: function () { focusCard("dagCard"); } },
       { id: "cmd:theme", title: "Toggle light / dark theme", sub: "verb", run: toggleTheme },
       { id: "cmd:density", title: "Cycle density", sub: "verb", run: cycleDensity },
-      { id: "cmd:copy-link", title: "Copy deep link", sub: "verb", run: function () { try { navigator.clipboard.writeText(location.href); toast("Link copied", "success"); } catch (e) { toast("Copy failed", "error"); } } },
-      { id: "cmd:refresh", title: "Sync now", sub: "verb", run: function () { syncSnapshot("manual"); } }
+      { id: "cmd:copy-link", title: "Copy deep link", sub: "verb", run: function () { try { navigator.clipboard.writeText(location.href); toast("Link copied", "success"); } catch (e) { toast("Copy failed", "error"); } } }
     ];
 
     var initial = "overview";
@@ -1879,7 +2253,7 @@
   }
 
   global.Hub = { toast: toast, setStatus: setStatus, activate: activate, openEntity: openEntity,
-                 closeModal: closeModal, sync: syncSnapshot, live: function () { return LIVE; } };
+                 closeModal: closeModal, live: function () { return LIVE; } };
 
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", build);
   else build();
