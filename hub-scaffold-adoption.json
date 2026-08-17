@@ -16,10 +16,10 @@
   },
   "adopted_from": {
     "repository": "https://github.com/ZacTallberg/hub-scaffold.git",
-    "commit": "a8a56141aba75cc86425d3117add1422ba93f5cb",
+    "commit": "d5842b1ed65d826b9eefeee53e2b0bfd2e26a17f",
     "managed_tree_dirty": false,
-    "recorded_at": "2026-08-17T07:55:35+00:00",
-    "tree_sha256": "sha256:4b28e0db6cfe4aeee3cb83cbf4240a76c0876a00bbe57836904829c33e6539d5",
+    "recorded_at": "2026-08-17T08:12:48+00:00",
+    "tree_sha256": "sha256:20380404dee190b566b156e88756508c3247632b5e36e5bd932a500dd28db430",
     "units": {
       "hub_core": {
         "source": "hub_core",
@@ -115,7 +115,7 @@
       "django_hub": {
         "source": "adapters/django/hub",
         "destination": "hub",
-        "tree_sha256": "sha256:0385dc32dd6d85e8130bd34ac6a7d0398868a8ecdd69f53e11612d46d76fc8db",
+        "tree_sha256": "sha256:6ad8560675e1679b94fc0eaa1df2ee1c370154e29fb097f010b08a3f275e01e8",
         "files": {
           "__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
           "admin.py": "sha256:b6584138a3a892eee34c2531b2fe6f2ad1c59daca88bc8f14c230235b5d5fe67",
@@ -123,7 +123,7 @@
           "apps.py": "sha256:c2ae7897ed5af26ce89817ba0e239ffe758439e510dbe4812b130db0da5dee03",
           "delivery.py": "sha256:d250ffbd6d46a6f432abdbf95370a57558134a04c8512ca346e2a19304bb0ad6",
           "hub_api.py": "sha256:03286fee9bd22ca1d71ef8c06f257bd2d606506bd1b20977e6716e0534c5f409",
-          "hub_app.py": "sha256:ffc5a1ff38b2992a0664fbc0f1517a6dedff312a652c55291058b6e379361b79",
+          "hub_app.py": "sha256:ba863ec7fec693c9d08b9503a4df9ce2d1f173e9e05a0b5476c7273b00c7b8d7",
           "hub_write.py": "sha256:2f854a4ddad7e632989056edc4851827f389c682d0757556582e8a25de455e90",
           "hubsite.py": "sha256:06c9d67482f645c64738b135a887a360f7a8ae770a92a2098e3d564959c9ac5f",
           "management/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -145,7 +145,7 @@
           "apps.py": "sha256:c2ae7897ed5af26ce89817ba0e239ffe758439e510dbe4812b130db0da5dee03",
           "delivery.py": "sha256:d250ffbd6d46a6f432abdbf95370a57558134a04c8512ca346e2a19304bb0ad6",
           "hub_api.py": "sha256:03286fee9bd22ca1d71ef8c06f257bd2d606506bd1b20977e6716e0534c5f409",
-          "hub_app.py": "sha256:ffc5a1ff38b2992a0664fbc0f1517a6dedff312a652c55291058b6e379361b79",
+          "hub_app.py": "sha256:ba863ec7fec693c9d08b9503a4df9ce2d1f173e9e05a0b5476c7273b00c7b8d7",
           "hub_write.py": "sha256:2f854a4ddad7e632989056edc4851827f389c682d0757556582e8a25de455e90",
           "hubsite.py": "sha256:06c9d67482f645c64738b135a887a360f7a8ae770a92a2098e3d564959c9ac5f",
           "management/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -194,14 +194,14 @@
           "PROJECT/DOCTRINE.md"
         ],
         "destination": "PROJECT",
-        "tree_sha256": "sha256:7ec55ad2e8c4552f17daa4ca3a7e2c460832d4831dfb6dc876736baa83817f8f",
+        "tree_sha256": "sha256:bab2581ba8f86fdae4dfda100c2ce058b39783d1f6599ec8c0cc81fa7589570c",
         "files": {
           "DOCTRINE.md": "sha256:fc10b316e06e2cf8522e5cb7a436c1832840d25fd1655fa1a72294450e56a789",
-          "HUB-QUALITY.md": "sha256:a7c27e376404fb7a410cd7a8bb5f55071ee5d7cc1b080af119d252f5f59ab0e5"
+          "HUB-QUALITY.md": "sha256:d6c96ee42b174cefec1785113c1333f7850bce5baee0b87316ce45571a4e6f60"
         },
         "installed_files": {
           "DOCTRINE.md": "sha256:2c50071e83218dc043f2ee2d633fd0193d83918879f0bdd9fc5d918cc25c58fc",
-          "HUB-QUALITY.md": "sha256:a7c27e376404fb7a410cd7a8bb5f55071ee5d7cc1b080af119d252f5f59ab0e5"
+          "HUB-QUALITY.md": "sha256:d6c96ee42b174cefec1785113c1333f7850bce5baee0b87316ce45571a4e6f60"
         },
         "managed_prefixes": {
           "DOCTRINE.md": "sha256:fc10b316e06e2cf8522e5cb7a436c1832840d25fd1655fa1a72294450e56a789"
