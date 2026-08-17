@@ -1,3 +1,5 @@
+import { FORMS, FORM_INDEX } from 'forms';
+
 let THREE;
 let EffectComposer;
 let RenderPass;
@@ -14,23 +16,45 @@ const finePointer = window.matchMedia('(pointer: fine)');
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
-const simVertexShader = `
-  varying vec2 vUv;
-  void main() {
-    vUv = uv;
-    gl_Position = vec4(position, 1.0);
+// ── deterministic-from-utterance, remembered nowhere: session salt dies with the tab ──
+const sessionSalt = Math.floor(Math.random() * 0xffffffff);
+const fnv = (str, seed = 0x811c9dc5) => {
+  let h = (seed ^ sessionSalt) >>> 0;
+  for (let i = 0; i < str.length; i += 1) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
   }
-`;
+  return h >>> 0;
+};
 
-const simFragmentShader = `
-  uniform sampler2D tPositions;
-  uniform sampler2D tOrigin;
+// ─────────────────────────────────────── shader templates ──────────────────────────────────────
+const GLSL_PRELUDE = `
+  #ifndef FORM_HOME
+  #define FORM_HOME 0.0032
+  #endif
+  #ifndef FORM_POINTER
+  #define FORM_POINTER 1.0
+  #endif
+  #ifndef FORM_RELEASE
+  #define FORM_RELEASE 1.0
+  #endif
+  #ifndef FORM_SPEED
+  #define FORM_SPEED 1.0
+  #endif
+  #define PI 3.14159265359
+  #define TAU 6.28318530718
+
   uniform float uTime;
-  uniform vec2 uPointer;
+  uniform float uSeed;
+  uniform float uEnergy;
+  uniform float uRelease;
   uniform float uPulse;
   uniform float uPulseType;
-  uniform float uRelease;
-  varying vec2 vUv;
+  uniform vec2 uPointer;
+
+  mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+  float idOf(vec3 o) { return fract(sin(dot(o, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+  vec3 cosPal(float t, vec3 a, vec3 b, vec3 c, vec3 d) { return a + b * cos(TAU * (c * t + d)); }
 
   vec4 permute(vec4 x) { return mod(((x * 34.0) + 1.0) * x, 289.0); }
   vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
@@ -95,75 +119,314 @@ const simFragmentShader = `
       x1.y-x0.y-y1.x+y0.x
     ) / (2.0 * e));
   }
+`;
+
+const simVertexShader = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position, 1.0);
+  }
+`;
+
+const buildSimFragment = (formDef) => `
+  uniform sampler2D tPositions;
+  uniform sampler2D tOrigin;
+  varying vec2 vUv;
+  ${formDef.defines || ''}
+  ${GLSL_PRELUDE}
+  ${formDef.force}
 
   void main() {
     vec3 pos = texture2D(tPositions, vUv).xyz;
     vec3 origin = texture2D(tOrigin, vUv).xyz;
-    vec3 flow = curlNoise(pos * 0.58 + vec3(0.0, 0.0, uTime * 0.11));
-    vec3 velocity = flow * 0.0095;
+    vec3 velocity = formForce(pos, origin);
 
     vec2 pointerDelta = pos.xy - uPointer;
     float pointerDistance = max(length(pointerDelta), 0.12);
     vec3 pointerDirection = normalize(vec3(pointerDelta, pos.z * 0.2));
-    velocity += pointerDirection * (0.0018 / pointerDistance);
+    velocity += pointerDirection * (0.0018 * FORM_POINTER / pointerDistance);
 
     if (uPulse > 0.001) {
       float falloff = 1.0 / (pointerDistance + 0.18);
       if (uPulseType < 0.5) {
-        velocity += pointerDirection * 0.035 * falloff * uPulse;
+        velocity += pointerDirection * 0.035 * falloff * uPulse * FORM_POINTER;
       } else if (uPulseType < 1.5) {
-        velocity -= pointerDirection * 0.025 * falloff * uPulse;
+        velocity -= pointerDirection * 0.025 * falloff * uPulse * FORM_POINTER;
       } else if (uPulseType < 2.5) {
-        velocity += vec3(-pointerDirection.y, pointerDirection.x, 0.03) * 0.04 * falloff * uPulse;
+        velocity += vec3(-pointerDirection.y, pointerDirection.x, 0.03) * 0.04 * falloff * uPulse * FORM_POINTER;
       } else {
-        velocity += flow * 0.055 * uPulse + pointerDirection * 0.02 * falloff * uPulse;
+        velocity += curlNoise(pos) * 0.055 * uPulse + pointerDirection * 0.02 * falloff * uPulse * FORM_POINTER;
       }
     }
 
     float centerDistance = max(length(pos), 0.12);
-    velocity += normalize(pos) * uRelease * (0.036 / centerDistance);
-    velocity += (origin - pos) * 0.0032;
-    pos += velocity;
+    velocity += normalize(pos) * uRelease * (0.036 * FORM_RELEASE / centerDistance);
+    velocity += (origin - pos) * FORM_HOME;
+    pos += velocity * FORM_SPEED;
+    if (length(pos) > 6.5) pos = mix(pos, origin, 0.5);
     gl_FragColor = vec4(pos, 1.0);
   }
 `;
 
-const renderVertexShader = `
+const buildRenderVertex = (formDef) => `
   uniform sampler2D tPositions;
-  uniform float uTime;
+  uniform sampler2D tOrigin;
   uniform float uPointSize;
+  uniform float uGlowAmt;
+  ${formDef.defines || ''}
+  #ifndef FORM_SIZE
+  #define FORM_SIZE 1.0
+  #endif
+  #ifndef FORM_SHIMMER
+  #define FORM_SHIMMER 0.18
+  #endif
+  ${GLSL_PRELUDE}
   varying vec3 vColor;
-
-  vec3 palette(float t) {
-    vec3 midnight = vec3(0.18, 0.25, 0.58);
-    vec3 blue = vec3(0.43, 0.58, 1.0);
-    vec3 pearl = vec3(1.0, 0.82, 0.72);
-    float warmth = smoothstep(0.45, 1.9, t);
-    return mix(mix(midnight, blue, smoothstep(0.0, 1.1, t)), pearl, warmth * 0.38);
-  }
+  ${formDef.color}
 
   void main() {
     vec3 p = texture2D(tPositions, position.xy).xyz;
-    float radius = length(p.xy);
-    float shimmer = 0.82 + 0.18 * sin(uTime * 0.7 + p.x * 8.0 + p.y * 5.0);
-    vColor = palette(radius + p.z * 0.28) * shimmer;
+    vec3 origin = texture2D(tOrigin, position.xy).xyz;
+    float id = idOf(origin);
+    float glow = uGlowAmt / (0.35 + length(p.xy - uPointer));
+    float shimmer = (1.0 - FORM_SHIMMER) + FORM_SHIMMER * sin(uTime * 0.7 + p.x * 8.0 + p.y * 5.0 + id * 12.0);
+    vColor = formColor(p, uTime, id, glow) * shimmer;
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-    gl_PointSize = uPointSize / max(0.48, -mvPosition.z);
+    gl_PointSize = uPointSize * FORM_SIZE / max(0.48, -mvPosition.z);
     gl_Position = projectionMatrix * mvPosition;
   }
 `;
 
-const renderFragmentShader = `
+const buildRenderFragment = (formDef) => `
+  ${formDef.defines || ''}
+  #ifndef FORM_SOFT
+  #define FORM_SOFT 1.6
+  #endif
+  #ifndef FORM_ALPHA
+  #define FORM_ALPHA 0.68
+  #endif
   varying vec3 vColor;
   void main() {
     vec2 point = gl_PointCoord - 0.5;
     float radius = length(point);
     if (radius > 0.5) discard;
-    float alpha = pow(1.0 - radius * 2.0, 1.6) * 0.68;
+    float alpha = pow(1.0 - radius * 2.0, FORM_SOFT) * FORM_ALPHA;
     gl_FragColor = vec4(vColor, alpha);
   }
 `;
 
+// ─────────────────────────────────────── origin layouts ────────────────────────────────────────
+const ORIGIN_GENERATORS = {
+  nebula(values, rng) {
+    for (let i = 0; i < values.length; i += 4) {
+      const theta = rng() * Math.PI * 2;
+      const radius = 0.72 + Math.pow(rng(), 0.62) * 1.62;
+      const breathing = 1 + Math.sin(theta * 3) * 0.09;
+      values[i] = Math.cos(theta) * radius * breathing;
+      values[i + 1] = Math.sin(theta) * radius * 0.61;
+      values[i + 2] = (rng() - 0.5) * (0.55 + radius * 0.34);
+      values[i + 3] = 1;
+    }
+  },
+  sphere(values, rng) {
+    for (let i = 0; i < values.length; i += 4) {
+      const u = rng() * 2 - 1;
+      const theta = rng() * Math.PI * 2;
+      const r = 1.15 + rng() * 0.55;
+      const s = Math.sqrt(1 - u * u);
+      values[i] = Math.cos(theta) * s * r;
+      values[i + 1] = u * r * 0.82;
+      values[i + 2] = Math.sin(theta) * s * r * 0.7;
+      values[i + 3] = 1;
+    }
+  },
+  spiral(values, rng) {
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    const count = values.length / 4;
+    for (let n = 0; n < count; n += 1) {
+      const i = n * 4;
+      const frac = n / count;
+      const radius = Math.sqrt(frac) * 2.5;
+      const theta = n * golden;
+      values[i] = Math.cos(theta) * radius;
+      values[i + 1] = Math.sin(theta) * radius * 0.62;
+      values[i + 2] = (rng() - 0.5) * 0.24;
+      values[i + 3] = 1;
+    }
+  },
+  ring(values, rng) {
+    for (let i = 0; i < values.length; i += 4) {
+      const theta = rng() * Math.PI * 2;
+      const radius = 1.5 + (rng() - 0.5) * 0.5;
+      values[i] = Math.cos(theta) * radius;
+      values[i + 1] = Math.sin(theta) * radius * 0.72;
+      values[i + 2] = (rng() - 0.5) * 0.3;
+      values[i + 3] = 1;
+    }
+  },
+  lattice(values, rng) {
+    const count = values.length / 4;
+    const side = Math.ceil(Math.cbrt(count));
+    for (let n = 0; n < count; n += 1) {
+      const i = n * 4;
+      const x = n % side;
+      const y = Math.floor(n / side) % side;
+      const z = Math.floor(n / (side * side));
+      values[i] = (x / (side - 1) - 0.5) * 3.6;
+      values[i + 1] = (y / (side - 1) - 0.5) * 2.2;
+      values[i + 2] = (z / (side - 1) - 0.5) * 1.4;
+      values[i + 3] = 1;
+    }
+  },
+  band(values, rng) {
+    for (let i = 0; i < values.length; i += 4) {
+      values[i] = (rng() - 0.5) * 5.6;
+      values[i + 1] = (rng() - 0.5) * 1.5 + Math.sin(values[i] * 0.9) * 0.2;
+      values[i + 2] = (rng() - 0.5) * 0.6;
+      values[i + 3] = 1;
+    }
+  },
+  cube(values, rng) {
+    for (let i = 0; i < values.length; i += 4) {
+      values[i] = (rng() - 0.5) * 5.2;
+      values[i + 1] = (rng() - 0.5) * 4.4;
+      values[i + 2] = (rng() - 0.5) * 1.8;
+      values[i + 3] = 1;
+    }
+  },
+  cluster(values, rng) {
+    for (let i = 0; i < values.length; i += 4) {
+      const g = () => (rng() + rng() + rng() - 1.5) * 0.66;
+      values[i] = g() * 0.9;
+      values[i + 1] = g() * 0.7 - 0.4;
+      values[i + 2] = g() * 0.5;
+      values[i + 3] = 1;
+    }
+  },
+  glyph(values, rng, utterance) {
+    const words = (utterance || '').trim() || '○';
+    const off = document.createElement('canvas');
+    off.width = 840;
+    off.height = 280;
+    const ctx = off.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, off.width, off.height);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const lines = [];
+    let fontSize = 118;
+    const maxWidth = off.width - 60;
+    const fit = (size) => {
+      ctx.font = `700 ${size}px "Roboto Flex", system-ui, sans-serif`;
+      lines.length = 0;
+      let line = '';
+      for (const word of words.split(/\s+/)) {
+        const probe = line ? `${line} ${word}` : word;
+        if (ctx.measureText(probe).width > maxWidth && line) {
+          lines.push(line);
+          line = word;
+        } else {
+          line = probe;
+        }
+      }
+      if (line) lines.push(line);
+      return lines.length <= 3 && lines.every((l) => ctx.measureText(l).width <= maxWidth);
+    };
+    while (fontSize > 30 && !fit(fontSize)) fontSize -= 8;
+    fit(fontSize);
+    const lineHeight = fontSize * 1.12;
+    const y0 = off.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+    lines.forEach((l, i) => ctx.fillText(l, off.width / 2, y0 + i * lineHeight));
+    const pixels = ctx.getImageData(0, 0, off.width, off.height).data;
+    const lit = [];
+    for (let y = 0; y < off.height; y += 2) {
+      for (let x = 0; x < off.width; x += 2) {
+        if (pixels[(y * off.width + x) * 4] > 110) lit.push(x, y);
+      }
+    }
+    const spanX = 5.4;
+    const spanY = spanX * (off.height / off.width);
+    if (!lit.length) return ORIGIN_GENERATORS.nebula(values, rng);
+    for (let i = 0; i < values.length; i += 4) {
+      const pick = (Math.floor(rng() * (lit.length / 2)) * 2);
+      const x = lit[pick] + (rng() - 0.5) * 2.2;
+      const y = lit[pick + 1] + (rng() - 0.5) * 2.2;
+      values[i] = (x / off.width - 0.5) * spanX;
+      values[i + 1] = (0.5 - y / off.height) * spanY;
+      values[i + 2] = (rng() - 0.5) * 0.16;
+      values[i + 3] = 1;
+    }
+  },
+};
+
+// ─────────────────────────────────── the listener (form choice) ────────────────────────────────
+const recentForms = [];
+const rememberForm = (slug) => {
+  recentForms.push(slug);
+  if (recentForms.length > 8) recentForms.shift();
+};
+
+const EMOJI_RE = /\p{Extended_Pictographic}/u;
+const NON_LATIN_RE = /[぀-ヿ㐀-鿿가-힯Ѐ-ӿ֐-׿؀-ۿ]/;
+
+function analyzeUtterance(raw, typingCadence) {
+  const trimmed = raw.trim();
+  const letters = trimmed.replace(/\s/g, '');
+  const upper = (trimmed.match(/[A-Z]/g) || []).length;
+  const alpha = (trimmed.match(/[a-zA-Z]/g) || []).length;
+  return {
+    text: trimmed,
+    length: trimmed.length,
+    words: trimmed.split(/\s+/).filter(Boolean).length,
+    lines: trimmed.split(/\r\n?|\n/).length,
+    question: /\?/.test(trimmed),
+    exclaim: /!/.test(trimmed),
+    ellipsis: /(\.\.\.|…)$/.test(trimmed) || /…/.test(trimmed),
+    digits: (trimmed.match(/\d/g) || []).length,
+    upperRatio: alpha ? upper / alpha : 0,
+    emoji: EMOJI_RE.test(trimmed),
+    nonLatin: NON_LATIN_RE.test(trimmed),
+    cadence: typingCadence,
+    letters: letters.length,
+  };
+}
+
+function chooseFamily(features, hash) {
+  if (hash % 23 === 0) {
+    const all = ['flow', 'cosmic', 'organic', 'elemental', 'geometric', 'textual', 'attractor', 'water', 'gravity', 'light'];
+    return all[(hash >>> 4) % all.length];
+  }
+  if (features.emoji) return 'light';
+  if (features.question) return 'attractor';
+  if (features.exclaim) return features.length < 60 ? 'elemental' : 'cosmic';
+  if (features.ellipsis) return 'water';
+  if (features.lines > 1) return 'textual';
+  if (features.digits >= 2) return 'geometric';
+  if (features.upperRatio > 0.6 && features.letters >= 4) return 'elemental';
+  if (features.nonLatin) return 'textual';
+  if (features.length <= 14) return 'organic';
+  if (features.length >= 140) return 'flow';
+  if (features.words >= 18) return 'textual';
+  const pool = ['flow', 'cosmic', 'organic', 'gravity', 'light', 'water', 'geometric'];
+  return pool[(hash >>> 8) % pool.length];
+}
+
+function chooseForm(raw, typingCadence) {
+  const features = analyzeUtterance(raw, typingCadence);
+  const hash = fnv(features.text || 'the dark');
+  const family = chooseFamily(features, hash);
+  const candidates = FORMS.filter((f) => f.family === family);
+  let index = (hash >>> 12) % candidates.length;
+  for (let hop = 0; hop < candidates.length; hop += 1) {
+    const candidate = candidates[(index + hop) % candidates.length];
+    if (!recentForms.includes(candidate.slug)) return { form: candidate, hash };
+  }
+  return { form: candidates[index], hash };
+}
+
+// ───────────────────────────────────────── the field ───────────────────────────────────────────
 class ParticleField {
   constructor(target) {
     if (!document.createElement('canvas').getContext('webgl2')) {
@@ -176,16 +439,20 @@ class ParticleField {
     const narrow = Math.min(window.innerWidth, window.innerHeight) < 720;
     this.textureSize = lowPower || narrow ? 256 : 384;
     this.target = target;
+    this.narrow = narrow;
     this.active = true;
     this.disposed = false;
     this.pulse = 0;
     this.pulseType = 0;
     this.releaseStarted = 0;
     this.releaseEnergy = 0;
+    this.envelope = { inhale: 0.48, exhale: 2.35, peak: 2.35 };
     this.pointerTarget = new THREE.Vector2(0, 0);
     this.pointer = new THREE.Vector2(0, 0);
     this.clock = new THREE.Clock();
     this.lastFrame = 0;
+    this.materialCache = new Map();
+    this.animatedUntil = 0;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 100);
@@ -212,17 +479,11 @@ class ParticleField {
     this.composer.addPass(renderPass);
     this.composer.addPass(this.bloom);
 
-    this.initializeSimulation();
-    this.initializeParticles();
-    this.resize = this.resize.bind(this);
-    this.frame = this.frame.bind(this);
-    this.contextLost = this.contextLost.bind(this);
-    window.addEventListener('resize', this.resize, { passive: true });
-    target.addEventListener('webglcontextlost', this.contextLost);
-    this.raf = requestAnimationFrame(this.frame);
-  }
+    this.simScene = new THREE.Scene();
+    this.simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.simQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
+    this.simScene.add(this.simQuad);
 
-  initializeSimulation() {
     const size = this.textureSize;
     const options = {
       minFilter: THREE.NearestFilter,
@@ -234,46 +495,10 @@ class ParticleField {
     };
     this.targetA = new THREE.WebGLRenderTarget(size, size, options);
     this.targetB = new THREE.WebGLRenderTarget(size, size, options);
-    const values = new Float32Array(size * size * 4);
+    this.warmTarget = new THREE.WebGLRenderTarget(4, 4, options);
+    this.originValues = new Float32Array(size * size * 4);
+    this.origin = null;
 
-    for (let i = 0; i < values.length; i += 4) {
-      const theta = Math.random() * Math.PI * 2;
-      const radius = 0.72 + Math.pow(Math.random(), 0.62) * 1.62;
-      const depth = (Math.random() - 0.5) * (0.55 + radius * 0.34);
-      const breathing = 1 + Math.sin(theta * 3) * 0.09;
-      values[i] = Math.cos(theta) * radius * breathing;
-      values[i + 1] = Math.sin(theta) * radius * 0.61;
-      values[i + 2] = depth;
-      values[i + 3] = 1;
-    }
-
-    this.origin = new THREE.DataTexture(values, size, size, THREE.RGBAFormat, THREE.FloatType);
-    this.origin.needsUpdate = true;
-    this.simScene = new THREE.Scene();
-    this.simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    this.simMaterial = new THREE.ShaderMaterial({
-      vertexShader: simVertexShader,
-      fragmentShader: simFragmentShader,
-      uniforms: {
-        tPositions: { value: this.origin },
-        tOrigin: { value: this.origin },
-        uTime: { value: 0 },
-        uPointer: { value: new THREE.Vector2(0, 0) },
-        uPulse: { value: 0 },
-        uPulseType: { value: 0 },
-        uRelease: { value: 0 },
-      },
-    });
-    this.simScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.simMaterial));
-    this.renderer.setRenderTarget(this.targetA);
-    this.renderer.render(this.simScene, this.simCamera);
-    this.renderer.setRenderTarget(this.targetB);
-    this.renderer.render(this.simScene, this.simCamera);
-    this.renderer.setRenderTarget(null);
-  }
-
-  initializeParticles() {
-    const size = this.textureSize;
     const points = new Float32Array(size * size * 3);
     let cursor = 0;
     for (let x = 0; x < size; x += 1) {
@@ -285,20 +510,129 @@ class ParticleField {
     }
     this.geometry = new THREE.BufferGeometry();
     this.geometry.setAttribute('position', new THREE.BufferAttribute(points, 3));
-    this.renderMaterial = new THREE.ShaderMaterial({
-      vertexShader: renderVertexShader,
-      fragmentShader: renderFragmentShader,
+    this.particles = new THREE.Points(this.geometry, null);
+    this.particles.frustumCulled = false;
+    this.scene.add(this.particles);
+
+    this.setForm(FORM_INDEX.get('nebula'), '', { fromCenter: false, seedHash: sessionSalt });
+
+    this.resize = this.resize.bind(this);
+    this.frame = this.frame.bind(this);
+    this.contextLost = this.contextLost.bind(this);
+    window.addEventListener('resize', this.resize, { passive: true });
+    target.addEventListener('webglcontextlost', this.contextLost);
+    this.raf = requestAnimationFrame(this.frame);
+  }
+
+  materialsFor(formDef) {
+    let cached = this.materialCache.get(formDef.slug);
+    if (cached) return cached;
+    const simMaterial = new THREE.ShaderMaterial({
+      vertexShader: simVertexShader,
+      fragmentShader: buildSimFragment(formDef),
       uniforms: {
-        tPositions: { value: this.targetA.texture },
+        tPositions: { value: null },
+        tOrigin: { value: null },
         uTime: { value: 0 },
-        uPointSize: { value: window.innerWidth < 640 ? 3.8 : 4.4 },
+        uPointer: { value: new THREE.Vector2(0, 0) },
+        uPulse: { value: 0 },
+        uPulseType: { value: 0 },
+        uRelease: { value: 0 },
+        uSeed: { value: 0 },
+        uEnergy: { value: 0.5 },
+      },
+    });
+    const js = formDef.js || {};
+    const renderMaterial = new THREE.ShaderMaterial({
+      vertexShader: buildRenderVertex(formDef),
+      fragmentShader: buildRenderFragment(formDef),
+      uniforms: {
+        tPositions: { value: null },
+        tOrigin: { value: null },
+        uTime: { value: 0 },
+        uPointSize: { value: this.basePointSize() * (js.size || 1) },
+        uPointer: { value: new THREE.Vector2(0, 0) },
+        uPulse: { value: 0 },
+        uPulseType: { value: 0 },
+        uRelease: { value: 0 },
+        uSeed: { value: 0 },
+        uEnergy: { value: 0.5 },
+        uGlowAmt: { value: js.pointerGlow ? 0.85 : 0.0 },
       },
       transparent: true,
-      blending: THREE.AdditiveBlending,
+      blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
       depthWrite: false,
     });
-    this.particles = new THREE.Points(this.geometry, this.renderMaterial);
-    this.scene.add(this.particles);
+    cached = { simMaterial, renderMaterial, js };
+    this.materialCache.set(formDef.slug, cached);
+    return cached;
+  }
+
+  warmForm(formDef) {
+    if (this.disposed) return;
+    const { simMaterial, renderMaterial } = this.materialsFor(formDef);
+    const previousMaterial = this.simQuad.material;
+    simMaterial.uniforms.tPositions.value = this.targetA.texture;
+    simMaterial.uniforms.tOrigin.value = this.origin;
+    this.simQuad.material = simMaterial;
+    this.renderer.setRenderTarget(this.warmTarget);
+    this.renderer.render(this.simScene, this.simCamera);
+    renderMaterial.uniforms.tPositions.value = this.targetA.texture;
+    renderMaterial.uniforms.tOrigin.value = this.origin;
+    const held = this.particles.material;
+    this.particles.material = renderMaterial;
+    this.renderer.render(this.scene, this.camera);
+    this.particles.material = held;
+    this.simQuad.material = previousMaterial;
+    this.renderer.setRenderTarget(null);
+  }
+
+  setForm(formDef, utterance, { fromCenter, seedHash }) {
+    const size = this.textureSize;
+    let rngState = (seedHash >>> 0) || 1;
+    const rng = () => {
+      rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
+      return rngState / 0x100000000;
+    };
+    const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
+    generator(this.originValues, rng, utterance);
+    this.origin?.dispose();
+    this.origin = new THREE.DataTexture(this.originValues, size, size, THREE.RGBAFormat, THREE.FloatType);
+    this.origin.needsUpdate = true;
+
+    const { simMaterial, renderMaterial, js } = this.materialsFor(formDef);
+    this.simMaterial = simMaterial;
+    this.renderMaterial = renderMaterial;
+    this.formJs = js;
+    this.formDef = formDef;
+    this.envelope = formDef.envelope || { inhale: 0.48, exhale: 2.35, peak: 2.35 };
+    this.simMaterial.uniforms.tOrigin.value = this.origin;
+    this.renderMaterial.uniforms.tOrigin.value = this.origin;
+    this.simMaterial.uniforms.uSeed.value = ((seedHash >>> 0) % 997) * 0.37;
+    this.renderMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
+    this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * (js.size || 1);
+    this.bloom.strength = (this.narrow ? 1.05 : 1.3) * (js.bloom || 1.2);
+    this.particles.material = this.renderMaterial;
+
+    const primeValues = fromCenter
+      ? this.originValues.map((v, i) => (i % 4 === 3 ? 1 : v * 0.05 + (Math.random() - 0.5) * 0.03))
+      : this.originValues;
+    const prime = new THREE.DataTexture(primeValues instanceof Float32Array ? primeValues : new Float32Array(primeValues), size, size, THREE.RGBAFormat, THREE.FloatType);
+    prime.needsUpdate = true;
+    this.simMaterial.uniforms.tPositions.value = prime;
+    this.simQuad.material = this.simMaterial;
+    this.renderer.setRenderTarget(this.targetA);
+    this.renderer.render(this.simScene, this.simCamera);
+    this.simMaterial.uniforms.tPositions.value = this.targetA.texture;
+    this.renderer.setRenderTarget(this.targetB);
+    this.renderer.render(this.simScene, this.simCamera);
+    this.renderer.setRenderTarget(null);
+    prime.dispose();
+    this.animatedUntil = performance.now() + 4200;
+  }
+
+  basePointSize() {
+    return window.innerWidth < 640 ? 3.8 : 4.4;
   }
 
   contextLost(event) {
@@ -315,11 +649,12 @@ class ParticleField {
     const types = { outward: 0, inward: 1, orbit: 2, scatter: 3 };
     this.pulseType = types[kind] ?? 0;
     this.pulse = Math.max(this.pulse, clamp(energy, 0.25, 2.8));
+    this.animatedUntil = Math.max(this.animatedUntil, performance.now() + 1400);
   }
 
-  release(length) {
+  release(length, energy) {
     this.releaseStarted = performance.now();
-    this.releaseEnergy = clamp(0.7 + Math.log2(Math.max(2, length)) * 0.12, 0.85, 1.65);
+    this.releaseEnergy = clamp(0.7 + Math.log2(Math.max(2, length)) * 0.12, 0.85, 1.65) * (energy || 1);
     this.excite('inward', 2.2);
   }
 
@@ -342,13 +677,15 @@ class ParticleField {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.composer.setSize(window.innerWidth, window.innerHeight);
-    this.renderMaterial.uniforms.uPointSize.value = window.innerWidth < 640 ? 3.8 : 4.4;
+    if (this.renderMaterial) {
+      this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * ((this.formJs || {}).size || 1);
+    }
   }
 
   frame(now) {
     this.raf = 0;
     if (this.disposed || !this.active) return;
-    const interacting = this.pulse > 0.03 || this.releaseStarted > 0;
+    const interacting = this.pulse > 0.03 || this.releaseStarted > 0 || now < this.animatedUntil;
     const interval = interacting ? 1000 / 60 : 1000 / 32;
     if (now - this.lastFrame < interval) {
       this.raf = requestAnimationFrame(this.frame);
@@ -361,28 +698,34 @@ class ParticleField {
 
     let releaseForce = 0;
     if (this.releaseStarted) {
+      const { inhale, exhale, peak } = this.envelope;
       const elapsed = (now - this.releaseStarted) / 1000;
-      if (elapsed < 0.48) {
-        releaseForce = -this.releaseEnergy * Math.sin((elapsed / 0.48) * Math.PI);
-      } else if (elapsed < 2.35) {
-        const phase = (elapsed - 0.48) / 1.87;
-        releaseForce = this.releaseEnergy * 2.35 * Math.pow(1 - phase, 2.1);
+      if (elapsed < inhale) {
+        releaseForce = -this.releaseEnergy * Math.sin((elapsed / inhale) * Math.PI);
+      } else if (elapsed < inhale + exhale) {
+        const phase = (elapsed - inhale) / exhale;
+        releaseForce = this.releaseEnergy * peak * Math.pow(1 - phase, 2.1);
       } else {
         this.releaseStarted = 0;
       }
     }
 
-    this.simMaterial.uniforms.uTime.value = time;
-    this.simMaterial.uniforms.uPointer.value.copy(this.pointer);
-    this.simMaterial.uniforms.uPulse.value = this.pulse;
-    this.simMaterial.uniforms.uPulseType.value = this.pulseType;
-    this.simMaterial.uniforms.uRelease.value = releaseForce;
-    this.simMaterial.uniforms.tPositions.value = this.targetA.texture;
+    const su = this.simMaterial.uniforms;
+    su.uTime.value = time;
+    su.uPointer.value.copy(this.pointer);
+    su.uPulse.value = this.pulse;
+    su.uPulseType.value = this.pulseType;
+    su.uRelease.value = releaseForce;
+    su.tPositions.value = this.targetA.texture;
+    this.simQuad.material = this.simMaterial;
     this.renderer.setRenderTarget(this.targetB);
     this.renderer.render(this.simScene, this.simCamera);
     [this.targetA, this.targetB] = [this.targetB, this.targetA];
-    this.renderMaterial.uniforms.tPositions.value = this.targetA.texture;
-    this.renderMaterial.uniforms.uTime.value = time;
+    const ru = this.renderMaterial.uniforms;
+    ru.tPositions.value = this.targetA.texture;
+    ru.uTime.value = time;
+    ru.uPointer.value.copy(this.pointer);
+    ru.uRelease.value = releaseForce;
     this.renderer.setRenderTarget(null);
     this.composer.render();
     this.raf = requestAnimationFrame(this.frame);
@@ -396,30 +739,41 @@ class ParticleField {
     window.removeEventListener('resize', this.resize);
     this.target.removeEventListener('webglcontextlost', this.contextLost);
     this.geometry?.dispose();
-    this.renderMaterial?.dispose();
-    this.simMaterial?.dispose();
+    for (const { simMaterial, renderMaterial } of this.materialCache.values()) {
+      simMaterial.dispose();
+      renderMaterial.dispose();
+    }
+    this.materialCache.clear();
     this.origin?.dispose();
     this.targetA?.dispose();
     this.targetB?.dispose();
+    this.warmTarget?.dispose();
     this.composer?.dispose?.();
     this.renderer?.dispose();
   }
 }
 
+// ───────────────────────────────────── experience shell ────────────────────────────────────────
 let field = null;
 let composing = false;
 let locked = false;
 let lastInputAt = 0;
 let cadence = 420;
+let deletions = 0;
 let releaseDeadline = 0;
 let releaseDelay = 0;
 let releaseTimer = 0;
 let holdingTimer = 0;
 let progressFrame = 0;
 let clearTimer = 0;
+let swapTimer = 0;
 let restoreTimer = 0;
 let emptyTimer = 0;
 let fieldGeneration = 0;
+let warmHandle = 0;
+let lastForm = null;
+let lastRelease = null;
+let forcedForm = null;
 
 async function initializeField() {
   const generation = ++fieldGeneration;
@@ -468,11 +822,33 @@ function cancelReleaseSchedule() {
   clearTimeout(releaseTimer);
   clearTimeout(holdingTimer);
   cancelAnimationFrame(progressFrame);
+  cancelIdleWarm();
   releaseTimer = 0;
   holdingTimer = 0;
   progressFrame = 0;
   releaseDeadline = 0;
   setProgress(0);
+}
+
+function cancelIdleWarm() {
+  if (warmHandle) {
+    (window.cancelIdleCallback || clearTimeout)(warmHandle);
+    warmHandle = 0;
+  }
+}
+
+function scheduleWarm() {
+  cancelIdleWarm();
+  const schedule = window.requestIdleCallback || ((fn) => setTimeout(fn, 120));
+  warmHandle = schedule(() => {
+    warmHandle = 0;
+    const raw = text.value;
+    if (!raw.trim() || !field) return;
+    const { form } = forcedForm
+      ? { form: FORM_INDEX.get(forcedForm) }
+      : chooseForm(raw, cadence);
+    if (form) field.warmForm(form);
+  });
 }
 
 function paintProgress(now) {
@@ -494,6 +870,7 @@ function scheduleRelease() {
     if (!locked && text.value.trim()) setState('holding', 'holding');
   }, Math.min(900, releaseDelay * 0.25));
   progressFrame = requestAnimationFrame(paintProgress);
+  scheduleWarm();
 }
 
 function classifyInput(event) {
@@ -511,6 +888,7 @@ function onInput(event) {
   const now = performance.now();
   if (lastInputAt) cadence = cadence * 0.72 + clamp(now - lastInputAt, 45, 1100) * 0.28;
   lastInputAt = now;
+  if (event.inputType?.includes('delete')) deletions += 1;
   autoSize();
   const hasText = text.value.trim().length > 0;
   body.dataset.hasText = String(hasText);
@@ -529,12 +907,32 @@ function beginRelease() {
   if (locked || composing || !text.value.trim()) return;
   locked = true;
   cancelReleaseSchedule();
-  const length = text.value.length;
+  const raw = text.value;
+  const length = raw.length;
+  const chosen = forcedForm && FORM_INDEX.get(forcedForm)
+    ? { form: FORM_INDEX.get(forcedForm), hash: fnv(raw.trim() || 'the dark') }
+    : chooseForm(raw, cadence);
+  forcedForm = null;
+  lastForm = chosen.form.slug;
+  lastRelease = { slug: chosen.form.slug, family: chosen.form.family, len: raw.length, lines: raw.split(/\r\n?|\n/).length };
+  rememberForm(chosen.form.slug);
+  const energy = clamp(0.7 + length / 220 + (deletions > 3 ? 0.15 : 0), 0.7, 1.5);
+  deletions = 0;
+
   text.readOnly = true;
   releaseButton.disabled = true;
   releaseButton.setAttribute('aria-busy', 'true');
   setState('releasing', 'letting go');
-  field?.release(length);
+  field?.release(length, energy);
+
+  const inhaleMs = field ? field.envelope.inhale * 1000 : 480;
+  const swapAt = reducedMotion.matches ? 200 : Math.max(360, inhaleMs);
+
+  swapTimer = window.setTimeout(() => {
+    body.dataset.form = chosen.form.slug;
+    field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash });
+    setState('releasing', `it became — ${chosen.form.name}`);
+  }, swapAt);
 
   clearTimer = window.setTimeout(() => {
     text.value = '';
@@ -547,17 +945,18 @@ function beginRelease() {
     text.readOnly = false;
     releaseButton.removeAttribute('aria-busy');
     field?.settle();
-    setState('returned', 'gone');
+    setState('returned', `it became — ${chosen.form.name}`);
     if (finePointer.matches && document.visibilityState === 'visible') text.focus({ preventScroll: true });
-  }, reducedMotion.matches ? 360 : 2200);
+  }, reducedMotion.matches ? 420 : Math.max(2200, swapAt + 1500));
 
   emptyTimer = window.setTimeout(() => {
     if (!text.value) setState('empty', 'listening');
-  }, reducedMotion.matches ? 900 : 3900);
+  }, reducedMotion.matches ? 1400 : 5600);
 }
 
 function resetExperience() {
   clearTimeout(clearTimer);
+  clearTimeout(swapTimer);
   clearTimeout(restoreTimer);
   clearTimeout(emptyTimer);
   cancelReleaseSchedule();
@@ -626,4 +1025,14 @@ window.entryExperience = Object.freeze({
   reset: resetExperience,
   mode: () => body.dataset.graphics,
   state: () => body.dataset.state,
+  forms: () => FORMS.map((f) => f.slug),
+  families: () => FORMS.map((f) => [f.slug, f.family]),
+  preview: (raw) => {
+    const cleaned = String(raw ?? '');
+    const { form, hash } = chooseForm(cleaned, cadence);
+    return { slug: form.slug, family: form.family, wildcard: hash % 23 === 0 };
+  },
+  lastForm: () => lastForm,
+  lastRelease: () => lastRelease,
+  force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
 });
