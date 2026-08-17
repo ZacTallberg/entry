@@ -15,9 +15,14 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 SHA="$(git rev-parse --short HEAD)"
 
-WT="/c/code/.deploy-wt-$APP"
-git worktree remove --force "$WT" 2>/dev/null || true
+# Allocate the disposable checkout from the host's real temporary directory. A hard-coded sibling
+# under /c/code can be unwritable even while the repository itself is writable (the real deploy
+# exposed exactly that boundary); mktemp gives this invocation a private, recoverable target.
+WT="$(mktemp -d "${TMPDIR:-/tmp}/${APP}-deploy.XXXXXX")"
+rmdir "$WT"
 git worktree add --detach "$WT" HEAD >/dev/null
+cleanup_worktree() { git worktree remove --force "$WT" 2>/dev/null || true; }
+trap cleanup_worktree EXIT
 printf '%s\n' "$SHA" > "$WT/app/build_sha.txt"   # baked into the image pre-build; served in <meta name="build">
 
 (cd "$WT" \
@@ -26,6 +31,7 @@ printf '%s\n' "$SHA" > "$WT/app/build_sha.txt"   # baked into the image pre-buil
        --canary "https://${APP}.zacoberg.com/" --expect "build-$SHA")
 
 git worktree remove --force "$WT"
+trap - EXIT
 printf '%s\n' "$SHA" > app/build_sha.txt   # local stamp so the running checkout coheres with live
 
 # Deploy record (uncommitted stamp): PROJECT/state.json feeds the hub's computed coherence, so
