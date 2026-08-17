@@ -8,10 +8,11 @@ against source is a rumor. Secrets stay in the atlas/creds files BY KEY NAME
 
 ## Process & boot
 
-Django 6 on Python 3.12, served by Uvicorn ASGI behind Dokku. Boot order is migrate, then one Uvicorn
-process. ASGI holds concurrent SSE connections without occupying one synchronous request thread per
-client, and the single process keeps the built-in signal bus coherent. Scale-out first requires a
-shared `HUB_REALTIME_BROKER`; adding workers without it would fragment push delivery.
+Django 6 on Python 3.12, served by Uvicorn ASGI behind Dokku. Boot order is migrate, idempotently
+seed the canonical task graph, then start one Uvicorn process. ASGI holds concurrent SSE connections
+without occupying one synchronous request thread per client, and the single process keeps the
+built-in signal bus coherent. Scale-out first requires a shared `HUB_REALTIME_BROKER`; adding workers
+without it would fragment push delivery.
 
 ## Deploy paths
 - **Code:** command, owner (campaigns: seat per `pm/PROTOCOL.md` §7), gates it must pass, expected

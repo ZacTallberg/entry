@@ -9,7 +9,7 @@ COPY . /app
 # collectstatic at build (SECRET_KEY not needed for it under DEBUG); whitenoise serves /static.
 RUN DEBUG=1 SECRET_KEY=build python manage.py collectstatic --noinput
 EXPOSE 5000
-# Migrate on boot, then keep the push-first Hub on one coherent ASGI process. Uvicorn serves many
-# concurrent product and SSE connections asynchronously; horizontal workers require a configured
-# shared HUB_REALTIME_BROKER before they are safe. Secrets are injected by Dokku.
-CMD sh -c "python manage.py migrate --noinput && exec uvicorn project_site.asgi:application --host 0.0.0.0 --port ${PORT} --workers 1 --proxy-headers --forwarded-allow-ips='*'"
+# Migrate and idempotently seed the task plane on boot, then keep the push-first Hub on one coherent
+# ASGI process. Uvicorn serves product and SSE connections asynchronously; horizontal workers
+# require a configured shared HUB_REALTIME_BROKER before they are safe. Secrets are injected by Dokku.
+CMD sh -c "python manage.py migrate --noinput && python manage.py seedhub && exec uvicorn project_site.asgi:application --host 0.0.0.0 --port ${PORT} --workers 1 --proxy-headers --forwarded-allow-ips='*'"
