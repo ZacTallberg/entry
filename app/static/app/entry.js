@@ -60,69 +60,11 @@ const GLSL_PRELUDE = `
   float idOf(vec3 o) { return fract(sin(dot(o, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
   vec3 cosPal(float t, vec3 a, vec3 b, vec3 c, vec3 d) { return a + b * cos(TAU * (c * t + d)); }
 
-  vec4 permute(vec4 x) { return mod(((x * 34.0) + 1.0) * x, 289.0); }
-  vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
-
-  float snoise(vec3 v) {
-    const vec2 C = vec2(1.0 / 6.0, 1.0 / 3.0);
-    const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
-    vec3 i = floor(v + dot(v, C.yyy));
-    vec3 x0 = v - i + dot(i, C.xxx);
-    vec3 g = step(x0.yzx, x0.xyz);
-    vec3 l = 1.0 - g;
-    vec3 i1 = min(g.xyz, l.zxy);
-    vec3 i2 = max(g.xyz, l.zxy);
-    vec3 x1 = x0 - i1 + C.xxx;
-    vec3 x2 = x0 - i2 + 2.0 * C.xxx;
-    vec3 x3 = x0 - 1.0 + 3.0 * C.xxx;
-    i = mod(i, 289.0);
-    vec4 p = permute(permute(permute(
-      i.z + vec4(0.0, i1.z, i2.z, 1.0))
-      + i.y + vec4(0.0, i1.y, i2.y, 1.0))
-      + i.x + vec4(0.0, i1.x, i2.x, 1.0));
-    float n_ = 1.0 / 7.0;
-    vec3 ns = n_ * D.wyz - D.xzx;
-    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-    vec4 x_ = floor(j * ns.z);
-    vec4 y_ = floor(j - 7.0 * x_);
-    vec4 x = x_ * ns.x + ns.yyyy;
-    vec4 y = y_ * ns.x + ns.yyyy;
-    vec4 h = 1.0 - abs(x) - abs(y);
-    vec4 b0 = vec4(x.xy, y.xy);
-    vec4 b1 = vec4(x.zw, y.zw);
-    vec4 s0 = floor(b0) * 2.0 + 1.0;
-    vec4 s1 = floor(b1) * 2.0 + 1.0;
-    vec4 sh = -step(h, vec4(0.0));
-    vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
-    vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
-    vec3 p0 = vec3(a0.xy, h.x);
-    vec3 p1 = vec3(a0.zw, h.y);
-    vec3 p2 = vec3(a1.xy, h.z);
-    vec3 p3 = vec3(a1.zw, h.w);
-    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
-    p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
-    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-    m *= m;
-    return 42.0 * dot(m * m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
-  }
-
-  vec3 curlNoise(vec3 p) {
-    const float e = 0.1;
-    vec3 dx = vec3(e, 0.0, 0.0);
-    vec3 dy = vec3(0.0, e, 0.0);
-    vec3 dz = vec3(0.0, 0.0, e);
-    vec3 x0 = vec3(snoise(p-dx), snoise(p-dx+7.23), snoise(p-dx+13.5));
-    vec3 x1 = vec3(snoise(p+dx), snoise(p+dx+7.23), snoise(p+dx+13.5));
-    vec3 y0 = vec3(snoise(p-dy), snoise(p-dy+7.23), snoise(p-dy+13.5));
-    vec3 y1 = vec3(snoise(p+dy), snoise(p+dy+7.23), snoise(p+dy+13.5));
-    vec3 z0 = vec3(snoise(p-dz), snoise(p-dz+7.23), snoise(p-dz+13.5));
-    vec3 z1 = vec3(snoise(p+dz), snoise(p+dz+7.23), snoise(p+dz+13.5));
-    return normalize(vec3(
-      y1.z-y0.z-z1.y+z0.y,
-      z1.x-z0.x-x1.z+x0.z,
-      x1.y-x0.y-y1.x+y0.x
-    ) / (2.0 * e));
-  }
+  uniform highp sampler3D tNoise;
+  #define NOISE_PERIOD 16.0
+  vec4 noiseField(vec3 p) { return texture(tNoise, fract(p * (1.0 / NOISE_PERIOD))); }
+  float snoise(vec3 v) { return noiseField(v).a; }
+  vec3 curlNoise(vec3 p) { return noiseField(p).rgb; }
 `;
 
 const simVertexShader = `
@@ -365,6 +307,110 @@ const ORIGIN_GENERATORS = {
   },
 };
 
+// ── baked noise: snoise + curl as one 3D texture, built once at boot ────────────────────────────
+// The procedural GLSL noise (18 inlined simplex calls per curl) made every form's D3D shader take
+// seconds to compile; a texture read compiles in milliseconds and runs faster. Grid wraps at
+// NOISE_PERIOD=16 world units; the field spans well inside one period, so the seam is unreachable.
+const SIMPLEX_GRAD = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+
+function makeSimplex(seed) {
+  const perm = new Uint8Array(512);
+  const source = new Uint8Array(256);
+  for (let i = 0; i < 256; i += 1) source[i] = i;
+  let state = seed >>> 0 || 1;
+  for (let i = 255; i > 0; i -= 1) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    const j = state % (i + 1);
+    const tmp = source[i]; source[i] = source[j]; source[j] = tmp;
+  }
+  for (let i = 0; i < 512; i += 1) perm[i] = source[i & 255];
+  const F3 = 1 / 3, G3 = 1 / 6;
+  return (xin, yin, zin) => {
+    const skew = (xin + yin + zin) * F3;
+    const i = Math.floor(xin + skew), j = Math.floor(yin + skew), k = Math.floor(zin + skew);
+    const t = (i + j + k) * G3;
+    const x0 = xin - (i - t), y0 = yin - (j - t), z0 = zin - (k - t);
+    let i1, j1, k1, i2, j2, k2;
+    if (x0 >= y0) {
+      if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+      else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+      else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+    } else {
+      if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+      else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+      else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    }
+    const x1 = x0 - i1 + G3, y1 = y0 - j1 + G3, z1 = z0 - k1 + G3;
+    const x2 = x0 - i2 + 2 * G3, y2 = y0 - j2 + 2 * G3, z2 = z0 - k2 + 2 * G3;
+    const x3 = x0 - 1 + 3 * G3, y3 = y0 - 1 + 3 * G3, z3 = z0 - 1 + 3 * G3;
+    const ii = i & 255, jj = j & 255, kk = k & 255;
+    let n = 0;
+    let c = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+    if (c > 0) { const g = SIMPLEX_GRAD[perm[ii + perm[jj + perm[kk]]] % 12]; n += c * c * c * c * (g[0] * x0 + g[1] * y0 + g[2] * z0); }
+    c = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+    if (c > 0) { const g = SIMPLEX_GRAD[perm[ii + i1 + perm[jj + j1 + perm[kk + k1]]] % 12]; n += c * c * c * c * (g[0] * x1 + g[1] * y1 + g[2] * z1); }
+    c = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+    if (c > 0) { const g = SIMPLEX_GRAD[perm[ii + i2 + perm[jj + j2 + perm[kk + k2]]] % 12]; n += c * c * c * c * (g[0] * x2 + g[1] * y2 + g[2] * z2); }
+    c = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+    if (c > 0) { const g = SIMPLEX_GRAD[perm[ii + 1 + perm[jj + 1 + perm[kk + 1]]] % 12]; n += c * c * c * c * (g[0] * x3 + g[1] * y3 + g[2] * z3); }
+    return 32 * n;
+  };
+}
+
+function bakeNoiseTexture() {
+  const size = 40;
+  const period = 16;
+  const cell = period / size;
+  const count = size * size * size;
+  const n1 = makeSimplex(101);
+  const n2 = makeSimplex(2027);
+  const n3 = makeSimplex(90210);
+  const f1 = new Float32Array(count);
+  const f2 = new Float32Array(count);
+  const f3 = new Float32Array(count);
+  let idx = 0;
+  for (let z = 0; z < size; z += 1) {
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        const wx = x * cell, wy = y * cell, wz = z * cell;
+        f1[idx] = n1(wx, wy, wz);
+        f2[idx] = n2(wx, wy, wz);
+        f3[idx] = n3(wx, wy, wz);
+        idx += 1;
+      }
+    }
+  }
+  const at = (f, x, y, z) => f[((z + size) % size) * size * size + ((y + size) % size) * size + ((x + size) % size)];
+  const data = new Uint16Array(count * 4);
+  const half = THREE.DataUtils.toHalfFloat;
+  idx = 0;
+  for (let z = 0; z < size; z += 1) {
+    for (let y = 0; y < size; y += 1) {
+      for (let x = 0; x < size; x += 1) {
+        const cx = (at(f3, x, y + 1, z) - at(f3, x, y - 1, z)) - (at(f2, x, y, z + 1) - at(f2, x, y, z - 1));
+        const cy = (at(f1, x, y, z + 1) - at(f1, x, y, z - 1)) - (at(f3, x + 1, y, z) - at(f3, x - 1, y, z));
+        const cz = (at(f2, x + 1, y, z) - at(f2, x - 1, y, z)) - (at(f1, x, y + 1, z) - at(f1, x, y - 1, z));
+        const len = Math.max(1e-5, Math.hypot(cx, cy, cz));
+        data[idx] = half(cx / len);
+        data[idx + 1] = half(cy / len);
+        data[idx + 2] = half(cz / len);
+        data[idx + 3] = half(f1[(z * size + y) * size + x]);
+        idx += 4;
+      }
+    }
+  }
+  const texture = new THREE.Data3DTexture(data, size, size, size);
+  texture.format = THREE.RGBAFormat;
+  texture.type = THREE.HalfFloatType;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.wrapR = THREE.RepeatWrapping;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 // ─────────────────────────────────── the listener (form choice) ────────────────────────────────
 const recentForms = [];
 const rememberForm = (slug) => {
@@ -441,7 +487,7 @@ class ParticleField {
     const lowConcurrency = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4;
     const lowPower = lowMemory || lowConcurrency;
     const narrow = Math.min(window.innerWidth, window.innerHeight) < 720;
-    this.textureSize = lowPower || narrow ? 256 : 384;
+    this.textureSize = lowPower || narrow ? 224 : 320;
     this.target = target;
     this.narrow = narrow;
     this.active = true;
@@ -471,7 +517,8 @@ class ParticleField {
       alpha: true,
       powerPreference: 'high-performance',
     });
-    this.baseDpr = Math.min(window.devicePixelRatio || 1, narrow ? 1.1 : 1.35);
+    const budgetDpr = Math.sqrt(1050000 / Math.max(1, window.innerWidth * window.innerHeight));
+    this.baseDpr = Math.min(window.devicePixelRatio || 1, narrow ? 1.1 : 1.35, budgetDpr);
     this.renderScale = 1;
     this.renderer.setPixelRatio(this.baseDpr);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
@@ -481,7 +528,7 @@ class ParticleField {
 
     const renderPass = new RenderPass(this.scene, this.camera);
     this.bloom = new UnrealBloomPass(
-      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      new THREE.Vector2(window.innerWidth / 2, window.innerHeight / 2),
       narrow ? 1.0 : 1.2,
       0.5,
       0.38,
@@ -505,6 +552,7 @@ class ParticleField {
       depthBuffer: false,
       stencilBuffer: false,
     };
+    this.noiseTexture = bakeNoiseTexture();
     this.targetA = new THREE.WebGLRenderTarget(size, size, options);
     this.targetB = new THREE.WebGLRenderTarget(size, size, options);
     this.warmTarget = new THREE.WebGLRenderTarget(4, 4, options);
@@ -555,6 +603,7 @@ class ParticleField {
         uDt: { value: 1 },
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
+        tNoise: { value: this.noiseTexture },
       },
     });
     const js = formDef.js || {};
@@ -579,6 +628,7 @@ class ParticleField {
         uDt: { value: 1 },
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
+        tNoise: { value: this.noiseTexture },
       },
       transparent: true,
       blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
@@ -587,6 +637,28 @@ class ParticleField {
     cached = { simMaterial, renderMaterial, js };
     this.materialCache.set(formDef.slug, cached);
     return cached;
+  }
+
+  prepare(formDef, utterance, seedHash) {
+    const key = `${formDef.slug}|${seedHash}|${utterance}`;
+    if (this.preparedKey === key) return this.preparedPromise;
+    const size = this.textureSize;
+    let rngState = (seedHash >>> 0) || 1;
+    const rng = () => {
+      rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
+      return rngState / 0x100000000;
+    };
+    const values = new Float32Array(size * size * 4);
+    const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
+    generator(values, rng, utterance);
+    const texture = new THREE.DataTexture(values, size, size, THREE.RGBAFormat, THREE.FloatType);
+    texture.needsUpdate = true;
+    if (this.prepared && this.prepared.texture !== this.origin) this.prepared.texture.dispose();
+    this.preparedKey = key;
+    this.prepared = { formDef, values, texture };
+    const warmT0 = performance.now();
+    this.preparedPromise = this.warmForm(formDef).then(() => { this.lastWarmMs = performance.now() - warmT0; }).catch(() => {});
+    return this.preparedPromise;
   }
 
   async warmForm(formDef) {
@@ -609,6 +681,12 @@ class ParticleField {
           this.renderer.compileAsync(this.scene, this.camera),
           this.renderer.compileAsync(this.simScene, this.simCamera),
         ]);
+        if (!this.disposed) {
+          this.renderer.setRenderTarget(this.warmTarget);
+          this.renderer.render(this.simScene, this.simCamera);
+          this.renderer.render(this.scene, this.camera);
+          this.renderer.setRenderTarget(null);
+        }
       } else {
         this.renderer.setRenderTarget(this.warmTarget);
         this.renderer.render(this.simScene, this.simCamera);
@@ -624,17 +702,27 @@ class ParticleField {
   }
 
   setForm(formDef, utterance, { fromCenter, seedHash }) {
+    const swapT0 = performance.now();
     const size = this.textureSize;
-    let rngState = (seedHash >>> 0) || 1;
-    const rng = () => {
-      rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
-      return rngState / 0x100000000;
-    };
-    const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
-    generator(this.originValues, rng, utterance);
-    this.origin?.dispose();
-    this.origin = new THREE.DataTexture(this.originValues, size, size, THREE.RGBAFormat, THREE.FloatType);
-    this.origin.needsUpdate = true;
+    const key = `${formDef.slug}|${seedHash}|${utterance}`;
+    if (this.preparedKey === key && this.prepared) {
+      this.origin?.dispose();
+      this.origin = this.prepared.texture;
+      this.originValues = this.prepared.values;
+      this.prepared = null;
+      this.preparedKey = null;
+    } else {
+      let rngState = (seedHash >>> 0) || 1;
+      const rng = () => {
+        rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
+        return rngState / 0x100000000;
+      };
+      const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
+      generator(this.originValues, rng, utterance);
+      this.origin?.dispose();
+      this.origin = new THREE.DataTexture(this.originValues, size, size, THREE.RGBAFormat, THREE.FloatType);
+      this.origin.needsUpdate = true;
+    }
 
     const { simMaterial, renderMaterial, js } = this.materialsFor(formDef);
     this.simMaterial = simMaterial;
@@ -651,10 +739,15 @@ class ParticleField {
     this.bloom.strength = this.baseBloom;
     this.particles.material = this.renderMaterial;
 
-    const primeValues = fromCenter
-      ? this.originValues.map((v, i) => (i % 4 === 3 ? 1 : v * 0.3 + (Math.random() - 0.5) * 0.08))
-      : this.originValues;
-    const prime = new THREE.DataTexture(primeValues instanceof Float32Array ? primeValues : new Float32Array(primeValues), size, size, THREE.RGBAFormat, THREE.FloatType);
+    let primeValues = this.originValues;
+    if (fromCenter) {
+      this.primeBuffer ||= new Float32Array(this.originValues.length);
+      for (let i = 0; i < this.originValues.length; i += 1) {
+        this.primeBuffer[i] = i % 4 === 3 ? 1 : this.originValues[i] * 0.3 + (Math.random() - 0.5) * 0.08;
+      }
+      primeValues = this.primeBuffer;
+    }
+    const prime = new THREE.DataTexture(primeValues, size, size, THREE.RGBAFormat, THREE.FloatType);
     prime.needsUpdate = true;
     this.simMaterial.uniforms.tPositions.value = prime;
     this.simQuad.material = this.simMaterial;
@@ -665,6 +758,7 @@ class ParticleField {
     this.renderer.render(this.simScene, this.simCamera);
     this.renderer.setRenderTarget(null);
     prime.dispose();
+    this.lastSwapMs = performance.now() - swapT0;
     this.animatedUntil = performance.now() + 4200;
   }
 
@@ -675,11 +769,12 @@ class ParticleField {
   governFidelity(now, interacting) {
     if (!this.lastGovern) this.lastGovern = now;
     if (now - this.lastGovern < 1600) return;
+    if (this.releaseStarted || now < this.animatedUntil - 2600) { this.lastGovern = now; return; }
     this.lastGovern = now;
     const previous = this.renderScale;
     const slow = interacting ? 26 : 48;
     const fast = interacting ? 15 : 36;
-    if (this.frameEma > slow) this.renderScale = Math.max(0.45, this.renderScale * 0.85);
+    if (this.frameEma > slow) this.renderScale = Math.max(0.35, this.renderScale * 0.85);
     else if (this.frameEma < fast && this.renderScale < 1) this.renderScale = Math.min(1, this.renderScale * 1.18);
     if (this.renderScale !== previous) {
       this.renderer.setPixelRatio(this.baseDpr * this.renderScale);
@@ -853,6 +948,7 @@ class ParticleField {
     }
     this.materialCache.clear();
     this.origin?.dispose();
+    this.noiseTexture?.dispose();
     this.targetA?.dispose();
     this.targetB?.dispose();
     this.warmTarget?.dispose();
@@ -947,8 +1043,6 @@ function cancelIdleWarm() {
   }
 }
 
-let lastWarmedSlug = null;
-
 function scheduleWarm() {
   cancelIdleWarm();
   warmHandle = setTimeout(() => {
@@ -956,12 +1050,11 @@ function scheduleWarm() {
     const raw = text.value;
     if (!raw.trim() || !field) return;
     if (field.frameEma && field.frameEma > 45) return;
-    const { form } = forcedForm
-      ? { form: FORM_INDEX.get(forcedForm) }
+    const chosen = forcedForm
+      ? { form: FORM_INDEX.get(forcedForm), hash: fnv(raw.trim() || 'the dark') }
       : chooseForm(raw, cadence);
-    if (!form || form.slug === lastWarmedSlug) return;
-    lastWarmedSlug = form.slug;
-    field.warmForm(form);
+    if (!chosen.form) return;
+    field.prepare(chosen.form, raw, chosen.hash);
   }, 550);
 }
 
@@ -981,7 +1074,7 @@ function scheduleRelease() {
   releaseDeadline = performance.now() + releaseDelay;
   releaseTimer = window.setTimeout(beginRelease, releaseDelay);
   holdingTimer = window.setTimeout(() => {
-    if (!locked && text.value.trim()) setState('holding', 'holding');
+    if (!locked && text.value.trim()) setState('holding', '');
   }, Math.min(900, releaseDelay * 0.25));
   progressFrame = requestAnimationFrame(paintProgress);
   scheduleWarm();
@@ -1009,10 +1102,10 @@ function onInput(event) {
   releaseButton.disabled = !hasText;
   if (!hasText) {
     cancelReleaseSchedule();
-    setState('empty', 'listening');
+    setState('empty', '');
     return;
   }
-  setState('writing', 'listening');
+  setState('writing', '');
   if (field) {
     const box = text.getBoundingClientRect();
     const ax = ((box.left + box.width / 2) / window.innerWidth - .5) * 2.2;
@@ -1041,19 +1134,21 @@ function beginRelease() {
   text.readOnly = true;
   releaseButton.disabled = true;
   releaseButton.setAttribute('aria-busy', 'true');
-  setState('releasing', 'letting go');
-  field?.warmForm(chosen.form);
+  setState('releasing', '');
+  const ready = field ? field.prepare(chosen.form, raw, chosen.hash) : Promise.resolve();
   field?.release(length, energy);
 
   const inhaleMs = field ? field.envelope.inhale * 1000 : 480;
   const swapAt = reducedMotion.matches ? 200 : Math.max(360, inhaleMs);
 
-  const formNumber = FORMS.indexOf(chosen.form) + 1;
-  const revealLine = `it became — ${chosen.form.name} · № ${formNumber} of fifty`;
+    const revealLine = chosen.form.name;
   swapTimer = window.setTimeout(() => {
-    body.dataset.form = chosen.form.slug;
-    field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash });
-    setState('releasing', revealLine);
+    Promise.resolve(ready).then(() => {
+      if (body.dataset.state !== 'releasing') return;
+      body.dataset.form = chosen.form.slug;
+      field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash });
+      setState('releasing', revealLine);
+    });
   }, swapAt);
 
   clearTimer = window.setTimeout(() => {
@@ -1072,7 +1167,7 @@ function beginRelease() {
   }, reducedMotion.matches ? 420 : Math.max(2200, swapAt + 1500));
 
   emptyTimer = window.setTimeout(() => {
-    if (!text.value) setState('empty', 'listening');
+    if (!text.value) setState('empty', '');
   }, reducedMotion.matches ? 1400 : 5600);
 }
 
@@ -1170,6 +1265,6 @@ window.entryExperience = Object.freeze({
   },
   lastForm: () => lastForm,
   lastRelease: () => lastRelease,
-  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), scale: Number((field.renderScale || 1).toFixed(2)) } : null,
+  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0) } : null,
   force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
 });

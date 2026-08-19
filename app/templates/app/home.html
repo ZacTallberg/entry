@@ -57,9 +57,7 @@
 
   <main class="entry-stage" id="main-content">
     <h1 class="sr-only">The Entry</h1>
-    <section class="composer" aria-describedby="entry-instruction privacy-note">
-      <p class="invitation" id="entry-instruction">say something into the dark</p>
-
+    <section class="composer" aria-label="Say something into the dark. Nothing is sent, nothing is saved.">
       <div class="writing-field">
         <label class="sr-only" for="entry-text">Words to release</label>
         <textarea
@@ -70,7 +68,7 @@
           autocomplete="off"
           autocapitalize="sentences"
           spellcheck="true"
-          aria-describedby="entry-instruction privacy-note entry-status"
+          aria-describedby="entry-status"
           placeholder="say something"
         ></textarea>
         <div class="caret-glow" aria-hidden="true"></div>
@@ -83,13 +81,12 @@
         </button>
       </div>
 
-      <p class="state-message" id="entry-status" role="status" aria-live="polite" aria-atomic="true">listening</p>
+      <p class="state-message" id="entry-status" role="status" aria-live="polite" aria-atomic="true"></p>
     </section>
   </main>
 
   <footer class="quiet-footer">
-    <p id="privacy-note"><span aria-hidden="true">○</span> nothing is sent. nothing is saved.</p>
-    <a href="/hub/">project hub</a>
+    <a href="/hub/">hub</a>
   </footer>
 
   <noscript>
