@@ -487,7 +487,7 @@ class ParticleField {
     const lowConcurrency = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4;
     const lowPower = lowMemory || lowConcurrency;
     const narrow = Math.min(window.innerWidth, window.innerHeight) < 720;
-    this.textureSize = lowPower || narrow ? 224 : 320;
+    this.textureSize = lowPower || narrow ? 256 : 384;
     this.target = target;
     this.narrow = narrow;
     this.active = true;
@@ -517,7 +517,7 @@ class ParticleField {
       alpha: true,
       powerPreference: 'high-performance',
     });
-    const budgetDpr = Math.sqrt(1050000 / Math.max(1, window.innerWidth * window.innerHeight));
+    const budgetDpr = Math.sqrt(2000000 / Math.max(1, window.innerWidth * window.innerHeight));
     this.baseDpr = Math.min(window.devicePixelRatio || 1, narrow ? 1.1 : 1.35, budgetDpr);
     this.renderScale = 1;
     this.renderer.setPixelRatio(this.baseDpr);
@@ -651,11 +651,25 @@ class ParticleField {
     const values = new Float32Array(size * size * 4);
     const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
     generator(values, rng, utterance);
-    const texture = new THREE.DataTexture(values, size, size, THREE.RGBAFormat, THREE.FloatType);
+    const half = THREE.DataUtils.toHalfFloat;
+    const packed = new Uint16Array(values.length);
+    const primePacked = new Uint16Array(values.length);
+    for (let i = 0; i < values.length; i += 1) {
+      packed[i] = half(values[i]);
+      primePacked[i] = i % 4 === 3 ? packed[i] : half(values[i] * 0.3 + (Math.random() - 0.5) * 0.08);
+    }
+    const texture = new THREE.DataTexture(packed, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
     texture.needsUpdate = true;
-    if (this.prepared && this.prepared.texture !== this.origin) this.prepared.texture.dispose();
+    const primeTexture = new THREE.DataTexture(primePacked, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
+    primeTexture.needsUpdate = true;
+    this.renderer.initTexture(texture);
+    this.renderer.initTexture(primeTexture);
+    if (this.prepared) {
+      if (this.prepared.texture !== this.origin) this.prepared.texture.dispose();
+      this.prepared.primeTexture?.dispose();
+    }
     this.preparedKey = key;
-    this.prepared = { formDef, values, texture };
+    this.prepared = { formDef, values, texture, primeTexture };
     const warmT0 = performance.now();
     this.preparedPromise = this.warmForm(formDef).then(() => { this.lastWarmMs = performance.now() - warmT0; }).catch(() => {});
     return this.preparedPromise;
@@ -705,10 +719,12 @@ class ParticleField {
     const swapT0 = performance.now();
     const size = this.textureSize;
     const key = `${formDef.slug}|${seedHash}|${utterance}`;
+    let preparedPrime = null;
     if (this.preparedKey === key && this.prepared) {
       this.origin?.dispose();
       this.origin = this.prepared.texture;
       this.originValues = this.prepared.values;
+      preparedPrime = this.prepared.primeTexture;
       this.prepared = null;
       this.preparedKey = null;
     } else {
@@ -735,20 +751,23 @@ class ParticleField {
     this.simMaterial.uniforms.uSeed.value = ((seedHash >>> 0) % 997) * 0.37;
     this.renderMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
     this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * (js.size || 1);
-    this.baseBloom = (this.narrow ? 1.0 : 1.2) * (js.bloom || 1.2);
+    this.baseBloom = (this.narrow ? 1.2 : 1.45) * (js.bloom || 1.2);
     this.bloom.strength = this.baseBloom;
     this.particles.material = this.renderMaterial;
 
-    let primeValues = this.originValues;
-    if (fromCenter) {
-      this.primeBuffer ||= new Float32Array(this.originValues.length);
-      for (let i = 0; i < this.originValues.length; i += 1) {
-        this.primeBuffer[i] = i % 4 === 3 ? 1 : this.originValues[i] * 0.3 + (Math.random() - 0.5) * 0.08;
+    let prime = fromCenter ? preparedPrime : null;
+    if (!prime) {
+      let primeValues = this.originValues;
+      if (fromCenter) {
+        this.primeBuffer ||= new Float32Array(this.originValues.length);
+        for (let i = 0; i < this.originValues.length; i += 1) {
+          this.primeBuffer[i] = i % 4 === 3 ? 1 : this.originValues[i] * 0.3 + (Math.random() - 0.5) * 0.08;
+        }
+        primeValues = this.primeBuffer;
       }
-      primeValues = this.primeBuffer;
+      prime = new THREE.DataTexture(primeValues, size, size, THREE.RGBAFormat, THREE.FloatType);
+      prime.needsUpdate = true;
     }
-    const prime = new THREE.DataTexture(primeValues, size, size, THREE.RGBAFormat, THREE.FloatType);
-    prime.needsUpdate = true;
     this.simMaterial.uniforms.tPositions.value = prime;
     this.simQuad.material = this.simMaterial;
     this.renderer.setRenderTarget(this.targetA);
@@ -772,10 +791,10 @@ class ParticleField {
     if (this.releaseStarted || now < this.animatedUntil - 2600) { this.lastGovern = now; return; }
     this.lastGovern = now;
     const previous = this.renderScale;
-    const slow = interacting ? 26 : 48;
+    const slow = interacting ? 23 : 48;
     const fast = interacting ? 15 : 36;
-    if (this.frameEma > slow) this.renderScale = Math.max(0.35, this.renderScale * 0.85);
-    else if (this.frameEma < fast && this.renderScale < 1) this.renderScale = Math.min(1, this.renderScale * 1.18);
+    if (this.frameEma > slow) this.renderScale = Math.max(0.6, this.renderScale * 0.88);
+    else if (this.frameEma < fast && this.renderScale < 1) this.renderScale = Math.min(1, this.renderScale * 1.25);
     if (this.renderScale !== previous) {
       this.renderer.setPixelRatio(this.baseDpr * this.renderScale);
       this.renderer.setSize(window.innerWidth, window.innerHeight, false);
@@ -857,7 +876,7 @@ class ParticleField {
     this.raf = 0;
     if (this.disposed || !this.active) return;
     const interacting = this.pulse > 0.03 || this.releaseStarted > 0 || now < this.animatedUntil;
-    const interval = interacting ? 1000 / 60 : 1000 / 32;
+    const interval = interacting ? 1000 / 60 : 1000 / 30;
     if (now - this.lastFrame < interval) {
       this.raf = requestAnimationFrame(this.frame);
       return;
