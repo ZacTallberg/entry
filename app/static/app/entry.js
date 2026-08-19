@@ -487,7 +487,7 @@ class ParticleField {
     const lowConcurrency = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4;
     const lowPower = lowMemory || lowConcurrency;
     const narrow = Math.min(window.innerWidth, window.innerHeight) < 720;
-    this.textureSize = lowPower || narrow ? 256 : 384;
+    this.textureSize = lowPower || narrow ? 256 : 320;
     this.target = target;
     this.narrow = narrow;
     this.active = true;
@@ -517,7 +517,7 @@ class ParticleField {
       alpha: true,
       powerPreference: 'high-performance',
     });
-    const budgetDpr = Math.sqrt(2000000 / Math.max(1, window.innerWidth * window.innerHeight));
+    const budgetDpr = Math.sqrt(1700000 / Math.max(1, window.innerWidth * window.innerHeight));
     this.baseDpr = Math.min(window.devicePixelRatio || 1, narrow ? 1.1 : 1.35, budgetDpr);
     this.renderScale = 1;
     this.renderer.setPixelRatio(this.baseDpr);
@@ -535,7 +535,7 @@ class ParticleField {
     );
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(renderPass);
-    this.composer.addPass(this.bloom);
+    if (!new URLSearchParams(location.search).has('nobloom')) this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
 
     this.simScene = new THREE.Scene();
@@ -791,14 +791,18 @@ class ParticleField {
     if (this.releaseStarted || now < this.animatedUntil - 2600) { this.lastGovern = now; return; }
     this.lastGovern = now;
     const previous = this.renderScale;
-    const slow = interacting ? 23 : 48;
-    const fast = interacting ? 15 : 36;
+    const slow = interacting ? 27 : 48;
+    const fast = interacting ? 18 : 36;
     if (this.frameEma > slow) this.renderScale = Math.max(0.6, this.renderScale * 0.88);
     else if (this.frameEma < fast && this.renderScale < 1) this.renderScale = Math.min(1, this.renderScale * 1.25);
     if (this.renderScale !== previous) {
       this.renderer.setPixelRatio(this.baseDpr * this.renderScale);
       this.renderer.setSize(window.innerWidth, window.innerHeight, false);
       this.composer.setSize(window.innerWidth, window.innerHeight);
+      if (this.renderMaterial) {
+        const compensate = Math.pow(1 / this.renderScale, 0.5);
+        this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * ((this.formJs || {}).size || 1) * compensate;
+      }
     }
   }
 
@@ -876,7 +880,7 @@ class ParticleField {
     this.raf = 0;
     if (this.disposed || !this.active) return;
     const interacting = this.pulse > 0.03 || this.releaseStarted > 0 || now < this.animatedUntil;
-    const interval = interacting ? 1000 / 60 : 1000 / 30;
+    const interval = interacting ? 1000 / 50 : 1000 / 30;
     if (now - this.lastFrame < interval) {
       this.raf = requestAnimationFrame(this.frame);
       return;
