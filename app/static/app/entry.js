@@ -779,6 +779,7 @@ class ParticleField {
     this.haloMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
     this.haloMaterial.uniforms.uPointSize.value = this.renderMaterial.uniforms.uPointSize.value;
     this.haloBoost = js.bloom || 1.2;
+    this.haloEligible = ((seedHash >>> 6) % 4) === 0;
     this.particles.material = this.renderMaterial;
     this.haloParticles.material = this.haloMaterial;
 
@@ -969,7 +970,7 @@ class ParticleField {
       surge = Math.sin(surgePhase * Math.PI);
       exposure += surge * 0.95;
     }
-    const haloLevel = Math.min(1.6, surge * 1.4 + this.pulse * 0.4 + Math.max(0, this.energyCurrent - 0.95) * 1.1);
+    const haloLevel = this.haloEligible ? Math.min(1.6, surge * 1.5) : 0;
 
     const su = this.simMaterial.uniforms;
     su.uDt.value = dt;
