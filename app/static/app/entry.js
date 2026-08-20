@@ -86,7 +86,7 @@ const buildSimFragment = (formDef) => `
   void main() {
     vec3 pos = texture2D(tPositions, vUv).xyz;
     vec3 origin = texture2D(tOrigin, vUv).xyz;
-    vec3 velocity = formForce(pos, origin);
+    vec3 velocity = formForce(pos, origin) * (0.7 + uEnergy * 0.6);
 
     vec2 pointerDelta = pos.xy - uPointer;
     float pointerDistance = max(length(pointerDelta), 0.12);
@@ -135,6 +135,8 @@ const buildRenderVertex = (formDef) => `
   varying vec3 vColor;
   ${formDef.color}
 
+  uniform float uHaloMode;
+  uniform float uHaloBoost;
   void main() {
     vec3 p = texture2D(tPositions, position.xy).xyz;
     vec3 origin = texture2D(tOrigin, position.xy).xyz;
@@ -143,7 +145,11 @@ const buildRenderVertex = (formDef) => `
     float shimmer = (1.0 - FORM_SHIMMER) + FORM_SHIMMER * sin(uTime * 0.7 + p.x * 8.0 + p.y * 5.0 + id * 12.0);
     vColor = formColor(p, uTime, id, glow) * shimmer;
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-    gl_PointSize = uPointSize * FORM_SIZE / max(0.48, -mvPosition.z);
+    float size = uPointSize * FORM_SIZE / max(0.48, -mvPosition.z);
+    if (uHaloMode > 0.5) {
+      size = fract(id * 61.7) < 0.22 ? size * 7.0 * uHaloBoost : 0.0;
+    }
+    gl_PointSize = size;
     gl_Position = projectionMatrix * mvPosition;
   }
 `;
@@ -152,12 +158,21 @@ const buildRenderFragment = () => `
   uniform float uExposure;
   uniform float uSoft;
   uniform float uAlpha;
+  uniform float uHaloMode;
   varying vec3 vColor;
   void main() {
     vec2 point = gl_PointCoord - 0.5;
     float radius = length(point);
     if (radius > 0.5) discard;
-    float alpha = pow(1.0 - radius * 2.0, uSoft) * uAlpha;
+    float alpha;
+    if (uHaloMode > 0.5) {
+      float g = radius * 2.0;
+      alpha = exp(-g * g * 3.2) * uAlpha * 0.16;
+    } else {
+      float core = pow(1.0 - radius * 2.0, uSoft);
+      float skirt = exp(-radius * radius * 9.0) * 0.12;
+      alpha = (core + skirt) * uAlpha;
+    }
     gl_FragColor = vec4(vColor * uExposure, alpha);
   }
 `;
@@ -527,15 +542,8 @@ class ParticleField {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
 
     const renderPass = new RenderPass(this.scene, this.camera);
-    this.bloom = new UnrealBloomPass(
-      new THREE.Vector2(window.innerWidth / 2, window.innerHeight / 2),
-      narrow ? 1.0 : 1.2,
-      0.5,
-      0.38,
-    );
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(renderPass);
-    if (!new URLSearchParams(location.search).has('nobloom')) this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
 
     this.simScene = new THREE.Scene();
@@ -573,6 +581,10 @@ class ParticleField {
     this.particles = new THREE.Points(this.geometry, null);
     this.particles.frustumCulled = false;
     this.scene.add(this.particles);
+    this.haloParticles = new THREE.Points(this.geometry, null);
+    this.haloParticles.frustumCulled = false;
+    this.haloParticles.renderOrder = -1;
+    this.scene.add(this.haloParticles);
 
     this.setForm(FORM_INDEX.get('nebula'), '', { fromCenter: false, seedHash: sessionSalt });
 
@@ -629,12 +641,17 @@ class ParticleField {
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
         tNoise: { value: this.noiseTexture },
+        uHaloMode: { value: 0 },
+        uHaloBoost: { value: 1 },
       },
       transparent: true,
       blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
       depthWrite: false,
     });
-    cached = { simMaterial, renderMaterial, js };
+    const haloMaterial = renderMaterial.clone();
+    haloMaterial.uniforms.uHaloMode.value = 1;
+    haloMaterial.blending = THREE.AdditiveBlending;
+    cached = { simMaterial, renderMaterial, haloMaterial, js };
     this.materialCache.set(formDef.slug, cached);
     return cached;
   }
@@ -685,9 +702,14 @@ class ParticleField {
     simMaterial.uniforms.tOrigin.value = this.origin;
     renderMaterial.uniforms.tPositions.value = this.targetA.texture;
     renderMaterial.uniforms.tOrigin.value = this.origin;
+    const { haloMaterial } = this.materialCache.get(formDef.slug);
+    haloMaterial.uniforms.tPositions.value = this.targetA.texture;
+    haloMaterial.uniforms.tOrigin.value = this.origin;
     const heldPoints = this.particles.material;
+    const heldHalo = this.haloParticles.material;
     const heldQuad = this.simQuad.material;
     this.particles.material = renderMaterial;
+    this.haloParticles.material = haloMaterial;
     this.simQuad.material = simMaterial;
     try {
       if (this.renderer.compileAsync) {
@@ -710,6 +732,7 @@ class ParticleField {
     } finally {
       if (!this.disposed) {
         this.particles.material = heldPoints;
+        this.haloParticles.material = heldHalo;
         this.simQuad.material = heldQuad;
       }
     }
@@ -751,9 +774,13 @@ class ParticleField {
     this.simMaterial.uniforms.uSeed.value = ((seedHash >>> 0) % 997) * 0.37;
     this.renderMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
     this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * (js.size || 1);
-    this.baseBloom = (this.narrow ? 1.2 : 1.45) * (js.bloom || 1.2);
-    this.bloom.strength = this.baseBloom;
+    this.haloMaterial = this.materialCache.get(formDef.slug).haloMaterial;
+    this.haloMaterial.uniforms.tOrigin.value = this.origin;
+    this.haloMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
+    this.haloMaterial.uniforms.uPointSize.value = this.renderMaterial.uniforms.uPointSize.value;
+    this.haloBoost = js.bloom || 1.2;
     this.particles.material = this.renderMaterial;
+    this.haloParticles.material = this.haloMaterial;
 
     let prime = fromCenter ? preparedPrime : null;
     if (!prime) {
@@ -801,7 +828,9 @@ class ParticleField {
       this.composer.setSize(window.innerWidth, window.innerHeight);
       if (this.renderMaterial) {
         const compensate = Math.pow(1 / this.renderScale, 0.5);
-        this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * ((this.formJs || {}).size || 1) * compensate;
+        const px = this.basePointSize() * ((this.formJs || {}).size || 1) * compensate;
+        this.renderMaterial.uniforms.uPointSize.value = px;
+        if (this.haloMaterial) this.haloMaterial.uniforms.uPointSize.value = px;
       }
     }
   }
@@ -838,6 +867,14 @@ class ParticleField {
     this.pulseAnchor = vec;
   }
 
+  setTypingEnergy(value) {
+    this.energyTarget = clamp(value, 0.2, 1.6);
+  }
+
+  pop(amount = 0.12) {
+    this.exposurePop = Math.min(0.4, (this.exposurePop || 0) + amount);
+  }
+
   excite(kind, energy = 1, anchor = null) {
     const types = { outward: 0, inward: 1, orbit: 2, scatter: 3 };
     this.pulseType = types[kind] ?? 0;
@@ -855,6 +892,7 @@ class ParticleField {
   settle() {
     this.releaseStarted = 0;
     this.releaseEnergy = 0;
+    this.energyTarget = 0.5;
   }
 
   setActive(active) {
@@ -922,19 +960,21 @@ class ParticleField {
       }
     }
 
-    let exposure = 1.45;
+    this.energyCurrent = (this.energyCurrent ?? 0.5) + ((this.energyTarget ?? 0.5) - (this.energyCurrent ?? 0.5)) * 0.06;
+    this.exposurePop = (this.exposurePop || 0) * Math.pow(0.86, dt);
+    let exposure = 1.45 + this.exposurePop;
+    let surge = 0;
     if (this.releaseStarted) {
       const surgePhase = Math.min(1, ((now - this.releaseStarted) / 1000) / (this.envelope.inhale + 0.7));
-      const surge = Math.sin(surgePhase * Math.PI);
+      surge = Math.sin(surgePhase * Math.PI);
       exposure += surge * 0.95;
-      this.bloom.strength = (this.baseBloom || 1.2) * (1 + surge * 0.6);
-    } else if (this.baseBloom) {
-      this.bloom.strength += (this.baseBloom - this.bloom.strength) * 0.08;
     }
+    const haloLevel = Math.min(1.6, surge * 1.4 + this.pulse * 0.4 + Math.max(0, this.energyCurrent - 0.95) * 1.1);
 
     const su = this.simMaterial.uniforms;
     su.uDt.value = dt;
     su.uTime.value = time;
+    su.uEnergy.value = this.energyCurrent;
     su.uPointer.value.copy(this.pointer);
     su.uPulse.value = this.pulse;
     su.uPulseType.value = this.pulseType;
@@ -952,6 +992,14 @@ class ParticleField {
     ru.uPointer.value.copy(this.pointer);
     ru.uRelease.value = releaseForce;
     ru.uExposure.value = exposure;
+    if (this.haloMaterial) {
+      const hu = this.haloMaterial.uniforms;
+      hu.tPositions.value = this.targetA.texture;
+      hu.uTime.value = time;
+      hu.uPointer.value.copy(this.pointer);
+      hu.uExposure.value = exposure;
+      hu.uHaloBoost.value = (this.haloBoost || 1.2) * haloLevel;
+    }
     this.renderer.setRenderTarget(null);
     this.composer.render();
     this.raf = requestAnimationFrame(this.frame);
@@ -965,9 +1013,10 @@ class ParticleField {
     window.removeEventListener('resize', this.resize);
     this.target.removeEventListener('webglcontextlost', this.contextLost);
     this.geometry?.dispose();
-    for (const { simMaterial, renderMaterial } of this.materialCache.values()) {
+    for (const { simMaterial, renderMaterial, haloMaterial } of this.materialCache.values()) {
       simMaterial.dispose();
       renderMaterial.dispose();
+      haloMaterial?.dispose();
     }
     this.materialCache.clear();
     this.origin?.dispose();
@@ -1131,9 +1180,17 @@ function onInput(event) {
   setState('writing', '');
   if (field) {
     const box = text.getBoundingClientRect();
-    const ax = ((box.left + box.width / 2) / window.innerWidth - .5) * 2.2;
-    const ay = (.5 - (box.top + box.height / 2) / window.innerHeight) * 1.45;
-    field.excite(classifyInput(event), event.inputType === 'insertFromPaste' ? 2.4 : clamp(1.85 - cadence / 1000, .8, 1.8), new THREE.Vector2(ax, ay));
+    const kind = classifyInput(event);
+    const seedChar = (event.data || ' ').charCodeAt(0) || 32;
+    const jx = (Math.sin(seedChar * 12.9898 + text.value.length * 3.7) * 0.5) * 0.9;
+    const jy = (Math.sin(seedChar * 78.233 + text.value.length * 1.3) * 0.5) * 0.5;
+    const ax = ((box.left + box.width / 2) / window.innerWidth - .5) * 2.2 + jx;
+    const ay = (.5 - (box.top + box.height / 2) / window.innerHeight) * 1.45 + jy;
+    let energy = event.inputType === 'insertFromPaste' ? 2.4 : clamp(1.85 - cadence / 1000, .8, 1.8);
+    if (kind === 'orbit') energy *= 1.45;
+    field.excite(kind, energy, new THREE.Vector2(ax, ay));
+    field.setTypingEnergy(clamp(1.5 - cadence / 650, 0.35, 1.5));
+    field.pop(kind === 'scatter' ? 0.2 : 0.1);
   }
   if (!composing) scheduleRelease();
 }
