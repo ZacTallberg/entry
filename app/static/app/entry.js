@@ -52,6 +52,7 @@ const GLSL_PRELUDE = `
   uniform float uRelease;
   uniform float uPulse;
   uniform float uPulseType;
+  uniform float uForm;
   uniform vec2 uPointer;
   uniform vec2 uPulseCenter;
   uniform vec2 uStir;
@@ -118,7 +119,7 @@ const buildSimFragment = (formDef) => `
 
     float centerDistance = max(length(pos), 0.12);
     velocity += normalize(pos) * uRelease * (0.036 * FORM_RELEASE / centerDistance);
-    velocity += (origin - pos) * FORM_HOME;
+    velocity += (origin - pos) * (FORM_HOME + uForm * 0.055);
     pos += velocity * FORM_SPEED * uDt;
     if (length(pos) > 6.5) pos = mix(pos, origin, 0.5);
     gl_FragColor = vec4(pos, 1.0);
@@ -167,6 +168,7 @@ const buildRenderVertex = (formDef) => `
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
     float size = uPointSize * FORM_SIZE / max(0.48, -mvPosition.z);
     size *= 1.0 + uFxSizeWave * 0.4 * sin(uTime * 1.9 + id * TAU);
+    size *= 1.0 + uForm * 0.45;
     gl_PointSize = size;
     gl_Position = projectionMatrix * mvPosition;
   }
@@ -634,6 +636,7 @@ class ParticleField {
         uSeed: { value: 0 },
         uEnergy: { value: 0.5 },
         uDt: { value: 1 },
+        uForm: { value: 0 },
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
         tNoise: { value: this.noiseTexture },
@@ -669,6 +672,7 @@ class ParticleField {
         uFxShimmer: { value: 0 },
         uFxSizeWave: { value: 0 },
         uFxFog: { value: 0 },
+        uForm: { value: 0 },
       },
       transparent: true,
       blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
@@ -697,7 +701,7 @@ class ParticleField {
     const primePacked = new Uint16Array(values.length);
     for (let i = 0; i < values.length; i += 1) {
       packed[i] = half(values[i]);
-      primePacked[i] = i % 4 === 3 ? packed[i] : half(values[i] * 0.3 + (Math.random() - 0.5) * 0.08);
+      primePacked[i] = i % 4 === 3 ? packed[i] : half(values[i] * 0.45 + (Math.random() - 0.5) * 0.08);
     }
     const texture = new THREE.DataTexture(packed, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
     texture.needsUpdate = true;
@@ -830,7 +834,7 @@ class ParticleField {
       if (fromCenter) {
         this.primeBuffer ||= new Float32Array(this.originValues.length);
         for (let i = 0; i < this.originValues.length; i += 1) {
-          this.primeBuffer[i] = i % 4 === 3 ? 1 : this.originValues[i] * 0.3 + (Math.random() - 0.5) * 0.08;
+          this.primeBuffer[i] = i % 4 === 3 ? 1 : this.originValues[i] * 0.45 + (Math.random() - 0.5) * 0.08;
         }
         primeValues = this.primeBuffer;
       }
@@ -847,6 +851,7 @@ class ParticleField {
     this.renderer.setRenderTarget(null);
     prime.dispose();
     this.lastSwapMs = performance.now() - swapT0;
+    this.formStartedAt = performance.now();
     this.animatedUntil = performance.now() + 4200;
   }
 
@@ -1051,6 +1056,10 @@ class ParticleField {
     ru.uTime.value = time;
     ru.uPointer.value.copy(this.pointer);
     ru.uRelease.value = releaseForce;
+    const formPhase = this.formStartedAt ? Math.max(0, 1 - (now - this.formStartedAt) / 1400) : 0;
+    su.uForm.value = formPhase;
+    ru.uForm.value = formPhase;
+    exposure += formPhase * 0.3;
     if (this.hueDriftRate) ru.uHueShift.value = this.baseHueShift + time * this.hueDriftRate;
     if (this.beatTempo) exposure += 0.12 * Math.sin(time * this.beatTempo);
     ru.uExposure.value = exposure;
