@@ -57,6 +57,12 @@ const GLSL_PRELUDE = `
   uniform vec2 uStir;
 
   mat2 rot(float a) { return mat2(cos(a), -sin(a), sin(a), cos(a)); }
+  vec3 hueRotate(vec3 c, float a) {
+    const vec3 w = vec3(0.299, 0.587, 0.114);
+    float l = dot(c, w);
+    vec3 d = c - l;
+    return l + d * cos(a) + cross(vec3(0.57735), d) * sin(a);
+  }
   float idOf(vec3 o) { return fract(sin(dot(o, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
   vec3 cosPal(float t, vec3 a, vec3 b, vec3 c, vec3 d) { return a + b * cos(TAU * (c * t + d)); }
 
@@ -135,20 +141,32 @@ const buildRenderVertex = (formDef) => `
   varying vec3 vColor;
   ${formDef.color}
 
-  uniform float uHaloMode;
-  uniform float uHaloBoost;
+  uniform sampler2D tPrev;
+  uniform float uIgnite;
+  uniform float uHueShift;
+  uniform float uFxTurb;
+  uniform float uFxShimmer;
+  uniform float uFxSizeWave;
+  uniform float uFxFog;
+  varying float vDepthA;
   void main() {
     vec3 p = texture2D(tPositions, position.xy).xyz;
+    vec3 prev = texture2D(tPrev, position.xy).xyz;
     vec3 origin = texture2D(tOrigin, position.xy).xyz;
     float id = idOf(origin);
     float glow = uGlowAmt / (0.35 + length(p.xy - uPointer));
-    float shimmer = (1.0 - FORM_SHIMMER) + FORM_SHIMMER * sin(uTime * 0.7 + p.x * 8.0 + p.y * 5.0 + id * 12.0);
-    vColor = formColor(p, uTime, id, glow) * shimmer;
+    float shimmerAmt = clamp(FORM_SHIMMER + uFxShimmer, 0.0, 0.85);
+    float shimmer = (1.0 - shimmerAmt) + shimmerAmt * sin(uTime * 0.7 + p.x * 8.0 + p.y * 5.0 + id * 12.0);
+    vec3 base = formColor(p, uTime, id, glow) * shimmer;
+    base *= 1.0 - uFxTurb * 0.5 + uFxTurb * (snoise(p * 1.6 + uSeed * 0.13) * 0.5 + 0.5);
+    base = hueRotate(base, uHueShift);
+    float speed = length(p - prev);
+    float ignite = smoothstep(0.02, 0.12, speed) * uIgnite;
+    vColor = mix(base, vec3(1.0, 0.97, 0.9) * (1.0 + ignite * 1.6), ignite * 0.7);
+    vDepthA = 1.0 - uFxFog * smoothstep(0.2, 1.6, abs(p.z));
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
     float size = uPointSize * FORM_SIZE / max(0.48, -mvPosition.z);
-    if (uHaloMode > 0.5) {
-      size = fract(id * 61.7) < 0.22 ? size * 7.0 * uHaloBoost : 0.0;
-    }
+    size *= 1.0 + uFxSizeWave * 0.4 * sin(uTime * 1.9 + id * TAU);
     gl_PointSize = size;
     gl_Position = projectionMatrix * mvPosition;
   }
@@ -158,22 +176,15 @@ const buildRenderFragment = () => `
   uniform float uExposure;
   uniform float uSoft;
   uniform float uAlpha;
-  uniform float uHaloMode;
   varying vec3 vColor;
+  varying float vDepthA;
   void main() {
     vec2 point = gl_PointCoord - 0.5;
     float radius = length(point);
     if (radius > 0.5) discard;
-    float alpha;
-    if (uHaloMode > 0.5) {
-      float g = radius * 2.0;
-      alpha = exp(-g * g * 3.2) * uAlpha * 0.16;
-    } else {
-      float core = pow(1.0 - radius * 2.0, uSoft);
-      float skirt = exp(-radius * radius * 9.0) * 0.12;
-      alpha = (core + skirt) * uAlpha;
-    }
-    gl_FragColor = vec4(vColor * uExposure, alpha);
+    float core = pow(1.0 - radius * 2.0, uSoft);
+    float skirt = exp(-radius * radius * 9.0) * 0.12;
+    gl_FragColor = vec4(vColor * uExposure, (core + skirt) * uAlpha * vDepthA);
   }
 `;
 
@@ -541,10 +552,23 @@ class ParticleField {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
 
-    const renderPass = new RenderPass(this.scene, this.camera);
-    this.composer = new EffectComposer(this.renderer);
-    this.composer.addPass(renderPass);
-    this.composer.addPass(new OutputPass());
+    this.trailScene = new THREE.Scene();
+    this.trailCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.fadeMaterial = new THREE.ShaderMaterial({
+      vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }',
+      fragmentShader: 'uniform sampler2D tPrev; uniform float uPersist; varying vec2 vUv; void main() { gl_FragColor = vec4(texture2D(tPrev, vUv).rgb * uPersist, 1.0); }',
+      uniforms: { tPrev: { value: null }, uPersist: { value: 0.35 } },
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.fadeMaterial.toneMapped = false;
+    this.fadeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.fadeMaterial);
+    this.trailScene.add(this.fadeQuad);
+    this.displayMaterial = new THREE.MeshBasicMaterial({ map: null });
+    this.displayQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.displayMaterial);
+    this.displayScene = new THREE.Scene();
+    this.displayScene.add(this.displayQuad);
+    this.allocTrailTargets();
 
     this.simScene = new THREE.Scene();
     this.simCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -581,10 +605,7 @@ class ParticleField {
     this.particles = new THREE.Points(this.geometry, null);
     this.particles.frustumCulled = false;
     this.scene.add(this.particles);
-    this.haloParticles = new THREE.Points(this.geometry, null);
-    this.haloParticles.frustumCulled = false;
-    this.haloParticles.renderOrder = -1;
-    this.scene.add(this.haloParticles);
+
 
     this.setForm(FORM_INDEX.get('nebula'), '', { fromCenter: false, seedHash: sessionSalt });
 
@@ -641,17 +662,20 @@ class ParticleField {
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
         tNoise: { value: this.noiseTexture },
-        uHaloMode: { value: 0 },
-        uHaloBoost: { value: 1 },
+        tPrev: { value: null },
+        uIgnite: { value: 0 },
+        uHueShift: { value: 0 },
+        uFxTurb: { value: 0.15 },
+        uFxShimmer: { value: 0 },
+        uFxSizeWave: { value: 0 },
+        uFxFog: { value: 0 },
       },
       transparent: true,
       blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
       depthWrite: false,
     });
-    const haloMaterial = renderMaterial.clone();
-    haloMaterial.uniforms.uHaloMode.value = 1;
-    haloMaterial.blending = THREE.AdditiveBlending;
-    cached = { simMaterial, renderMaterial, haloMaterial, js };
+    renderMaterial.toneMapped = false;
+    cached = { simMaterial, renderMaterial, js };
     this.materialCache.set(formDef.slug, cached);
     return cached;
   }
@@ -702,14 +726,10 @@ class ParticleField {
     simMaterial.uniforms.tOrigin.value = this.origin;
     renderMaterial.uniforms.tPositions.value = this.targetA.texture;
     renderMaterial.uniforms.tOrigin.value = this.origin;
-    const { haloMaterial } = this.materialCache.get(formDef.slug);
-    haloMaterial.uniforms.tPositions.value = this.targetA.texture;
-    haloMaterial.uniforms.tOrigin.value = this.origin;
+    renderMaterial.uniforms.tPrev.value = this.targetB.texture;
     const heldPoints = this.particles.material;
-    const heldHalo = this.haloParticles.material;
     const heldQuad = this.simQuad.material;
     this.particles.material = renderMaterial;
-    this.haloParticles.material = haloMaterial;
     this.simQuad.material = simMaterial;
     try {
       if (this.renderer.compileAsync) {
@@ -732,7 +752,6 @@ class ParticleField {
     } finally {
       if (!this.disposed) {
         this.particles.material = heldPoints;
-        this.haloParticles.material = heldHalo;
         this.simQuad.material = heldQuad;
       }
     }
@@ -774,14 +793,36 @@ class ParticleField {
     this.simMaterial.uniforms.uSeed.value = ((seedHash >>> 0) % 997) * 0.37;
     this.renderMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
     this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * (js.size || 1);
-    this.haloMaterial = this.materialCache.get(formDef.slug).haloMaterial;
-    this.haloMaterial.uniforms.tOrigin.value = this.origin;
-    this.haloMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
-    this.haloMaterial.uniforms.uPointSize.value = this.renderMaterial.uniforms.uPointSize.value;
-    this.haloBoost = js.bloom || 1.2;
-    this.haloEligible = ((seedHash >>> 6) % 4) === 0;
+    const v1 = ((seedHash >>> 8) % 1000) / 1000;
+    const v2 = ((seedHash >>> 13) % 1000) / 1000;
+    const v3 = ((seedHash >>> 18) % 1000) / 1000;
+    const roll = (salt, chance) => ((Math.imul(seedHash ^ salt, 2654435761) >>> 0) % 1000) / 1000 < chance;
+    const fx = {
+      trails: roll(0x9e3779b9, 0.45),
+      ignite: roll(0x85ebca6b, 0.4),
+      hueDrift: roll(0xc2b2ae35, 0.3),
+      turb: roll(0x27d4eb2f, 0.35),
+      shimmer: roll(0x165667b1, 0.28),
+      fog: roll(0xd3a2646c, 0.3),
+      beat: roll(0xfd7046c5, 0.3),
+      sizeWave: roll(0xb55a4f09, 0.28),
+    };
+    if (!Object.values(fx).some(Boolean)) fx.turb = true;
+    this.effects = fx;
+    const ru2 = this.renderMaterial.uniforms;
+    this.baseHueShift = (v1 - 0.5) * 0.34;
+    this.hueDriftRate = fx.hueDrift ? 0.05 + v2 * 0.07 : 0;
+    ru2.uHueShift.value = this.baseHueShift;
+    ru2.uIgnite.value = fx.ignite ? (js.ignite ?? 1) : 0;
+    ru2.uFxTurb.value = fx.turb ? 0.3 + v3 * 0.25 : 0.12;
+    ru2.uFxShimmer.value = fx.shimmer ? 0.3 + v1 * 0.3 : 0;
+    ru2.uFxSizeWave.value = fx.sizeWave ? 0.5 + v2 * 0.5 : 0;
+    ru2.uFxFog.value = fx.fog ? 0.35 + v1 * 0.3 : 0;
+    this.beatTempo = fx.beat ? 1.2 + v3 * 1.8 : 0;
+    ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.88 + v2 * 0.28);
+    this.speedVariant = 0.86 + v3 * 0.3;
+    this.trailPersist = fx.trails ? Math.min(0.9, Math.max(0.35, (js.trail ?? 0.5) + (v2 - 0.5) * 0.14)) : 0.08;
     this.particles.material = this.renderMaterial;
-    this.haloParticles.material = this.haloMaterial;
 
     let prime = fromCenter ? preparedPrime : null;
     if (!prime) {
@@ -809,6 +850,23 @@ class ParticleField {
     this.animatedUntil = performance.now() + 4200;
   }
 
+  allocTrailTargets() {
+    const w = Math.max(2, Math.floor(window.innerWidth * this.baseDpr * this.renderScale));
+    const h = Math.max(2, Math.floor(window.innerHeight * this.baseDpr * this.renderScale));
+    const options = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    };
+    this.trailA?.dispose();
+    this.trailB?.dispose();
+    this.trailA = new THREE.WebGLRenderTarget(w, h, options);
+    this.trailB = new THREE.WebGLRenderTarget(w, h, options);
+  }
+
   basePointSize() {
     return window.innerWidth < 640 ? 3.8 : 4.4;
   }
@@ -826,7 +884,7 @@ class ParticleField {
     if (this.renderScale !== previous) {
       this.renderer.setPixelRatio(this.baseDpr * this.renderScale);
       this.renderer.setSize(window.innerWidth, window.innerHeight, false);
-      this.composer.setSize(window.innerWidth, window.innerHeight);
+      this.allocTrailTargets();
       if (this.renderMaterial) {
         const compensate = Math.pow(1 / this.renderScale, 0.5);
         const px = this.basePointSize() * ((this.formJs || {}).size || 1) * compensate;
@@ -909,7 +967,7 @@ class ParticleField {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
-    this.composer.setSize(window.innerWidth, window.innerHeight);
+    this.allocTrailTargets();
     if (this.renderMaterial) {
       this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * ((this.formJs || {}).size || 1);
     }
@@ -970,10 +1028,10 @@ class ParticleField {
       surge = Math.sin(surgePhase * Math.PI);
       exposure += surge * 0.95;
     }
-    const haloLevel = this.haloEligible ? Math.min(1.6, surge * 1.5) : 0;
+
 
     const su = this.simMaterial.uniforms;
-    su.uDt.value = dt;
+    su.uDt.value = dt * (this.speedVariant || 1);
     su.uTime.value = time;
     su.uEnergy.value = this.energyCurrent;
     su.uPointer.value.copy(this.pointer);
@@ -989,20 +1047,26 @@ class ParticleField {
     [this.targetA, this.targetB] = [this.targetB, this.targetA];
     const ru = this.renderMaterial.uniforms;
     ru.tPositions.value = this.targetA.texture;
+    ru.tPrev.value = this.targetB.texture;
     ru.uTime.value = time;
     ru.uPointer.value.copy(this.pointer);
     ru.uRelease.value = releaseForce;
+    if (this.hueDriftRate) ru.uHueShift.value = this.baseHueShift + time * this.hueDriftRate;
+    if (this.beatTempo) exposure += 0.12 * Math.sin(time * this.beatTempo);
     ru.uExposure.value = exposure;
-    if (this.haloMaterial) {
-      const hu = this.haloMaterial.uniforms;
-      hu.tPositions.value = this.targetA.texture;
-      hu.uTime.value = time;
-      hu.uPointer.value.copy(this.pointer);
-      hu.uExposure.value = exposure;
-      hu.uHaloBoost.value = (this.haloBoost || 1.2) * haloLevel;
-    }
+
+    const persist = Math.pow(this.trailPersist ?? 0.35, dt);
+    this.fadeMaterial.uniforms.tPrev.value = this.trailA.texture;
+    this.fadeMaterial.uniforms.uPersist.value = persist;
+    this.renderer.setRenderTarget(this.trailB);
+    this.renderer.render(this.trailScene, this.trailCamera);
+    this.renderer.autoClear = false;
+    this.renderer.render(this.scene, this.camera);
+    this.renderer.autoClear = true;
+    [this.trailA, this.trailB] = [this.trailB, this.trailA];
+    this.displayMaterial.map = this.trailA.texture;
     this.renderer.setRenderTarget(null);
-    this.composer.render();
+    this.renderer.render(this.displayScene, this.trailCamera);
     this.raf = requestAnimationFrame(this.frame);
   }
 
@@ -1014,10 +1078,9 @@ class ParticleField {
     window.removeEventListener('resize', this.resize);
     this.target.removeEventListener('webglcontextlost', this.contextLost);
     this.geometry?.dispose();
-    for (const { simMaterial, renderMaterial, haloMaterial } of this.materialCache.values()) {
+    for (const { simMaterial, renderMaterial } of this.materialCache.values()) {
       simMaterial.dispose();
       renderMaterial.dispose();
-      haloMaterial?.dispose();
     }
     this.materialCache.clear();
     this.origin?.dispose();
@@ -1025,7 +1088,8 @@ class ParticleField {
     this.targetA?.dispose();
     this.targetB?.dispose();
     this.warmTarget?.dispose();
-    this.composer?.dispose?.();
+    this.trailA?.dispose();
+    this.trailB?.dispose();
     this.renderer?.dispose();
   }
 }
@@ -1346,6 +1410,7 @@ window.entryExperience = Object.freeze({
   },
   lastForm: () => lastForm,
   lastRelease: () => lastRelease,
+  lastEffects: () => field?.effects || null,
   perf: () => field ? { frameMs: Math.round(field.frameEma || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0) } : null,
   force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
 });

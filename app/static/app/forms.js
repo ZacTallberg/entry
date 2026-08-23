@@ -28,7 +28,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(length(p.xy) * 0.24 + t * 0.05, vec3(0.44,0.50,0.62), vec3(0.28,0.30,0.38), vec3(1.0,1.0,1.0), vec3(0.0,0.08,0.18));
   }`,
-  js: { size: 0.9, soft: 1.9, alpha: 0.62, bloom: 1.05, blending: 'additive' },
+  js: { size: 0.9, soft: 1.9, alpha: 0.62, bloom: 1.05, blending: 'additive', trail: 0.55, ignite: 0.9 },
   envelope: { inhale: 0.42, exhale: 2.6, peak: 2.1 },
 });
 
@@ -45,7 +45,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(p.x * 0.12 + t * 0.03, vec3(0.22,0.44,0.56), vec3(0.16,0.30,0.34), vec3(1.0,1.0,1.0), vec3(0.55,0.42,0.30));
   }`,
-  js: { size: 0.85, soft: 1.7, alpha: 0.6, bloom: 1.0, blending: 'additive' },
+  js: { size: 0.85, soft: 1.7, alpha: 0.6, bloom: 1.0, blending: 'additive', trail: 0.7, ignite: 0.7 },
   envelope: { inhale: 0.5, exhale: 2.4, peak: 2.0 },
 });
 
@@ -61,7 +61,7 @@ form({
     float h = smoothstep(-1.4, 1.8, p.y);
     return mix(vec3(0.05, 0.55, 0.34), mix(vec3(0.18, 0.8, 0.52), vec3(0.62, 0.28, 0.72), h), h) * (0.7 + 0.3 * sin(p.x * 2.0 + t));
   }`,
-  js: { size: 1.3, soft: 2.4, alpha: 0.5, bloom: 1.5, blending: 'additive' },
+  js: { size: 1.3, soft: 2.4, alpha: 0.5, bloom: 1.5, blending: 'additive', trail: 0.8, ignite: 0.5 },
   envelope: { inhale: 0.55, exhale: 3.0, peak: 1.8 },
 });
 
@@ -78,7 +78,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(floor(id * 7.0) / 7.0 + t * 0.02, vec3(0.62,0.42,0.52), vec3(0.32,0.28,0.34), vec3(1.0,1.0,1.0), vec3(0.0,0.33,0.66));
   }`,
-  js: { size: 0.95, soft: 2.0, alpha: 0.58, bloom: 1.2, blending: 'additive' },
+  js: { size: 0.95, soft: 2.0, alpha: 0.58, bloom: 1.2, blending: 'additive', trail: 0.88, ignite: 0.8 },
   envelope: { inhale: 0.45, exhale: 2.5, peak: 2.0 },
 });
 
@@ -96,7 +96,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(length(p.xy) * 0.3 - t * 0.04, vec3(0.24,0.52,0.56), vec3(0.18,0.34,0.30), vec3(1.0,1.0,1.0), vec3(0.42,0.30,0.20));
   }`,
-  js: { size: 0.9, soft: 1.8, alpha: 0.6, bloom: 1.1, blending: 'additive' },
+  js: { size: 0.9, soft: 1.8, alpha: 0.6, bloom: 1.1, blending: 'additive', trail: 0.6, ignite: 0.6 },
   envelope: { inhale: 0.5, exhale: 2.3, peak: 1.9 },
 });
 
@@ -110,7 +110,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(length(p) * 0.22 + snoise(p * 0.8) * 0.15, vec3(0.28,0.22,0.42), vec3(0.26,0.20,0.28), vec3(1.0,1.0,1.0), vec3(0.85,0.60,0.35));
   }`,
-  js: { size: 1.0, soft: 1.6, alpha: 0.66, bloom: 1.35, blending: 'additive' },
+  js: { size: 1.0, soft: 1.6, alpha: 0.66, bloom: 1.35, blending: 'additive', trail: 0.5, ignite: 0.6 },
   envelope: { inhale: 0.48, exhale: 2.35, peak: 2.2 },
 });
 
@@ -129,7 +129,7 @@ form({
     float heat = 1.0 / (0.4 + length(p) * 0.5);
     return mix(vec3(0.35, 0.12, 0.4), vec3(1.0, 0.72, 0.4), clamp(heat, 0.0, 1.0));
   }`,
-  js: { size: 1.05, soft: 1.5, alpha: 0.7, bloom: 1.7, blending: 'additive' },
+  js: { size: 1.05, soft: 1.5, alpha: 0.7, bloom: 1.7, blending: 'additive', trail: 0.75, ignite: 1.5 },
   envelope: { inhale: 0.35, exhale: 2.8, peak: 2.6 },
 });
 
@@ -145,7 +145,7 @@ form({
     float arm = sin(atan(p.y, p.x) * 2.0 - length(p.xy) * 2.6);
     return mix(vec3(0.30, 0.30, 0.55), vec3(0.95, 0.85, 0.70), smoothstep(-0.2, 0.9, arm) * 0.7 + 0.15 / (0.2 + length(p.xy)));
   }`,
-  js: { size: 0.8, soft: 1.7, alpha: 0.45, bloom: 1.3, blending: 'additive' },
+  js: { size: 0.8, soft: 1.7, alpha: 0.45, bloom: 1.3, blending: 'additive', trail: 0.82, ignite: 0.8 },
   envelope: { inhale: 0.5, exhale: 2.6, peak: 2.0 },
 });
 
@@ -164,7 +164,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.55, 0.7, 1.0), vec3(1.0, 0.9, 0.7), id) * (0.75 + 0.25 * sin(t * 3.0 + p.x * 9.0));
   }`,
-  js: { size: 1.0, soft: 1.4, alpha: 0.7, bloom: 1.5, blending: 'additive' },
+  js: { size: 1.0, soft: 1.4, alpha: 0.7, bloom: 1.5, blending: 'additive', trail: 0.9, ignite: 1.4 },
   envelope: { inhale: 0.4, exhale: 2.2, peak: 2.3 },
 });
 
@@ -183,7 +183,7 @@ form({
     float r = length(p.xy);
     return mix(vec3(1.0, 0.62, 0.25), vec3(0.30, 0.20, 0.45), smoothstep(0.4, 2.6, r)) * (1.4 / (0.5 + r));
   }`,
-  js: { size: 0.95, soft: 1.6, alpha: 0.68, bloom: 1.6, blending: 'additive' },
+  js: { size: 0.95, soft: 1.6, alpha: 0.68, bloom: 1.6, blending: 'additive', trail: 0.85, ignite: 1.2 },
   envelope: { inhale: 0.6, exhale: 2.4, peak: 2.2 },
 });
 
@@ -203,7 +203,7 @@ form({
     float blink = smoothstep(0.55, 0.95, sin(t * (1.2 + id * 2.4) + id * TAU));
     return mix(vec3(0.05, 0.09, 0.05), vec3(0.98, 0.92, 0.4), blink);
   }`,
-  js: { size: 1.15, soft: 2.2, alpha: 0.8, bloom: 1.5, blending: 'additive' },
+  js: { size: 1.15, soft: 2.2, alpha: 0.8, bloom: 1.5, blending: 'additive', trail: 0.08, ignite: 0.5 },
   envelope: { inhale: 0.5, exhale: 2.6, peak: 1.8 },
 });
 
@@ -218,7 +218,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.9, 0.9, 0.85), vec3(1.0, 0.98, 0.9), id) * 0.9;
   }`,
-  js: { size: 0.85, soft: 2.6, alpha: 0.5, bloom: 1.0, blending: 'additive' },
+  js: { size: 0.85, soft: 2.6, alpha: 0.5, bloom: 1.0, blending: 'additive', trail: 0.3, ignite: 0.4 },
   envelope: { inhale: 0.7, exhale: 3.4, peak: 1.6 },
 });
 
@@ -239,7 +239,7 @@ form({
     float near = 1.0 / (0.4 + length(p - vec3(0.0, 0.3, 0.0)));
     return mix(vec3(0.35, 0.30, 0.28), vec3(1.0, 0.85, 0.55), clamp(near * 0.5, 0.0, 1.0));
   }`,
-  js: { size: 1.0, soft: 1.8, alpha: 0.64, bloom: 1.3, blending: 'additive' },
+  js: { size: 1.0, soft: 1.8, alpha: 0.64, bloom: 1.3, blending: 'additive', trail: 0.25, ignite: 0.7 },
   envelope: { inhale: 0.45, exhale: 2.4, peak: 2.0 },
 });
 
@@ -255,7 +255,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(id * 0.4 + 0.5, vec3(0.35,0.25,0.45), vec3(0.30,0.22,0.30), vec3(1.0,1.0,1.0), vec3(0.0,0.25,0.5)) * (0.8 + 0.3 * sin(t * 1.4));
   }`,
-  js: { size: 1.1, soft: 2.3, alpha: 0.55, bloom: 1.35, blending: 'additive' },
+  js: { size: 1.1, soft: 2.3, alpha: 0.55, bloom: 1.35, blending: 'additive', trail: 0.45, ignite: 0.5 },
   envelope: { inhale: 0.6, exhale: 2.8, peak: 1.8 },
 });
 
@@ -270,7 +270,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.75, 0.72, 0.62), vec3(0.45, 0.55, 0.42), snoise(p * 2.0)) * (0.55 + 0.2 * sin(t + p.x));
   }`,
-  js: { size: 0.7, soft: 1.5, alpha: 0.52, bloom: 0.9, blending: 'additive' },
+  js: { size: 0.7, soft: 1.5, alpha: 0.52, bloom: 0.9, blending: 'additive', trail: 0.65, ignite: 0.3 },
   envelope: { inhale: 0.55, exhale: 3.2, peak: 1.5 },
 });
 
@@ -288,7 +288,7 @@ form({
     float life = smoothstep(3.0, -1.6, p.y);
     return mix(vec3(1.0, 0.85, 0.45), vec3(0.55, 0.12, 0.05), 1.0 - life) * (0.6 + life);
   }`,
-  js: { size: 0.95, soft: 1.7, alpha: 0.75, bloom: 1.55, blending: 'additive' },
+  js: { size: 0.95, soft: 1.7, alpha: 0.75, bloom: 1.55, blending: 'additive', trail: 0.6, ignite: 1.2 },
   envelope: { inhale: 0.4, exhale: 2.4, peak: 2.2 },
 });
 
@@ -304,7 +304,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return vec3(0.85, 0.9, 1.0) * (0.55 + 0.45 * id);
   }`,
-  js: { size: 1.0, soft: 2.4, alpha: 0.6, bloom: 0.85, blending: 'additive' },
+  js: { size: 1.0, soft: 2.4, alpha: 0.6, bloom: 0.85, blending: 'additive', trail: 0.12, ignite: 0.2 },
   envelope: { inhale: 0.8, exhale: 3.6, peak: 1.4 },
 });
 
@@ -321,7 +321,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.35, 0.55, 0.75), vec3(0.75, 0.9, 1.0), smoothstep(-2.5, 2.5, p.y));
   }`,
-  js: { size: 0.8, soft: 1.3, alpha: 0.6, bloom: 1.1, blending: 'additive' },
+  js: { size: 0.8, soft: 1.3, alpha: 0.6, bloom: 1.1, blending: 'additive', trail: 0.55, ignite: 0.8 },
   envelope: { inhale: 0.45, exhale: 2.2, peak: 2.0 },
 });
 
@@ -337,7 +337,7 @@ form({
     float strike = step(0.86, fract(sin(floor(t * 1.6) * 91.7) * 437.5));
     return mix(vec3(0.58, 0.62, 0.82), vec3(0.9, 0.94, 1.0), strike) * (1.05 + strike * 1.4);
   }`,
-  js: { size: 0.85, soft: 1.4, alpha: 0.7, bloom: 1.8, blending: 'additive' },
+  js: { size: 0.85, soft: 1.4, alpha: 0.7, bloom: 1.8, blending: 'additive', trail: 0.78, ignite: 1.6 },
   envelope: { inhale: 0.3, exhale: 2.0, peak: 2.6 },
 });
 
@@ -355,7 +355,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.5, 0.68, 0.72), vec3(0.95, 0.98, 1.0), smoothstep(-1.0, 2.4, p.y));
   }`,
-  js: { size: 0.95, soft: 2.0, alpha: 0.6, bloom: 1.25, blending: 'additive' },
+  js: { size: 0.95, soft: 2.0, alpha: 0.6, bloom: 1.25, blending: 'additive', trail: 0.5, ignite: 1.1 },
   envelope: { inhale: 0.5, exhale: 2.5, peak: 2.1 },
 });
 
@@ -369,7 +369,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(dot(p, vec3(0.4)) + t * 0.02, vec3(0.55,0.62,0.70), vec3(0.25,0.25,0.30), vec3(1.0,1.0,1.0), vec3(0.0,0.1,0.2));
   }`,
-  js: { size: 0.85, soft: 1.5, alpha: 0.66, bloom: 1.15, blending: 'additive' },
+  js: { size: 0.85, soft: 1.5, alpha: 0.66, bloom: 1.15, blending: 'additive', trail: 0.15, ignite: 0.6 },
   envelope: { inhale: 0.4, exhale: 2.0, peak: 2.2 },
 });
 
@@ -386,7 +386,7 @@ form({
     float a = atan(p.y, p.x);
     return cosPal(a / TAU + length(p.xy) * 0.15, vec3(0.5,0.35,0.4), vec3(0.35,0.25,0.3), vec3(1.0,1.0,1.0), vec3(0.0,0.33,0.67));
   }`,
-  js: { size: 0.9, soft: 1.9, alpha: 0.62, bloom: 1.3, blending: 'additive' },
+  js: { size: 0.9, soft: 1.9, alpha: 0.62, bloom: 1.3, blending: 'additive', trail: 0.5, ignite: 0.5 },
   envelope: { inhale: 0.5, exhale: 2.6, peak: 1.9 },
 });
 
@@ -401,7 +401,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.85, 0.68, 0.25), vec3(0.45, 0.3, 0.5), smoothstep(0.2, 2.4, length(p.xy)));
   }`,
-  js: { size: 0.95, soft: 1.8, alpha: 0.66, bloom: 1.2, blending: 'additive' },
+  js: { size: 0.95, soft: 1.8, alpha: 0.66, bloom: 1.2, blending: 'additive', trail: 0.45, ignite: 0.5 },
   envelope: { inhale: 0.45, exhale: 2.4, peak: 2.0 },
 });
 
@@ -419,7 +419,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.45, 0.75, 0.85), vec3(0.9, 0.5, 0.8), 0.5 + 0.5 * sin(dot(p, vec3(1.4)) + t * 0.6));
   }`,
-  js: { size: 0.9, soft: 1.6, alpha: 0.64, bloom: 1.25, blending: 'additive' },
+  js: { size: 0.9, soft: 1.6, alpha: 0.64, bloom: 1.25, blending: 'additive', trail: 0.6, ignite: 0.7 },
   envelope: { inhale: 0.4, exhale: 2.2, peak: 2.1 },
 });
 
@@ -434,7 +434,7 @@ form({
     float weave = sin(p.x * 5.0 + t * 0.8) * sin(p.y * 5.0 - t * 0.6);
     return mix(vec3(0.65, 0.5, 0.35), vec3(0.35, 0.55, 0.65), 0.5 + 0.5 * weave);
   }`,
-  js: { size: 0.8, soft: 1.6, alpha: 0.6, bloom: 1.0, blending: 'additive' },
+  js: { size: 0.8, soft: 1.6, alpha: 0.6, bloom: 1.0, blending: 'additive', trail: 0.55, ignite: 0.4 },
   envelope: { inhale: 0.5, exhale: 2.4, peak: 1.8 },
 });
 
@@ -448,7 +448,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.9, 0.88, 0.82), vec3(0.65, 0.75, 1.0), id) * (0.85 + 0.15 * sin(t * 2.0 + p.x * 6.0));
   }`,
-  js: { size: 0.65, soft: 1.8, alpha: 0.3, bloom: 1.1, blending: 'additive' },
+  js: { size: 0.65, soft: 1.8, alpha: 0.3, bloom: 1.1, blending: 'additive', trail: 0.3, ignite: 0.5 },
   envelope: { inhale: 0.9, exhale: 3.2, peak: 2.4 },
 });
 
@@ -462,7 +462,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.85, 0.7, 0.4), vec3(0.7, 0.45, 0.3), id);
   }`,
-  js: { size: 0.7, soft: 1.9, alpha: 0.42, bloom: 1.0, blending: 'additive' },
+  js: { size: 0.7, soft: 1.9, alpha: 0.42, bloom: 1.0, blending: 'additive', trail: 0.5, ignite: 0.5 },
   envelope: { inhale: 1.1, exhale: 3.8, peak: 1.6 },
 });
 
@@ -479,7 +479,7 @@ form({
     float tw = 0.5 + 0.5 * sin(t * (2.0 + id * 6.0) + id * 40.0);
     return mix(vec3(0.38, 0.42, 0.62) * 0.85, vec3(1.0, 0.97, 0.88) * (1.0 + tw), star);
   }`,
-  js: { size: 0.9, soft: 2.1, alpha: 0.5, bloom: 1.3, blending: 'additive' },
+  js: { size: 0.9, soft: 2.1, alpha: 0.5, bloom: 1.3, blending: 'additive', trail: 0.2, ignite: 0.4 },
   envelope: { inhale: 1.0, exhale: 3.4, peak: 2.0 },
 });
 
@@ -493,7 +493,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.30, 0.36, 0.55), vec3(0.55, 0.62, 0.85), id * 0.7);
   }`,
-  js: { size: 0.95, soft: 1.5, alpha: 0.34, bloom: 0.95, blending: 'additive' },
+  js: { size: 0.95, soft: 1.5, alpha: 0.34, bloom: 0.95, blending: 'additive', trail: 0.7, ignite: 0.3 },
   envelope: { inhale: 0.8, exhale: 3.0, peak: 1.8 },
 });
 
@@ -509,7 +509,7 @@ form({
     float burn = smoothstep(0.0, 4.0, t * 0.5 - p.x - 2.0);
     return mix(vec3(0.88, 0.84, 0.75), vec3(1.0, 0.45, 0.12), clamp(burn * 1.4, 0.0, 1.0));
   }`,
-  js: { size: 0.7, soft: 1.7, alpha: 0.4, bloom: 1.25, blending: 'additive' },
+  js: { size: 0.7, soft: 1.7, alpha: 0.4, bloom: 1.25, blending: 'additive', trail: 0.65, ignite: 1.0 },
   envelope: { inhale: 0.9, exhale: 3.2, peak: 2.1 },
 });
 
@@ -525,7 +525,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(length(p.xy) * 0.3 + t * 0.03, vec3(0.72,0.45,0.66), vec3(0.40,0.34,0.40), vec3(1.0,1.0,1.0), vec3(0.0,0.25,0.5));
   }`,
-  js: { size: 1.05, soft: 1.5, alpha: 0.74, bloom: 1.5, blending: 'additive' },
+  js: { size: 1.05, soft: 1.5, alpha: 0.74, bloom: 1.5, blending: 'additive', trail: 0.86, ignite: 1.0 },
   envelope: { inhale: 0.5, exhale: 2.8, peak: 1.8 },
 });
 
@@ -540,7 +540,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(p.z * 0.4 + 0.3, vec3(0.3,0.5,0.45), vec3(0.25,0.3,0.3), vec3(1.0,1.0,1.0), vec3(0.15,0.4,0.6));
   }`,
-  js: { size: 0.8, soft: 1.6, alpha: 0.6, bloom: 1.3, blending: 'additive' },
+  js: { size: 0.8, soft: 1.6, alpha: 0.6, bloom: 1.3, blending: 'additive', trail: 0.86, ignite: 0.9 },
   envelope: { inhale: 0.5, exhale: 2.8, peak: 1.8 },
 });
 
@@ -555,7 +555,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(dot(sin(p * 2.2), vec3(0.33)) + 0.5, vec3(0.4,0.45,0.35), vec3(0.3,0.3,0.25), vec3(1.0,1.0,1.0), vec3(0.3,0.2,0.1));
   }`,
-  js: { size: 0.85, soft: 1.7, alpha: 0.62, bloom: 1.25, blending: 'additive' },
+  js: { size: 0.85, soft: 1.7, alpha: 0.62, bloom: 1.25, blending: 'additive', trail: 0.8, ignite: 0.8 },
   envelope: { inhale: 0.55, exhale: 3.0, peak: 1.7 },
 });
 
@@ -575,7 +575,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(p.z * 0.5 + t * 0.02, vec3(0.68,0.5,0.72), vec3(0.36,0.3,0.4), vec3(1.0,1.0,1.0), vec3(0.6,0.4,0.2));
   }`,
-  js: { size: 1.05, soft: 1.6, alpha: 0.74, bloom: 1.55, blending: 'additive' },
+  js: { size: 1.05, soft: 1.6, alpha: 0.74, bloom: 1.55, blending: 'additive', trail: 0.84, ignite: 1.0 },
   envelope: { inhale: 0.5, exhale: 2.8, peak: 1.8 },
 });
 
@@ -595,7 +595,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(length(p) * 0.35, vec3(0.35,0.5,0.55), vec3(0.28,0.3,0.32), vec3(1.0,1.0,1.0), vec3(0.5,0.35,0.15));
   }`,
-  js: { size: 0.8, soft: 1.6, alpha: 0.6, bloom: 1.35, blending: 'additive' },
+  js: { size: 0.8, soft: 1.6, alpha: 0.6, bloom: 1.35, blending: 'additive', trail: 0.86, ignite: 0.9 },
   envelope: { inhale: 0.5, exhale: 2.8, peak: 1.8 },
 });
 
@@ -612,7 +612,7 @@ form({
     float wave = sin(length(p.xy) * 7.0 - t * 2.2);
     return mix(vec3(0.15, 0.3, 0.42), vec3(0.6, 0.8, 0.92), 0.5 + 0.5 * wave) * 0.9;
   }`,
-  js: { size: 0.85, soft: 1.8, alpha: 0.6, bloom: 1.1, blending: 'additive' },
+  js: { size: 0.85, soft: 1.8, alpha: 0.6, bloom: 1.1, blending: 'additive', trail: 0.4, ignite: 0.5 },
   envelope: { inhale: 0.5, exhale: 2.6, peak: 1.9 },
 });
 
@@ -625,7 +625,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return vec3(0.55, 0.6, 0.68) * (0.5 + 0.3 * snoise(p * 0.8 + t * 0.05));
   }`,
-  js: { size: 2.2, soft: 3.2, alpha: 0.16, bloom: 0.7, blending: 'additive' },
+  js: { size: 2.2, soft: 3.2, alpha: 0.16, bloom: 0.7, blending: 'additive', trail: 0.75, ignite: 0.2 },
   envelope: { inhale: 0.9, exhale: 3.8, peak: 1.3 },
 });
 
@@ -643,7 +643,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.1, 0.35, 0.4), vec3(0.5, 0.85, 0.85), smoothstep(0.2, 2.2, length(p.xy)));
   }`,
-  js: { size: 0.9, soft: 1.7, alpha: 0.62, bloom: 1.2, blending: 'additive' },
+  js: { size: 0.9, soft: 1.7, alpha: 0.62, bloom: 1.2, blending: 'additive', trail: 0.8, ignite: 0.9 },
   envelope: { inhale: 0.6, exhale: 2.4, peak: 2.1 },
 });
 
@@ -658,7 +658,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return vec3(0.75, 0.8, 0.88) * (0.35 + 0.3 * max(sin(t * 0.45), 0.0));
   }`,
-  js: { size: 1.7, soft: 2.8, alpha: 0.22, bloom: 0.9, blending: 'additive' },
+  js: { size: 1.7, soft: 2.8, alpha: 0.22, bloom: 0.9, blending: 'additive', trail: 0.7, ignite: 0.3 },
   envelope: { inhale: 0.8, exhale: 3.4, peak: 1.5 },
 });
 
@@ -673,7 +673,7 @@ form({
     float node = abs(sin(p.x * 3.0));
     return mix(vec3(0.9, 0.85, 0.6), vec3(0.3, 0.5, 0.7), node);
   }`,
-  js: { size: 0.9, soft: 1.8, alpha: 0.6, bloom: 1.1, blending: 'additive' },
+  js: { size: 0.9, soft: 1.8, alpha: 0.6, bloom: 1.1, blending: 'additive', trail: 0.5, ignite: 0.6 },
   envelope: { inhale: 0.5, exhale: 2.5, peak: 1.9 },
 });
 
@@ -692,7 +692,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(floor(id * 5.0) / 5.0, vec3(0.55,0.45,0.35), vec3(0.3,0.28,0.25), vec3(1.0,1.0,1.0), vec3(0.0,0.2,0.4));
   }`,
-  js: { size: 0.85, soft: 1.7, alpha: 0.64, bloom: 1.2, blending: 'additive' },
+  js: { size: 0.85, soft: 1.7, alpha: 0.64, bloom: 1.2, blending: 'additive', trail: 0.7, ignite: 0.7 },
   envelope: { inhale: 0.5, exhale: 2.6, peak: 1.9 },
 });
 
@@ -707,7 +707,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(p.x * 0.14 + 0.5, vec3(0.5,0.4,0.5), vec3(0.35,0.3,0.3), vec3(1.0,1.0,1.0), vec3(0.0,0.33,0.67));
   }`,
-  js: { size: 1.0, soft: 1.9, alpha: 0.66, bloom: 1.2, blending: 'additive' },
+  js: { size: 1.0, soft: 1.9, alpha: 0.66, bloom: 1.2, blending: 'additive', trail: 0.6, ignite: 0.8 },
   envelope: { inhale: 0.45, exhale: 2.4, peak: 1.9 },
 });
 
@@ -726,7 +726,7 @@ form({
     float pole = smoothstep(2.4, 0.2, min(length(p - vec3(-1.1,0.0,0.0)), length(p - vec3(1.1,0.0,0.0))));
     return mix(vec3(0.35, 0.4, 0.55), vec3(1.0, 0.7, 0.5), pole);
   }`,
-  js: { size: 0.8, soft: 1.6, alpha: 0.6, bloom: 1.15, blending: 'additive' },
+  js: { size: 0.8, soft: 1.6, alpha: 0.6, bloom: 1.15, blending: 'additive', trail: 0.5, ignite: 0.6 },
   envelope: { inhale: 0.5, exhale: 2.5, peak: 1.9 },
 });
 
@@ -740,7 +740,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.4, 0.55, 0.6), vec3(0.95, 0.8, 0.55), smoothstep(-0.6, 0.8, p.z));
   }`,
-  js: { size: 0.85, soft: 1.7, alpha: 0.66, bloom: 1.1, blending: 'additive' },
+  js: { size: 0.85, soft: 1.7, alpha: 0.66, bloom: 1.1, blending: 'additive', trail: 0.3, ignite: 0.7 },
   envelope: { inhale: 0.4, exhale: 2.2, peak: 2.0 },
 });
 
@@ -758,7 +758,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(atan(p.y, p.x) / TAU + t * 0.02, vec3(0.45,0.38,0.55), vec3(0.3,0.28,0.35), vec3(1.0,1.0,1.0), vec3(0.1,0.35,0.6));
   }`,
-  js: { size: 0.9, soft: 1.7, alpha: 0.62, bloom: 1.25, blending: 'additive' },
+  js: { size: 0.9, soft: 1.7, alpha: 0.62, bloom: 1.25, blending: 'additive', trail: 0.8, ignite: 0.9 },
   envelope: { inhale: 0.5, exhale: 2.6, peak: 2.0 },
 });
 
@@ -772,7 +772,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return mix(vec3(0.04, 0.1, 0.16), vec3(0.25, 0.95, 0.85), clamp(glow, 0.04, 1.0));
   }`,
-  js: { size: 1.0, soft: 2.0, alpha: 0.6, bloom: 1.6, blending: 'additive', pointerGlow: true },
+  js: { size: 1.0, soft: 2.0, alpha: 0.6, bloom: 1.6, blending: 'additive', pointerGlow: true, trail: 0.6, ignite: 0.6 },
   envelope: { inhale: 0.5, exhale: 2.8, peak: 2.0 },
 });
 
@@ -790,7 +790,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(floor(id * 6.0) / 6.0, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1.0,1.0,1.0), vec3(0.0,0.33,0.67));
   }`,
-  js: { size: 0.85, soft: 1.6, alpha: 0.66, bloom: 1.5, blending: 'additive' },
+  js: { size: 0.85, soft: 1.6, alpha: 0.66, bloom: 1.5, blending: 'additive', trail: 0.75, ignite: 1.0 },
   envelope: { inhale: 0.45, exhale: 2.4, peak: 2.1 },
 });
 
@@ -806,7 +806,7 @@ form({
     float heat = smoothstep(2.2, -0.6, p.y) * smoothstep(1.2, 0.0, length(p.xz));
     return mix(vec3(0.2, 0.1, 0.12), mix(vec3(1.0, 0.55, 0.15), vec3(1.0, 0.9, 0.6), heat), clamp(heat * 1.6, 0.0, 1.0));
   }`,
-  js: { size: 1.0, soft: 2.0, alpha: 0.66, bloom: 1.5, blending: 'additive' },
+  js: { size: 1.0, soft: 2.0, alpha: 0.66, bloom: 1.5, blending: 'additive', trail: 0.45, ignite: 0.8 },
   envelope: { inhale: 0.55, exhale: 2.8, peak: 1.9 },
 });
 
@@ -822,7 +822,7 @@ form({
   color: `vec3 formColor(vec3 p, float t, float id, float glow) {
     return cosPal(id * 0.3 + 0.35, vec3(0.3,0.45,0.35), vec3(0.25,0.3,0.25), vec3(1.0,1.0,1.0), vec3(0.2,0.4,0.25)) * 1.1;
   }`,
-  js: { size: 1.1, soft: 2.2, alpha: 0.62, bloom: 1.55, blending: 'additive' },
+  js: { size: 1.1, soft: 2.2, alpha: 0.62, bloom: 1.55, blending: 'additive', trail: 0.72, ignite: 0.8 },
   envelope: { inhale: 0.5, exhale: 2.7, peak: 2.0 },
 });
 
@@ -843,7 +843,7 @@ form({
     float tw = 0.18 + 0.12 * sin(t * (2.0 + id * 5.0) + id * 40.0);
     return vec3(1.0, 0.92, 0.78) * mix(tw, 0.75 + 0.5 * id, alive);
   }`,
-  js: { size: 0.9, soft: 1.3, alpha: 0.75, bloom: 1.6, blending: 'additive' },
+  js: { size: 0.9, soft: 1.3, alpha: 0.75, bloom: 1.6, blending: 'additive', trail: 0.92, ignite: 1.6 },
   envelope: { inhale: 0.4, exhale: 2.2, peak: 2.3 },
 });
 
