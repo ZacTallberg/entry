@@ -6,6 +6,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app
+ARG GIT_REV=
+RUN if [ -n "$GIT_REV" ]; then printf '%s
+' "$GIT_REV" > /app/app/build_sha.txt; fi
 # Build the same hashed manifest that production resolves at request time; DEBUG would select the
 # non-manifest backend and leave every `{% static %}` reference broken after release.
 RUN DEBUG=0 SECRET_KEY=build python manage.py collectstatic --noinput
