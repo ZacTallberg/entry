@@ -6,3 +6,5 @@ PROJECT/.hub/
 PROJECT/state.json
 app/build_sha.txt
 .hub_write_token.local
+app/static/app/models/
+app/static/app/vendor/transformers/

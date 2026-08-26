@@ -101,6 +101,38 @@ def transcribe(request):
         _whisper_lock.release()
 
 
+# The transcription assets (models + WASM runtime, ~170MB) live on a persistent mount, not in
+# the image — builds stopped copying and hashing them (ADR 0007). Same URLs as before; WhiteNoise
+# passes unknown /static/ paths through to this view.
+_ASSETS_DIR = os.environ.get("ENTRY_ASSETS_DIR", "/app/assets")
+_ASSET_TYPES = {
+    ".onnx": "application/octet-stream",
+    ".wasm": "application/wasm",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+}
+
+
+@require_safe
+def serve_asset(request, kind, path):
+    from django.http import FileResponse, Http404
+    from django.utils._os import safe_join
+
+    try:
+        base = "models" if kind == "models" else os.path.join("vendor", "transformers")
+        full = safe_join(_ASSETS_DIR, base, path)
+    except ValueError:
+        raise Http404
+    if not os.path.isfile(full):
+        raise Http404
+    ctype = _ASSET_TYPES.get(os.path.splitext(full)[1].lower(), "application/octet-stream")
+    response = FileResponse(open(full, "rb"), content_type=ctype)
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    return response
+
+
 def _rotate_debug_log():
     try:
         if os.path.getsize(_DEBUG_LOG_PATH) <= _DEBUG_LOG_MAX_BYTES:
