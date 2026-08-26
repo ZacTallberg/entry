@@ -107,6 +107,22 @@ STORAGES = {
 }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# The on-device transcription assets (ONNX weights + WASM runtime) are large, immutable, and
+# fetched by their plain names — long cache lives on the directory as the version key, and
+# gzip-at-collectstatic is skipped for formats that barely compress.
+WHITENOISE_SKIP_COMPRESS_EXTENSIONS = [
+    "jpg", "jpeg", "png", "gif", "webp", "zip", "gz", "tgz", "bz2", "tbz", "xz", "br",
+    "swf", "flv", "woff", "woff2", "onnx", "wasm",
+]
+
+
+def _immutable_asset_headers(headers, path, url):
+    if "/app/models/" in url or "/app/vendor/transformers/" in url:
+        headers["Cache-Control"] = "public, max-age=31536000, immutable"
+
+
+WHITENOISE_ADD_HEADERS_FUNCTION = _immutable_asset_headers
+
 # Token for hub writes (X-Write-Token). Public reads, token-gated writes (keeps a public Plot safe).
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
 

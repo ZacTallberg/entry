@@ -905,20 +905,29 @@ class ParticleField {
       ring: roll(0x2545f491, 0.4),
     };
     if (!Object.values(fx).some(Boolean)) fx.turb = true;
+    const cosmeticDropOrder = ['beat', 'sizeWave', 'shimmer', 'fog', 'turb', 'hueDrift', 'ignite'];
+    let activeCount = Object.values(fx).filter(Boolean).length;
+    for (const k of cosmeticDropOrder) {
+      if (activeCount <= 3) break;
+      if (fx[k]) {
+        fx[k] = false;
+        activeCount -= 1;
+      }
+    }
     this.effects = fx;
     const ru2 = this.renderMaterial.uniforms;
     this.baseHueShift = (v1 - 0.5) * 0.34;
-    this.hueDriftRate = fx.hueDrift ? 0.05 + v2 * 0.07 : 0;
+    this.hueDriftRate = fx.hueDrift ? 0.04 + v2 * 0.05 : 0;
     ru2.uHueShift.value = this.baseHueShift;
     ru2.uIgnite.value = fx.ignite ? (js.ignite ?? 1) : 0;
-    ru2.uFxTurb.value = fx.turb ? 0.3 + v3 * 0.25 : 0.12;
-    ru2.uFxShimmer.value = fx.shimmer ? 0.3 + v1 * 0.3 : 0;
-    ru2.uFxSizeWave.value = fx.sizeWave ? 0.5 + v2 * 0.5 : 0;
+    ru2.uFxTurb.value = fx.turb ? 0.22 + v3 * 0.2 : 0.1;
+    ru2.uFxShimmer.value = fx.shimmer ? 0.22 + v1 * 0.25 : 0;
+    ru2.uFxSizeWave.value = fx.sizeWave ? 0.35 + v2 * 0.35 : 0;
     ru2.uFxFog.value = fx.fog ? 0.35 + v1 * 0.3 : 0;
-    this.beatTempo = fx.beat ? 1.2 + v3 * 1.8 : 0;
+    this.beatTempo = fx.beat ? 0.6 + v3 * 0.8 : 0;
     ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.88 + v2 * 0.28);
-    this.speedVariant = 0.86 + v3 * 0.3;
-    this.timeScale = 0.75 + (((seedHash >>> 11) % 1000) / 1000) * 0.6;
+    this.speedVariant = 0.78 + v3 * 0.24;
+    this.timeScale = 0.62 + (((seedHash >>> 11) % 1000) / 1000) * 0.38;
     const nOff = new THREE.Vector3(v1 * 16, v2 * 16, v3 * 16);
     this.simMaterial.uniforms.uNoiseOff.value.copy(nOff);
     this.renderMaterial.uniforms.uNoiseOff.value.copy(nOff);
@@ -929,8 +938,8 @@ class ParticleField {
     this.densityActive = fx.dense;
     if (fx.dense) {
       const mode = (Math.imul(seedHash ^ 0x94d049bb, 2246822519) >>> 0) % 3;
-      su2.uDenseForce.value = mode === 0 ? -(0.5 + v1 * 0.7) : mode === 1 ? 0.4 + v3 * 0.6 : (v2 - 0.5) * 0.5;
-      su2.uDenseSwirl.value = mode === 2 ? (v1 < 0.5 ? -1 : 1) * (0.6 + v3 * 0.7) : 0;
+      su2.uDenseForce.value = mode === 0 ? -(0.42 + v1 * 0.6) : mode === 1 ? 0.35 + v3 * 0.5 : (v2 - 0.5) * 0.4;
+      su2.uDenseSwirl.value = mode === 2 ? (v1 < 0.5 ? -1 : 1) * (0.5 + v3 * 0.6) : 0;
       su2.tDensity.value = this.densityRT.texture;
     } else {
       su2.uDenseForce.value = 0;
@@ -1143,7 +1152,7 @@ class ParticleField {
 
     this.energyCurrent = (this.energyCurrent ?? 0.5) + ((this.energyTarget ?? 0.5) - (this.energyCurrent ?? 0.5)) * 0.06;
     this.exposurePop = (this.exposurePop || 0) * Math.pow(0.86, dt);
-    let exposure = 1.45 + this.exposurePop;
+    let exposure = 1.56 + this.exposurePop;
     if (this.voiceLevel > 0.012) {
       this.energyCurrent = Math.min(1.6, this.energyCurrent + this.voiceLevel * 2.4);
       exposure += Math.min(0.55, this.voiceLevel * 1.8);
@@ -1177,7 +1186,7 @@ class ParticleField {
       const ringT = (now - this.releaseStarted) / 1000 - this.envelope.inhale;
       if (ringT > 0) {
         su.uRingR.value = ringT * 3.4;
-        su.uRingAmp.value = Math.max(0, 1 - ringT * 0.5) * (this.releaseEnergy || 1) * 1.7;
+        su.uRingAmp.value = Math.max(0, 1 - ringT * 0.5) * (this.releaseEnergy || 1) * 1.25;
       }
     } else if (su.uRingAmp.value > 0) {
       su.uRingAmp.value = 0;
@@ -1511,54 +1520,154 @@ text.addEventListener('keydown', (event) => {
 });
 releaseButton.addEventListener('click', beginRelease);
 
-// ── voice: speak into the dark (browser-native recognition; text joins the typing pipeline) ──────
+// ── voice: speak into the dark. Transcription is a local model in a worker — the audio never
+// leaves the page, exactly as the front door promises. One mic stream feeds both the field's
+// amplitude reactivity and the transcriber; chunks cut on natural pauses.
 const speakButton = document.getElementById('speak');
-const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognizer = null;
 let listening = false;
 let voiceBase = '';
+let sttWorker = null;
+let sttReady = false;
+let sttFailed = false;
+let voiceCapture = null;
+let chunkBuf = [];
+let chunkLen = 0;
+let voicedLen = 0;
+let silenceLen = 0;
+let pendingChunks = 0;
 
-let voiceAudio = null;
+const VOICE_GATE = 0.012;
 
-async function startVoiceMeter() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    if (!listening) { stream.getTracks().forEach((t) => t.stop()); return; }
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 512;
-    ctx.createMediaStreamSource(stream).connect(analyser);
-    const bins = new Uint8Array(analyser.fftSize);
-    voiceAudio = { stream, ctx, analyser, bins, raf: 0 };
-    const meter = () => {
-      if (!voiceAudio) return;
-      analyser.getByteTimeDomainData(bins);
-      let sum = 0;
-      for (let i = 0; i < bins.length; i += 1) {
-        const d = (bins[i] - 128) / 128;
-        sum += d * d;
+function ensureSttWorker() {
+  if (sttWorker || sttFailed) return;
+  sttWorker = new Worker(new URL('./stt-worker.js', import.meta.url), { type: 'module' });
+  sttWorker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.t === 'progress') {
+      speakButton.style.setProperty('--stt-pct', String(Math.round(msg.pct * 100)));
+      speakButton.dataset.loading = 'true';
+    } else if (msg.t === 'ready') {
+      sttReady = true;
+      speakButton.dataset.loading = 'false';
+    } else if (msg.t === 'text') {
+      pendingChunks = Math.max(0, pendingChunks - 1);
+      if (!pendingChunks) speakButton.dataset.busy = 'false';
+      if (msg.text && !locked) feedVoice(msg.text, true);
+    } else if (msg.t === 'error') {
+      pendingChunks = Math.max(0, pendingChunks - 1);
+      if (!sttReady) {
+        sttFailed = true;
+        stopListening();
+        speakButton.hidden = true;
       }
-      field?.setVoiceLevel(Math.sqrt(sum / bins.length));
-      voiceAudio.raf = requestAnimationFrame(meter);
-    };
-    meter();
-  } catch (_e) {}
+    }
+  };
+  sttWorker.onerror = () => {
+    sttFailed = true;
+    stopListening();
+    speakButton.hidden = true;
+  };
+  sttWorker.postMessage({ t: 'init' });
 }
 
-function stopVoiceMeter() {
-  if (!voiceAudio) return;
-  cancelAnimationFrame(voiceAudio.raf);
-  voiceAudio.stream.getTracks().forEach((t) => t.stop());
-  voiceAudio.ctx.close().catch(() => {});
-  voiceAudio = null;
-  if (field) field.voiceLevel = 0;
+function resampleTo16k(samples, fromRate) {
+  if (fromRate === 16000) return samples;
+  const outLen = Math.floor(samples.length * 16000 / fromRate);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i += 1) {
+    const src = i * fromRate / 16000;
+    const lo = Math.floor(src);
+    const frac = src - lo;
+    out[i] = samples[lo] * (1 - frac) + (samples[Math.min(lo + 1, samples.length - 1)] || 0) * frac;
+  }
+  return out;
+}
+
+function resetChunker() {
+  chunkBuf = [];
+  chunkLen = 0;
+  voicedLen = 0;
+  silenceLen = 0;
+}
+
+function flushChunk() {
+  const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
+  const minVoiced = rate * 0.4;
+  if (voicedLen < minVoiced || !sttWorker) {
+    resetChunker();
+    return;
+  }
+  const all = new Float32Array(chunkLen);
+  let offset = 0;
+  for (const f of chunkBuf) {
+    all.set(f, offset);
+    offset += f.length;
+  }
+  resetChunker();
+  const samples = resampleTo16k(all, rate);
+  pendingChunks += 1;
+  speakButton.dataset.busy = 'true';
+  sttWorker.postMessage({ t: 'audio', samples, id: pendingChunks }, [samples.buffer]);
+}
+
+function onVoiceFrame(frame) {
+  let sum = 0;
+  for (let i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
+  const rms = Math.sqrt(sum / frame.length);
+  field?.setVoiceLevel(rms * 2.2);
+  const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
+  chunkBuf.push(frame);
+  chunkLen += frame.length;
+  if (rms > VOICE_GATE) {
+    voicedLen += frame.length;
+    silenceLen = 0;
+  } else {
+    silenceLen += frame.length;
+  }
+  if (!voicedLen && chunkLen > rate * 2) {
+    while (chunkLen > rate * 0.75 && chunkBuf.length > 1) chunkLen -= chunkBuf.shift().length;
+  } else if ((voicedLen > rate * 0.4 && silenceLen > rate * 0.7) || chunkLen > rate * 10) {
+    flushChunk();
+  }
+}
+
+async function startCapture() {
+  let ctx;
+  try {
+    ctx = new AudioContext({ sampleRate: 16000 });
+  } catch (_e) {
+    ctx = new AudioContext();
+  }
+  await ctx.audioWorklet.addModule(new URL('./capture-worklet.js', import.meta.url));
+  const node = new AudioWorkletNode(ctx, 'capture');
+  node.port.onmessage = (e) => { if (listening) onVoiceFrame(e.data); };
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  node.connect(mute).connect(ctx.destination);
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  if (!listening) {
+    stream.getTracks().forEach((t) => t.stop());
+    ctx.close().catch(() => {});
+    return;
+  }
+  ctx.createMediaStreamSource(stream).connect(node);
+  voiceCapture = { stream, ctx, node };
 }
 
 function stopListening() {
+  const wasListening = listening;
   listening = false;
   speakButton.dataset.listening = 'false';
-  try { recognizer?.stop(); } catch (_e) {}
-  stopVoiceMeter();
+  if (voiceCapture) {
+    if (wasListening) flushChunk();
+    voiceCapture.stream.getTracks().forEach((t) => t.stop());
+    voiceCapture.ctx.close().catch(() => {});
+    voiceCapture = null;
+  }
+  resetChunker();
+  if (field) field.voiceLevel = 0;
 }
 
 function feedVoice(transcript, isFinal) {
@@ -1570,37 +1679,17 @@ function feedVoice(transcript, isFinal) {
   if (isFinal) voiceBase = joined.endsWith(' ') ? joined : joined + ' ';
 }
 
-if (Recognition && speakButton) {
+if (speakButton && navigator.mediaDevices && window.Worker && window.AudioWorkletNode) {
   speakButton.hidden = false;
-  speakButton.addEventListener('click', () => {
-    if (locked) return;
+  speakButton.addEventListener('click', async () => {
+    if (locked || sttFailed) return;
     if (listening) { stopListening(); return; }
-    recognizer = new Recognition();
-    recognizer.lang = navigator.language || 'en-US';
-    recognizer.continuous = true;
-    recognizer.interimResults = true;
+    listening = true;
+    speakButton.dataset.listening = 'true';
     voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
-    recognizer.onresult = (event) => {
-      let interim = '';
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const chunk = event.results[i][0].transcript;
-        if (event.results[i].isFinal) {
-          voiceBase = (voiceBase + chunk).slice(0, 360);
-          voiceBase = voiceBase.endsWith(' ') ? voiceBase : voiceBase + ' ';
-          feedVoice('', true);
-        } else {
-          interim += chunk;
-        }
-      }
-      if (interim) feedVoice(interim, false);
-    };
-    recognizer.onend = stopListening;
-    recognizer.onerror = stopListening;
+    ensureSttWorker();
     try {
-      recognizer.start();
-      listening = true;
-      speakButton.dataset.listening = 'true';
-      startVoiceMeter();
+      await startCapture();
     } catch (_e) {
       stopListening();
     }

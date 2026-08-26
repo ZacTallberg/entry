@@ -1,3 +1,7 @@
 *.md export-ignore
 deploy.sh export-ignore
 spinup.sh export-ignore
+*.onnx binary
+*.wasm binary
+app/static/app/models/** -text
+app/static/app/vendor/transformers/** -text

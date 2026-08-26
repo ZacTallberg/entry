@@ -518,6 +518,13 @@ body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
   background: rgba(226, 234, 255, .95);
   animation: speak-breathe 1.5s ease-in-out infinite;
 }
+#speak[data-loading="true"] {
+  background:
+    conic-gradient(rgba(174, 188, 226, .4) calc(var(--stt-pct, 0) * 1%), rgba(10, 12, 22, .5) 0);
+}
+#speak[data-busy="true"] .speak-dot {
+  animation: speak-breathe .7s ease-in-out infinite;
+}
 @keyframes speak-breathe {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.7); }

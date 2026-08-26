@@ -10,8 +10,9 @@ from .context import _sha
 def _security_headers(response, nonce):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        f"script-src 'self' 'nonce-{nonce}'; "
-        "style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; "
+        f"script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; "
+        "style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
+        "worker-src 'self'; "
         "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
     response.headers["Permissions-Policy"] = (
