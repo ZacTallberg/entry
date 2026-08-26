@@ -1585,14 +1585,17 @@ let pendingChunks = 0;
 let noiseFloor = 0.004;
 let statSamples = 0;
 let statPeak = 0;
+let lastInterimAt = 0;
 
 const assetVersion = encodeURIComponent(((document.querySelector('meta[name=build]') || {}).content || 'v0').slice(0, 24));
+
+let sttWasmForced = true;
 
 function ensureSttWorker() {
   if (sttWorker || sttFailed) return;
   const sttStarted = performance.now();
   let lastPct = 0;
-  diag('stt-init');
+  diag('stt-init', { wasm: sttWasmForced });
   sttWorker = new Worker(new URL('./stt-worker.js?v=' + assetVersion, import.meta.url), { type: 'module' });
   sttWorker.onmessage = (e) => {
     const msg = e.data;
@@ -1607,13 +1610,16 @@ function ensureSttWorker() {
       sttReady = true;
       speakButton.dataset.loading = 'false';
       diag('stt-ready', { device: msg.device || '?', sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
-    } else if (msg.t === 'text') {
-      pendingChunks = Math.max(0, pendingChunks - 1);
-      if (!pendingChunks) speakButton.dataset.busy = 'false';
-      diag('stt-text', { chars: (msg.text || '').length });
-      if (msg.text && !locked) feedVoice(msg.text, true);
+    } else if (msg.t === 'interim') {
+      if (msg.gen === bufferGen && listening && !locked && msg.text) feedVoice(msg.text, false);
+      diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length });
+    } else if (msg.t === 'final') {
+      window.clearTimeout(wedgeTimer);
+      settleChunk();
+      diag('stt-final', { ms: msg.ms, chars: (msg.text || '').length });
+      applyFinal(msg.id, msg.text, 'tiny');
     } else if (msg.t === 'error') {
-      pendingChunks = Math.max(0, pendingChunks - 1);
+      if (msg.mode !== 'interim' && msg.mode !== 'refine') settleChunk();
       diag('stt-error', { msg: String(msg.message || '').slice(0, 250), fatal: !sttReady });
       if (!sttReady) {
         sttFailed = true;
@@ -1625,10 +1631,31 @@ function ensureSttWorker() {
   sttWorker.onerror = (e) => {
     diag('stt-worker-crash', { msg: String((e && e.message) || 'worker error').slice(0, 250) });
     sttFailed = true;
+    pendingChunks = 0;
+    speakButton.dataset.busy = 'false';
     stopListening();
     speakButton.hidden = !serverSttOk;
   };
-  sttWorker.postMessage({ t: 'init' });
+  sttWorker.postMessage({ t: 'init', model: 'moonshine-tiny-ONNX', forceWasm: sttWasmForced });
+}
+
+let wedgeTimer = 0;
+
+function armWedgeWatchdog(id, samplesCopy) {
+  window.clearTimeout(wedgeTimer);
+  wedgeTimer = window.setTimeout(() => {
+    const st = chunkStates.get(id);
+    if (!st || st.applied || sttWasmForced) return;
+    diag('stt-wedge', { id });
+    sttWasmForced = true;
+    sttReady = false;
+    try { sttWorker.terminate(); } catch (_e) {}
+    sttWorker = null;
+    ensureSttWorker();
+    if (sttWorker && samplesCopy) {
+      sttWorker.postMessage({ t: 'audio', mode: 'final', id, samples: samplesCopy }, [samplesCopy.buffer]);
+    }
+  }, 6000);
 }
 
 function resampleTo16k(samples, fromRate) {
@@ -1651,70 +1678,107 @@ function resetChunker() {
   silenceLen = 0;
 }
 
-function flushChunk() {
+function collectSamples() {
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
-  const minVoiced = rate * 0.4;
-  if (voicedLen < minVoiced) {
-    resetChunker();
-    return;
-  }
   const all = new Float32Array(chunkLen);
   let offset = 0;
   for (const f of chunkBuf) {
     all.set(f, offset);
     offset += f.length;
   }
+  return resampleTo16k(all, rate);
+}
+
+function flushChunk() {
+  const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
+  if (voicedLen < rate * 0.35) {
+    resetChunker();
+    return;
+  }
+  const samples = collectSamples();
   resetChunker();
-  const samples = resampleTo16k(all, rate);
+  bufferGen += 1;
+  chunkSeq += 1;
+  const id = chunkSeq;
+  chunkStates.set(id, { applied: false, baseBefore: '', snapshot: '', finalText: '' });
+  chunkStates.delete(id - 8);
+  pendingChunks += 1;
+  speakButton.dataset.busy = 'true';
   diag('chunk', { sec: Math.round(samples.length / 1600) / 10 });
-  transcribeChunk(samples);
+  const serverCopy = serverSttOk ? samples.slice(0) : null;
+  ensureSttWorker();
+  if (sttWorker && !sttFailed) {
+    const wedgeCopy = sttWasmForced ? null : samples.slice(0);
+    sttWorker.postMessage({ t: 'audio', mode: 'final', id, samples }, [samples.buffer]);
+    armWedgeWatchdog(id, wedgeCopy);
+  } else if (!serverCopy) {
+    settleChunk();
+  }
+  if (serverCopy) refineViaServer(id, serverCopy, !sttWorker || sttFailed);
 }
 
 let serverSttOk = true;
+let bufferGen = 0;
+let chunkSeq = 0;
+const chunkStates = new Map();
 
 function settleChunk() {
   pendingChunks = Math.max(0, pendingChunks - 1);
   if (!pendingChunks) speakButton.dataset.busy = 'false';
 }
 
-async function transcribeChunk(samples) {
-  pendingChunks += 1;
-  speakButton.dataset.busy = 'true';
-  if (serverSttOk) {
-    const t0 = performance.now();
-    try {
-      const ctrl = new AbortController();
-      const timer = window.setTimeout(() => ctrl.abort(), 25000);
-      const res = await fetch('/api/transcribe', {
-        method: 'POST',
-        body: samples.buffer,
-        headers: { 'Content-Type': 'application/octet-stream' },
-        signal: ctrl.signal,
-      });
-      window.clearTimeout(timer);
-      if (!res.ok) throw new Error('http ' + res.status);
-      const data = await res.json();
-      const ms = Math.round(performance.now() - t0);
-      diag('stt-server', { ms, chars: (data.text || '').length });
+function applyFinal(id, transcript, src) {
+  const st = chunkStates.get(id);
+  if (!st || st.applied) return;
+  st.applied = true;
+  if (locked || !transcript) return;
+  st.baseBefore = voiceBase;
+  feedVoice(transcript, true);
+  st.finalText = transcript;
+  st.snapshot = text.value;
+}
+
+function maybeRefine(id, refined, src, ms) {
+  const st = chunkStates.get(id);
+  if (!st || !st.applied || locked || !refined) return;
+  const applies = st.finalText && refined !== st.finalText && text.value === st.snapshot;
+  diag('stt-refine', { src, ms: ms || 0, applied: !!applies });
+  if (!applies) return;
+  text.value = (st.baseBefore + refined).slice(0, 360);
+  voiceBase = text.value.endsWith(' ') ? text.value : text.value + ' ';
+  st.finalText = refined;
+  st.snapshot = text.value;
+  onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' }));
+}
+
+async function refineViaServer(id, samples, isPrimary) {
+  const t0 = performance.now();
+  try {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), isPrimary ? 32000 : 8000);
+    const res = await fetch('/api/transcribe', {
+      method: 'POST',
+      body: samples.buffer,
+      headers: { 'Content-Type': 'application/octet-stream' },
+      signal: ctrl.signal,
+    });
+    window.clearTimeout(timer);
+    if (!res.ok) throw new Error('http ' + res.status);
+    const data = await res.json();
+    const ms = Math.round(performance.now() - t0);
+    const st = chunkStates.get(id);
+    if (isPrimary || (st && !st.applied)) {
+      diag('stt-server', { ms, chars: (data.text || '').length, primary: true });
       settleChunk();
-      if (data.text && !locked) feedVoice(data.text, true);
-      if (ms > 9000) {
-        serverSttOk = false;
-        diag('stt-server-demoted', { ms });
-        ensureSttWorker();
-      }
-      return;
-    } catch (err) {
-      serverSttOk = false;
-      diag('stt-server-fail', { msg: String((err && err.message) || err).slice(0, 120) });
+      applyFinal(id, data.text, 'server');
+    } else {
+      maybeRefine(id, data.text, 'server', ms);
     }
+  } catch (err) {
+    serverSttOk = false;
+    diag('stt-server-fail', { msg: String((err && err.message) || err).slice(0, 120) });
+    if (isPrimary) settleChunk();
   }
-  ensureSttWorker();
-  if (!sttWorker || sttFailed) {
-    settleChunk();
-    return;
-  }
-  sttWorker.postMessage({ t: 'audio', samples, id: pendingChunks }, [samples.buffer]);
 }
 
 function onVoiceFrame(frame) {
@@ -1746,8 +1810,14 @@ function onVoiceFrame(frame) {
   }
   if (!voicedLen && chunkLen > rate * 2) {
     while (chunkLen > rate * 0.75 && chunkBuf.length > 1) chunkLen -= chunkBuf.shift().length;
-  } else if ((voicedLen > rate * 0.4 && silenceLen > rate * 0.7) || chunkLen > rate * 10) {
+  } else if ((voicedLen > rate * 0.35 && silenceLen > rate * 0.45) || chunkLen > rate * 10) {
     flushChunk();
+  } else if (
+    sttReady && sttWorker && voicedLen > rate * 0.5 && silenceLen < rate * 0.3
+    && performance.now() - lastInterimAt > 1200
+  ) {
+    lastInterimAt = performance.now();
+    sttWorker.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
   }
 }
 
@@ -1809,6 +1879,13 @@ function feedVoice(transcript, isFinal) {
 
 if (speakButton && navigator.mediaDevices && window.Worker && window.AudioWorkletNode) {
   speakButton.hidden = false;
+  const conn = navigator.connection;
+  if (!(conn && (conn.saveData || /2g/.test(conn.effectiveType || '')))) {
+    const preload = () => { if (!sttWorker && !sttFailed) ensureSttWorker(); };
+    if ('requestIdleCallback' in window) window.requestIdleCallback(preload, { timeout: 6000 });
+    else window.setTimeout(preload, 3500);
+    text.addEventListener('focus', preload, { once: true });
+  }
   speakButton.addEventListener('click', async () => {
     if (locked || (sttFailed && !serverSttOk)) return;
     if (listening) { stopListening(); return; }

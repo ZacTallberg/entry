@@ -5,9 +5,15 @@ env.allowLocalModels = true;
 env.localModelPath = '/static/app/models/';
 env.backends.onnx.wasm.wasmPaths = '/static/app/vendor/transformers/';
 
+// ONE model per worker. Two models sharing a WebGPU runtime instance wedged silently —
+// decodes never returned while a second set of sessions existed. The page spawns a
+// second worker for the refiner instead; isolation is the fix, not scheduling.
+let modelId = 'moonshine-tiny-ONNX';
 let asr = null;
-let loading = false;
-const queued = [];
+let device = null;
+let booting = false;
+let busy = false;
+const queue = [];
 
 const progress = {};
 function reportProgress(p) {
@@ -22,48 +28,71 @@ function reportProgress(p) {
   postMessage({ t: 'progress', pct: Math.min(0.99, loaded / total) });
 }
 
-async function ensurePipeline() {
-  if (asr || loading) return;
-  loading = true;
-  const opts = {
-    dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
-    progress_callback: reportProgress,
-  };
-  let device = 'webgpu';
+let forceWasm = false;
+
+async function boot() {
+  if (asr || booting) return;
+  booting = true;
   try {
     try {
-      asr = await pipeline('automatic-speech-recognition', 'moonshine-base-ONNX', { ...opts, device: 'webgpu' });
+      if (forceWasm) throw new Error('wasm forced');
+      asr = await pipeline('automatic-speech-recognition', modelId, {
+        dtype: { encoder_model: 'q8', decoder_model_merged: 'q4' },
+        progress_callback: reportProgress,
+        device: 'webgpu',
+      });
+      device = 'webgpu';
     } catch (_gpuErr) {
+      asr = await pipeline('automatic-speech-recognition', modelId, {
+        dtype: { encoder_model: 'q8', decoder_model_merged: 'q4' },
+        device: 'wasm',
+      });
       device = 'wasm';
-      asr = await pipeline('automatic-speech-recognition', 'moonshine-base-ONNX', { ...opts, device: 'wasm' });
     }
-    postMessage({ t: 'ready', device });
-    while (queued.length) transcribe(queued.shift());
+    postMessage({ t: 'ready', device, model: modelId });
+    work();
   } catch (err) {
     postMessage({ t: 'error', message: String((err && err.message) || err) });
   } finally {
-    loading = false;
+    booting = false;
   }
 }
 
-async function transcribe(msg) {
+async function work() {
+  if (busy || !asr) return;
+  busy = true;
   try {
-    const out = await asr(msg.samples);
-    postMessage({ t: 'text', text: (out.text || '').trim(), id: msg.id });
-  } catch (err) {
-    postMessage({ t: 'error', message: String((err && err.message) || err), id: msg.id });
+    while (queue.length) {
+      const job = queue.shift();
+      try {
+        const t0 = performance.now();
+        const out = await asr(job.samples);
+        postMessage({
+          t: job.mode,
+          text: (out.text || '').trim(),
+          id: job.id,
+          gen: job.gen,
+          ms: Math.round(performance.now() - t0),
+        });
+      } catch (err) {
+        postMessage({ t: 'error', message: String((err && err.message) || err), id: job.id, mode: job.mode });
+      }
+    }
+  } finally {
+    busy = false;
   }
 }
 
 onmessage = (e) => {
   const msg = e.data;
   if (msg.t === 'init') {
-    ensurePipeline();
+    if (msg.model) modelId = msg.model;
+    forceWasm = !!msg.forceWasm;
+    boot();
   } else if (msg.t === 'audio') {
-    if (asr) transcribe(msg);
-    else {
-      queued.push(msg);
-      ensurePipeline();
-    }
+    if (msg.mode === 'interim' && (busy || queue.length || !asr)) return;
+    queue.push(msg);
+    if (asr) work();
+    else boot();
   }
 };
