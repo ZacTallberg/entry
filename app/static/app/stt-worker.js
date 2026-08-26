@@ -70,7 +70,8 @@ async function work() {
         let out = await asr(job.samples);
         let text = (out.text || '').trim();
         if (!text && job.mode === 'final' && job.samples && job.samples.length > 24000) {
-          out = await asr(job.samples);
+          const tail = job.samples.length > 96000 ? job.samples.subarray(job.samples.length - 96000) : job.samples;
+          out = await asr(tail);
           text = (out.text || '').trim();
         }
         postMessage({

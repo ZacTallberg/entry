@@ -1408,6 +1408,7 @@ function scheduleRelease() {
   cancelReleaseSchedule();
   const length = text.value.trim().length;
   if (!length || composing || locked) return;
+  if (listening || pendingChunks > 0) return;
   const readingTime = Math.min(3400, length * 16);
   const rhythm = clamp(cadence * 1.8, 500, 1700);
   releaseDelay = clamp(1900 + readingTime + rhythm, 2600, 6600);
@@ -1577,6 +1578,9 @@ const waveCtx = speakWave ? speakWave.getContext('2d') : null;
 const waveBuf = new Float32Array(56);
 let waveHead = 0;
 let waveLevel = 0;
+let waveAccum = 0;
+let waveCount = 0;
+let waveScale = 0.02;
 let speakInviteDone = false;
 
 function setSpeakHint(t) {
@@ -1602,7 +1606,7 @@ function drawWave() {
     const idx = (waveHead + i) % n;
     const theta = (i / n) * Math.PI * 2 - Math.PI / 2;
     const seam = Math.pow(Math.sin((Math.PI * i) / n), 0.8);
-    const amp = Math.min(1, waveBuf[idx] * 11) * w * 0.085 * seam;
+    const amp = Math.min(1, waveBuf[idx] / waveScale) * w * 0.13 * seam;
     const r = base + amp;
     const x = cx + Math.cos(theta) * r;
     const y = cy + Math.sin(theta) * r;
@@ -1791,7 +1795,7 @@ function flushChunk() {
   const id = chunkSeq;
   chunkStates.set(id, {
     applied: false, baseBefore: '', snapshot: '', finalText: '',
-    fallbackText: interimTrack.gen === bufferGen - 1 ? '' : interimTrack.fullest,
+    fallbackText: interimTrack.gen === bufferGen - 1 ? interimTrack.fullest : '',
   });
   chunkStates.delete(id - 8);
   pendingChunks += 1;
@@ -1819,7 +1823,10 @@ const chunkStates = new Map();
 
 function settleChunk() {
   pendingChunks = Math.max(0, pendingChunks - 1);
-  if (!pendingChunks) speakButton.dataset.busy = 'false';
+  if (!pendingChunks) {
+    speakButton.dataset.busy = 'false';
+    if (!listening) scheduleRelease();
+  }
 }
 
 function applyFinal(id, transcript, src) {
@@ -1881,8 +1888,15 @@ function onVoiceFrame(frame) {
   for (let i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
   const rms = Math.sqrt(sum / frame.length);
   field?.setVoiceLevel(rms * 2.2);
-  waveBuf[waveHead] = rms;
-  waveHead = (waveHead + 1) % waveBuf.length;
+  waveAccum += rms;
+  waveCount += 1;
+  if (waveCount >= 5) {
+    waveBuf[waveHead] = waveAccum / waveCount;
+    waveHead = (waveHead + 1) % waveBuf.length;
+    waveAccum = 0;
+    waveCount = 0;
+    waveScale = Math.max(rms, waveScale * 0.985, 0.015);
+  }
   waveLevel = Math.max(rms * 9, waveLevel * 0.9);
   const nowMs = performance.now();
   if (nowMs - lastVlPaint > 40) {
@@ -1893,12 +1907,12 @@ function onVoiceFrame(frame) {
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
   winMin = Math.min(winMin, rms);
   winSamples += frame.length;
-  if (winSamples > rate * 1.5) {
-    noiseFloor = noiseFloor * 0.6 + winMin * 0.4;
+  if (winSamples > rate * 2.5) {
+    noiseFloor = winMin < noiseFloor ? winMin : Math.min(winMin, noiseFloor * 1.05);
     winMin = 1;
     winSamples = 0;
   }
-  const gate = Math.min(0.02, Math.max(0.0035, noiseFloor * 2.5 + 0.002));
+  const gate = Math.min(0.012, Math.max(0.0035, noiseFloor * 2.5 + 0.002));
   chunkBuf.push(frame);
   chunkLen += frame.length;
   if (rms > gate) {
@@ -1918,11 +1932,16 @@ function onVoiceFrame(frame) {
     statSamples = 0;
     statPeak = 0;
   }
-  if (!voicedLen && chunkLen > rate * 2) {
+  if (!voicedLen) {
     idleSilence += frame.length;
+    if (idleSilence > rate * (hasFlushedChunk ? 4 : 9)) {
+      stopListening();
+      return;
+    }
+  }
+  if (!voicedLen && chunkLen > rate * 2) {
     while (chunkLen > rate * 0.75 && chunkBuf.length > 1) chunkLen -= chunkBuf.shift().length;
-    if (idleSilence > rate * (hasFlushedChunk ? 4 : 9)) stopListening();
-  } else if ((voicedLen > rate * 0.18 && silenceLen > rate * 0.45) || chunkLen > rate * 10) {
+  } else if ((voicedLen > rate * 0.18 && silenceLen > rate * 0.45) || chunkLen > rate * 7) {
     flushChunk();
     hasFlushedChunk = true;
     idleSilence = 0;
@@ -1999,6 +2018,7 @@ function stopListening() {
   drawWave();
   resetChunker();
   if (field) field.voiceLevel = 0;
+  if (!pendingChunks) scheduleRelease();
 }
 
 function feedVoice(transcript, isFinal) {
