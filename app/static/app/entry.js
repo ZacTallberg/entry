@@ -1591,6 +1591,8 @@ let pendingChunks = 0;
 let noiseFloor = 0.004;
 let statSamples = 0;
 let statPeak = 0;
+let winMin = 1;
+let winSamples = 0;
 let lastInterimAt = 0;
 let idleSilence = 0;
 let hasFlushedChunk = false;
@@ -1846,7 +1848,14 @@ function onVoiceFrame(frame) {
   const rms = Math.sqrt(sum / frame.length);
   field?.setVoiceLevel(rms * 2.2);
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
-  const gate = Math.min(0.02, Math.max(0.0035, noiseFloor * 3));
+  winMin = Math.min(winMin, rms);
+  winSamples += frame.length;
+  if (winSamples > rate * 1.5) {
+    noiseFloor = noiseFloor * 0.6 + winMin * 0.4;
+    winMin = 1;
+    winSamples = 0;
+  }
+  const gate = Math.min(0.02, Math.max(0.0035, noiseFloor * 2.5 + 0.002));
   chunkBuf.push(frame);
   chunkLen += frame.length;
   if (rms > gate) {
@@ -1854,7 +1863,6 @@ function onVoiceFrame(frame) {
     silenceLen = 0;
   } else {
     silenceLen += frame.length;
-    noiseFloor = noiseFloor * 0.97 + rms * 0.03;
   }
   statSamples += frame.length;
   statPeak = Math.max(statPeak, rms);
@@ -1909,6 +1917,8 @@ async function startCapture() {
   noiseFloor = 0.004;
   statSamples = 0;
   statPeak = 0;
+  winMin = 1;
+  winSamples = 0;
   idleSilence = 0;
   hasFlushedChunk = false;
   ctx.createMediaStreamSource(stream).connect(node);
