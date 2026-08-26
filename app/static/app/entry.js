@@ -1996,6 +1996,7 @@ if (window.DeviceOrientationEvent && !finePointer.matches && typeof DeviceOrient
 
 document.addEventListener('visibilitychange', () => {
   field?.setActive(document.visibilityState === 'visible');
+  if (document.visibilityState === 'hidden' && listening) stopListening();
 });
 
 window.addEventListener('resize', autoSize, { passive: true });
