@@ -1771,6 +1771,8 @@ function resetChunker() {
   silenceLen = 0;
 }
 
+let lastNormGain = 1;
+
 function collectSamples() {
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
   const all = new Float32Array(chunkLen);
@@ -1779,7 +1781,18 @@ function collectSamples() {
     all.set(f, offset);
     offset += f.length;
   }
-  return resampleTo16k(all, rate);
+  const out = resampleTo16k(all, rate);
+  let peak = 0;
+  for (let i = 0; i < out.length; i += 1) {
+    const a = Math.abs(out[i]);
+    if (a > peak) peak = a;
+  }
+  lastNormGain = 1;
+  if (peak > 0.002 && peak < 0.5) {
+    lastNormGain = Math.min(0.6 / peak, 18);
+    for (let i = 0; i < out.length; i += 1) out[i] *= lastNormGain;
+  }
+  return out;
 }
 
 function flushChunk() {
@@ -1800,7 +1813,7 @@ function flushChunk() {
   chunkStates.delete(id - 8);
   pendingChunks += 1;
   speakButton.dataset.busy = 'true';
-  diag('chunk', { sec: Math.round(samples.length / 1600) / 10 });
+  diag('chunk', { sec: Math.round(samples.length / 1600) / 10, gain: Math.round(lastNormGain * 10) / 10 });
   const provisional = chunkStates.get(id).fallbackText;
   if (provisional && !locked) feedVoice(provisional, false);
   const serverCopy = serverSttOk ? samples.slice(0) : null;
@@ -1941,7 +1954,7 @@ function onVoiceFrame(frame) {
   }
   if (!voicedLen && chunkLen > rate * 2) {
     while (chunkLen > rate * 0.75 && chunkBuf.length > 1) chunkLen -= chunkBuf.shift().length;
-  } else if ((voicedLen > rate * 0.18 && silenceLen > rate * 0.45) || chunkLen > rate * 7) {
+  } else if ((voicedLen > rate * 0.18 && silenceLen > rate * 0.4) || chunkLen > rate * 7) {
     flushChunk();
     hasFlushedChunk = true;
     idleSilence = 0;
