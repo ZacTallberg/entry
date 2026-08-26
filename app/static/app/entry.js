@@ -1598,7 +1598,7 @@ let hasFlushedChunk = false;
 const assetVersion = encodeURIComponent(((document.querySelector('meta[name=build]') || {}).content || 'v0').slice(0, 24));
 
 let sttWasmForced = true;
-const sttModel = (navigator.deviceMemory || 4) >= 6 && (navigator.hardwareConcurrency || 4) >= 6
+let sttActiveModel = (navigator.deviceMemory || 4) >= 6 && (navigator.hardwareConcurrency || 4) >= 6
   ? 'moonshine-base-ONNX'
   : 'moonshine-tiny-ONNX';
 
@@ -1606,7 +1606,7 @@ function ensureSttWorker() {
   if (sttWorker || sttFailed) return;
   const sttStarted = performance.now();
   let lastPct = 0;
-  diag('stt-init', { wasm: sttWasmForced, model: sttModel });
+  diag('stt-init', { wasm: sttWasmForced, model: sttActiveModel });
   if (!sttReady) {
     body.dataset.voice = 'warming';
     setSpeakHint('');
@@ -1667,6 +1667,14 @@ function ensureSttWorker() {
       if (msg.mode !== 'interim' && msg.mode !== 'refine') settleChunk();
       diag('stt-error', { msg: String(msg.message || '').slice(0, 250), fatal: !sttReady });
       if (!sttReady) {
+        if (sttActiveModel === 'moonshine-base-ONNX') {
+          diag('stt-model-fallback');
+          sttActiveModel = 'moonshine-tiny-ONNX';
+          try { sttWorker.terminate(); } catch (_e) {}
+          sttWorker = null;
+          ensureSttWorker();
+          return;
+        }
         sttFailed = true;
         stopListening();
         speakButton.hidden = !serverSttOk;
@@ -1681,7 +1689,7 @@ function ensureSttWorker() {
     stopListening();
     speakButton.hidden = !serverSttOk;
   };
-  sttWorker.postMessage({ t: 'init', model: sttModel, forceWasm: sttWasmForced });
+  sttWorker.postMessage({ t: 'init', model: sttActiveModel, forceWasm: sttWasmForced });
 }
 
 let wedgeTimer = 0;
