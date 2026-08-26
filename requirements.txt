@@ -3,3 +3,4 @@ whitenoise==6.8.2
 uvicorn[standard]==0.52.3
 faster-whisper==1.1.0
 numpy>=1.26
+requests>=2.32
