@@ -1604,12 +1604,17 @@ function ensureSttWorker() {
   const sttStarted = performance.now();
   let lastPct = 0;
   diag('stt-init', { wasm: sttWasmForced });
-  if (!sttReady) setSpeakHint('warming voice');
+  if (!sttReady) {
+    body.dataset.voice = 'warming';
+    setSpeakHint('');
+  }
   sttWorker = new Worker(new URL('./stt-worker.js?v=' + assetVersion, import.meta.url), { type: 'module' });
   sttWorker.onmessage = (e) => {
     const msg = e.data;
     if (msg.t === 'progress') {
-      speakButton.style.setProperty('--stt-pct', String(Math.round(msg.pct * 100)));
+      const pct = String(Math.round(msg.pct * 100));
+      speakButton.style.setProperty('--stt-pct', pct);
+      body.style.setProperty('--stt-pct', pct);
       speakButton.dataset.loading = 'true';
       if (msg.pct - lastPct >= 0.25) {
         lastPct = msg.pct;
@@ -1619,6 +1624,11 @@ function ensureSttWorker() {
       sttReady = true;
       speakButton.dataset.loading = 'false';
       speakButton.dataset.readyPop = 'true';
+      body.style.setProperty('--stt-pct', '100');
+      if (body.dataset.voice === 'warming') {
+        body.dataset.voice = 'ready';
+        window.setTimeout(() => { if (body.dataset.voice === 'ready') delete body.dataset.voice; }, 1200);
+      }
       setSpeakHint(listening || speakInviteDone ? '' : 'tap to speak');
       diag('stt-ready', { device: msg.device || '?', sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'interim') {
@@ -1983,7 +1993,7 @@ if (speakButton && (SRNative || workerPathOk)) {
     if (!workerPathOk || (sttFailed && !serverSttOk)) return;
     listening = true;
     speakInviteDone = true;
-    setSpeakHint(sttReady ? '' : 'warming voice');
+    setSpeakHint('');
     speakButton.dataset.listening = 'true';
     voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
     try {
