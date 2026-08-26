@@ -1582,15 +1582,18 @@ let chunkLen = 0;
 let voicedLen = 0;
 let silenceLen = 0;
 let pendingChunks = 0;
+let noiseFloor = 0.004;
+let statSamples = 0;
+let statPeak = 0;
 
-const VOICE_GATE = 0.012;
+const assetVersion = encodeURIComponent(((document.querySelector('meta[name=build]') || {}).content || 'v0').slice(0, 24));
 
 function ensureSttWorker() {
   if (sttWorker || sttFailed) return;
   const sttStarted = performance.now();
   let lastPct = 0;
   diag('stt-init');
-  sttWorker = new Worker(new URL('./stt-worker.js', import.meta.url), { type: 'module' });
+  sttWorker = new Worker(new URL('./stt-worker.js?v=' + assetVersion, import.meta.url), { type: 'module' });
   sttWorker.onmessage = (e) => {
     const msg = e.data;
     if (msg.t === 'progress') {
@@ -1675,13 +1678,26 @@ function onVoiceFrame(frame) {
   const rms = Math.sqrt(sum / frame.length);
   field?.setVoiceLevel(rms * 2.2);
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
+  const gate = Math.min(0.02, Math.max(0.0035, noiseFloor * 3));
   chunkBuf.push(frame);
   chunkLen += frame.length;
-  if (rms > VOICE_GATE) {
+  if (rms > gate) {
     voicedLen += frame.length;
     silenceLen = 0;
   } else {
     silenceLen += frame.length;
+    noiseFloor = noiseFloor * 0.97 + rms * 0.03;
+  }
+  statSamples += frame.length;
+  statPeak = Math.max(statPeak, rms);
+  if (statSamples > rate * 2.5) {
+    diag('listen', {
+      peak: Math.round(statPeak * 10000) / 10000,
+      gate: Math.round(gate * 10000) / 10000,
+      voicedSec: Math.round(voicedLen / rate * 10) / 10,
+    });
+    statSamples = 0;
+    statPeak = 0;
   }
   if (!voicedLen && chunkLen > rate * 2) {
     while (chunkLen > rate * 0.75 && chunkBuf.length > 1) chunkLen -= chunkBuf.shift().length;
@@ -1697,7 +1713,7 @@ async function startCapture() {
   } catch (_e) {
     ctx = new AudioContext();
   }
-  await ctx.audioWorklet.addModule(new URL('./capture-worklet.js', import.meta.url));
+  await ctx.audioWorklet.addModule(new URL('./capture-worklet.js?v=' + assetVersion, import.meta.url));
   const node = new AudioWorkletNode(ctx, 'capture');
   node.port.onmessage = (e) => { if (listening) onVoiceFrame(e.data); };
   const mute = ctx.createGain();
@@ -1711,9 +1727,16 @@ async function startCapture() {
     ctx.close().catch(() => {});
     return;
   }
+  noiseFloor = 0.004;
+  statSamples = 0;
+  statPeak = 0;
   ctx.createMediaStreamSource(stream).connect(node);
   voiceCapture = { stream, ctx, node };
-  diag('capture', { rate: ctx.sampleRate });
+  const track = stream.getAudioTracks()[0];
+  diag('capture', { rate: ctx.sampleRate, state: ctx.state, track: track ? track.readyState : 'none', muted: track ? track.muted : null });
+  if (ctx.state !== 'running') ctx.resume().catch(() => {});
+  track?.addEventListener('mute', () => diag('track-mute'));
+  track?.addEventListener('ended', () => diag('track-ended'));
 }
 
 function stopListening() {
