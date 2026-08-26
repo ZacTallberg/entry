@@ -1789,7 +1789,7 @@ function ensureSttWorker() {
     } else if (msg.t === 'final') {
       window.clearTimeout(wedgeTimer);
       settleChunk();
-      diag('stt-final', { ms: msg.ms, chars: (msg.text || '').length, len: msg.len });
+      diag('stt-final', { ms: msg.ms, chars: (msg.text || '').length, len: msg.len, retried: msg.retried || false });
       const st = chunkStates.get(msg.id);
       if (!msg.text && st && st.fallbackText && (msg.len || 0) > 24000) {
         diag('stt-final-fallback', { chars: st.fallbackText.length });
@@ -1926,7 +1926,9 @@ function flushChunk(atCap) {
     chunkLen = 0;
     for (const f of chunkBuf) chunkLen += f.length;
   }
+  const voicedFrac = voicedLen / Math.max(1, chunkLen);
   const samples = collectSamples();
+  const skipQuiet = lastNormGain >= 17.5 && voicedFrac < 0.25;
   resetChunker();
   if (carry) {
     chunkBuf = carry;
@@ -1935,6 +1937,10 @@ function flushChunk(atCap) {
     for (const f of carry) {
       if (frameRms(f) > gate) voicedLen += f.length;
     }
+  }
+  if (skipQuiet) {
+    diag('chunk-skip-quiet', { sec: Math.round(samples.length / 1600) / 10 });
+    return;
   }
   bufferGen += 1;
   chunkSeq += 1;

@@ -69,7 +69,9 @@ async function work() {
         const t0 = performance.now();
         let out = await asr(job.samples);
         let text = (out.text || '').trim();
+        let retried = false;
         if (!text && job.mode === 'final' && job.samples && job.samples.length > 24000) {
+          retried = true;
           const padded = new Float32Array(job.samples.length + 5600);
           padded.set(job.samples);
           out = await asr(padded);
@@ -86,6 +88,7 @@ async function work() {
           gen: job.gen,
           ms: Math.round(performance.now() - t0),
           len: job.samples ? job.samples.length : -1,
+          retried,
         });
       } catch (err) {
         postMessage({ t: 'error', message: String((err && err.message) || err), id: job.id, mode: job.mode });
