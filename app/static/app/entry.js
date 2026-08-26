@@ -1746,7 +1746,7 @@ function collectSamples() {
 
 function flushChunk() {
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
-  if (voicedLen < rate * 0.35) {
+  if (voicedLen < rate * 0.18) {
     resetChunker();
     return;
   }
@@ -1879,7 +1879,7 @@ function onVoiceFrame(frame) {
     idleSilence += frame.length;
     while (chunkLen > rate * 0.75 && chunkBuf.length > 1) chunkLen -= chunkBuf.shift().length;
     if (idleSilence > rate * (hasFlushedChunk ? 4 : 9)) stopListening();
-  } else if ((voicedLen > rate * 0.35 && silenceLen > rate * 0.45) || chunkLen > rate * 10) {
+  } else if ((voicedLen > rate * 0.18 && silenceLen > rate * 0.45) || chunkLen > rate * 10) {
     flushChunk();
     hasFlushedChunk = true;
     idleSilence = 0;
