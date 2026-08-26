@@ -1,4 +1,4 @@
-import { FORMS, FORM_INDEX } from 'forms';
+import { FORMS, FORM_INDEX, FAMILIES } from 'forms';
 
 let THREE;
 let EffectComposer;
@@ -68,8 +68,9 @@ const GLSL_PRELUDE = `
   vec3 cosPal(float t, vec3 a, vec3 b, vec3 c, vec3 d) { return a + b * cos(TAU * (c * t + d)); }
 
   uniform highp sampler3D tNoise;
+  uniform vec3 uNoiseOff;
   #define NOISE_PERIOD 16.0
-  vec4 noiseField(vec3 p) { return texture(tNoise, fract(p * (1.0 / NOISE_PERIOD))); }
+  vec4 noiseField(vec3 p) { return texture(tNoise, fract((p + uNoiseOff) * (1.0 / NOISE_PERIOD))); }
   float snoise(vec3 v) { return noiseField(v).a; }
   vec3 curlNoise(vec3 p) { return noiseField(p).rgb; }
 `;
@@ -189,6 +190,20 @@ const buildRenderFragment = () => `
     gl_FragColor = vec4(vColor * uExposure, (core + skirt) * uAlpha * vDepthA);
   }
 `;
+
+function orientOrigins(values, seedHash, originKind) {
+  const glyph = originKind === 'glyph';
+  const a = ((((seedHash >>> 5) % 1000) / 1000) - 0.5) * (glyph ? 0.24 : Math.PI * 2);
+  const mirror = !glyph && ((seedHash >>> 16) & 1) === 1 ? -1 : 1;
+  const ca = Math.cos(a);
+  const sa = Math.sin(a);
+  for (let i = 0; i < values.length; i += 4) {
+    const x = values[i] * mirror;
+    const y = values[i + 1];
+    values[i] = x * ca - y * sa;
+    values[i + 1] = x * sa + y * ca;
+  }
+}
 
 // ─────────────────────────────────────── origin layouts ────────────────────────────────────────
 const ORIGIN_GENERATORS = {
@@ -443,7 +458,7 @@ function bakeNoiseTexture() {
 const recentForms = [];
 const rememberForm = (slug) => {
   recentForms.push(slug);
-  if (recentForms.length > 8) recentForms.shift();
+  if (recentForms.length > 14) recentForms.shift();
 };
 
 const EMOJI_RE = /\p{Extended_Pictographic}/u;
@@ -494,7 +509,10 @@ function chooseFamily(features, hash) {
 function chooseForm(raw, typingCadence) {
   const features = analyzeUtterance(raw, typingCadence);
   const hash = fnv(features.text || 'the dark');
-  const family = chooseFamily(features, hash);
+  let family = chooseFamily(features, hash);
+  if ((Math.imul(hash ^ 0x51ed270b, 2654435761) >>> 0) % 100 < 35) {
+    family = FAMILIES[(Math.imul(hash ^ 0x9c406bb5, 2654435761) >>> 0) % FAMILIES.length];
+  }
   const candidates = FORMS.filter((f) => f.family === family);
   let index = (hash >>> 12) % candidates.length;
   for (let hop = 0; hop < candidates.length; hop += 1) {
@@ -515,7 +533,7 @@ class ParticleField {
     const lowConcurrency = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4;
     const lowPower = lowMemory || lowConcurrency;
     const narrow = Math.min(window.innerWidth, window.innerHeight) < 720;
-    this.textureSize = lowPower || narrow ? 256 : 320;
+    this.textureSize = lowPower || narrow ? 256 : 448;
     this.target = target;
     this.narrow = narrow;
     this.active = true;
@@ -637,6 +655,7 @@ class ParticleField {
         uEnergy: { value: 0.5 },
         uDt: { value: 1 },
         uForm: { value: 0 },
+        uNoiseOff: { value: new THREE.Vector3(0, 0, 0) },
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
         tNoise: { value: this.noiseTexture },
@@ -673,6 +692,7 @@ class ParticleField {
         uFxSizeWave: { value: 0 },
         uFxFog: { value: 0 },
         uForm: { value: 0 },
+        uNoiseOff: { value: new THREE.Vector3(0, 0, 0) },
       },
       transparent: true,
       blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
@@ -696,6 +716,7 @@ class ParticleField {
     const values = new Float32Array(size * size * 4);
     const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
     generator(values, rng, utterance);
+    orientOrigins(values, seedHash, formDef.origin);
     const half = THREE.DataUtils.toHalfFloat;
     const packed = new Uint16Array(values.length);
     const primePacked = new Uint16Array(values.length);
@@ -781,6 +802,7 @@ class ParticleField {
       };
       const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
       generator(this.originValues, rng, utterance);
+      orientOrigins(this.originValues, seedHash, formDef.origin);
       this.origin?.dispose();
       this.origin = new THREE.DataTexture(this.originValues, size, size, THREE.RGBAFormat, THREE.FloatType);
       this.origin.needsUpdate = true;
@@ -825,6 +847,10 @@ class ParticleField {
     this.beatTempo = fx.beat ? 1.2 + v3 * 1.8 : 0;
     ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.88 + v2 * 0.28);
     this.speedVariant = 0.86 + v3 * 0.3;
+    this.timeScale = 0.75 + (((seedHash >>> 11) % 1000) / 1000) * 0.6;
+    const nOff = new THREE.Vector3(v1 * 16, v2 * 16, v3 * 16);
+    this.simMaterial.uniforms.uNoiseOff.value.copy(nOff);
+    this.renderMaterial.uniforms.uNoiseOff.value.copy(nOff);
     this.trailPersist = fx.trails ? Math.min(0.9, Math.max(0.35, (js.trail ?? 0.5) + (v2 - 0.5) * 0.14)) : 0.08;
     this.particles.material = this.renderMaterial;
 
@@ -1037,7 +1063,7 @@ class ParticleField {
 
     const su = this.simMaterial.uniforms;
     su.uDt.value = dt * (this.speedVariant || 1);
-    su.uTime.value = time;
+    su.uTime.value = time * (this.timeScale || 1);
     su.uEnergy.value = this.energyCurrent;
     su.uPointer.value.copy(this.pointer);
     su.uPulse.value = this.pulse;
@@ -1053,7 +1079,7 @@ class ParticleField {
     const ru = this.renderMaterial.uniforms;
     ru.tPositions.value = this.targetA.texture;
     ru.tPrev.value = this.targetB.texture;
-    ru.uTime.value = time;
+    ru.uTime.value = time * (this.timeScale || 1);
     ru.uPointer.value.copy(this.pointer);
     ru.uRelease.value = releaseForce;
     const formPhase = this.formStartedAt ? Math.max(0, 1 - (now - this.formStartedAt) / 1400) : 0;
