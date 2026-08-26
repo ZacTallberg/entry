@@ -1571,11 +1571,46 @@ releaseButton.addEventListener('click', beginRelease);
 // leaves the page, exactly as the front door promises. One mic stream feeds both the field's
 // amplitude reactivity and the transcriber; chunks cut on natural pauses.
 const speakButton = document.getElementById('speak');
-const speakHint = document.getElementById('speak-hint');
+const speakLabel = speakButton ? speakButton.querySelector('.speak-label') : null;
+const speakWave = speakButton ? speakButton.querySelector('.speak-wave') : null;
+const waveCtx = speakWave ? speakWave.getContext('2d') : null;
+const waveBuf = new Float32Array(56);
+let waveHead = 0;
+let waveLevel = 0;
 let speakInviteDone = false;
 
 function setSpeakHint(t) {
-  if (speakHint) speakHint.textContent = t;
+  if (speakLabel) speakLabel.textContent = t;
+}
+
+function drawWave() {
+  if (!waveCtx) return;
+  const w = speakWave.width;
+  const h = speakWave.height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const base = w * 0.385;
+  waveCtx.clearRect(0, 0, w, h);
+  waveCtx.beginPath();
+  waveCtx.lineWidth = 2.2;
+  const glow = Math.min(1, waveLevel);
+  waveCtx.strokeStyle = `rgba(205, 218, 255, ${(0.34 + glow * 0.56).toFixed(3)})`;
+  waveCtx.shadowColor = 'rgba(160, 185, 255, 0.75)';
+  waveCtx.shadowBlur = 6 + glow * 8;
+  const n = waveBuf.length;
+  for (let i = 0; i <= n; i += 1) {
+    const idx = (waveHead + i) % n;
+    const theta = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const seam = Math.pow(Math.sin((Math.PI * i) / n), 0.8);
+    const amp = Math.min(1, waveBuf[idx] * 11) * w * 0.085 * seam;
+    const r = base + amp;
+    const x = cx + Math.cos(theta) * r;
+    const y = cy + Math.sin(theta) * r;
+    if (i === 0) waveCtx.moveTo(x, y);
+    else waveCtx.lineTo(x, y);
+  }
+  waveCtx.closePath();
+  waveCtx.stroke();
 }
 let listening = false;
 let voiceBase = '';
@@ -1593,6 +1628,7 @@ let statSamples = 0;
 let statPeak = 0;
 let winMin = 1;
 let winSamples = 0;
+let lastVlPaint = 0;
 let lastInterimAt = 0;
 let idleSilence = 0;
 let hasFlushedChunk = false;
@@ -1628,7 +1664,6 @@ function ensureSttWorker() {
     } else if (msg.t === 'ready') {
       sttReady = true;
       speakButton.dataset.loading = 'false';
-      speakButton.dataset.readyPop = 'true';
       body.style.setProperty('--stt-pct', '100');
       if (body.dataset.voice === 'warming') {
         body.dataset.voice = 'ready';
@@ -1651,8 +1686,7 @@ function ensureSttWorker() {
           interimTrack.text = msg.text;
           if (msg.text.length > interimTrack.fullest.length) interimTrack.fullest = msg.text;
         }
-        const settled = msg.text.split(/\s+/).slice(0, interimTrack.committed).join(' ');
-        if (settled && listening && !locked) feedVoice(settled, false);
+        if (listening && !locked) feedVoice(msg.text, false);
       }
     } else if (msg.t === 'final') {
       window.clearTimeout(wedgeTimer);
@@ -1847,6 +1881,15 @@ function onVoiceFrame(frame) {
   for (let i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
   const rms = Math.sqrt(sum / frame.length);
   field?.setVoiceLevel(rms * 2.2);
+  waveBuf[waveHead] = rms;
+  waveHead = (waveHead + 1) % waveBuf.length;
+  waveLevel = Math.max(rms * 9, waveLevel * 0.9);
+  const nowMs = performance.now();
+  if (nowMs - lastVlPaint > 40) {
+    lastVlPaint = nowMs;
+    speakButton.style.setProperty('--vl', Math.min(1, rms * 9).toFixed(3));
+    drawWave();
+  }
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
   winMin = Math.min(winMin, rms);
   winSamples += frame.length;
@@ -1950,6 +1993,10 @@ function stopListening() {
     voiceCapture.ctx.close().catch(() => {});
     voiceCapture = null;
   }
+  speakButton.style.setProperty('--vl', '0');
+  waveBuf.fill(0);
+  waveLevel = 0;
+  drawWave();
   resetChunker();
   if (field) field.voiceLevel = 0;
 }
@@ -1996,6 +2043,7 @@ function startNative() {
         interim += chunk;
       }
     }
+    if (interim && !locked) feedVoice(interim, false);
     if (interim) field?.setVoiceLevel(0.12);
   };
   nativeRecognizer.onerror = (e) => {
@@ -2017,6 +2065,7 @@ function startNative() {
 
 if (speakButton && (SRNative || workerPathOk)) {
   speakButton.hidden = false;
+  drawWave();
   if (SRNative && typeof SRNative.available === 'function') {
     SRNative.available({ langs: ['en-US'], processLocally: true }).then((status) => {
       nativeStatus = status;

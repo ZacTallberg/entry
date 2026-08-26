@@ -59,11 +59,6 @@
     <h1 class="sr-only">The Entry</h1>
     <section class="composer" aria-label="Say something into the dark. Nothing is kept.">
       <div class="writing-field">
-        <div id="voice-loader" aria-hidden="true">
-          <span class="vl-track"></span>
-          <span class="vl-comet"></span>
-          <span class="vl-text">warming voice</span>
-        </div>
         <label class="sr-only" for="entry-text">Words to release</label>
         <textarea
           id="entry-text"
@@ -82,9 +77,9 @@
       <div class="release-row">
         <div class="speak-wrap">
           <button id="speak" type="button" aria-label="Speak into the dark" hidden>
-            <span class="speak-dot" aria-hidden="true"></span>
+            <canvas class="speak-wave" width="192" height="192" aria-hidden="true"></canvas>
+            <span class="speak-label" role="status" aria-live="polite"></span>
           </button>
-          <span id="speak-hint" role="status" aria-live="polite"></span>
         </div>
         <button id="release" type="button" aria-label="Release these words" disabled>
           <span class="release-ring" aria-hidden="true"></span>
