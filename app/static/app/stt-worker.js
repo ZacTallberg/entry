@@ -73,6 +73,7 @@ async function work() {
           id: job.id,
           gen: job.gen,
           ms: Math.round(performance.now() - t0),
+          len: job.samples ? job.samples.length : -1,
         });
       } catch (err) {
         postMessage({ t: 'error', message: String((err && err.message) || err), id: job.id, mode: job.mode });

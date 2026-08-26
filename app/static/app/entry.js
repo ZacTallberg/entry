@@ -1586,6 +1586,8 @@ let noiseFloor = 0.004;
 let statSamples = 0;
 let statPeak = 0;
 let lastInterimAt = 0;
+let idleSilence = 0;
+let hasFlushedChunk = false;
 
 const assetVersion = encodeURIComponent(((document.querySelector('meta[name=build]') || {}).content || 'v0').slice(0, 24));
 
@@ -1616,7 +1618,7 @@ function ensureSttWorker() {
     } else if (msg.t === 'final') {
       window.clearTimeout(wedgeTimer);
       settleChunk();
-      diag('stt-final', { ms: msg.ms, chars: (msg.text || '').length });
+      diag('stt-final', { ms: msg.ms, chars: (msg.text || '').length, len: msg.len });
       applyFinal(msg.id, msg.text, 'tiny');
     } else if (msg.t === 'error') {
       if (msg.mode !== 'interim' && msg.mode !== 'refine') settleChunk();
@@ -1809,16 +1811,21 @@ function onVoiceFrame(frame) {
     statPeak = 0;
   }
   if (!voicedLen && chunkLen > rate * 2) {
+    idleSilence += frame.length;
     while (chunkLen > rate * 0.75 && chunkBuf.length > 1) chunkLen -= chunkBuf.shift().length;
+    if (idleSilence > rate * (hasFlushedChunk ? 4 : 9)) stopListening();
   } else if ((voicedLen > rate * 0.35 && silenceLen > rate * 0.45) || chunkLen > rate * 10) {
     flushChunk();
+    hasFlushedChunk = true;
+    idleSilence = 0;
   } else if (
     sttReady && sttWorker && voicedLen > rate * 0.5 && silenceLen < rate * 0.3
-    && performance.now() - lastInterimAt > 1200
+    && chunkLen < rate * 5 && performance.now() - lastInterimAt > 1200
   ) {
     lastInterimAt = performance.now();
     sttWorker.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
   }
+  if (voicedLen) idleSilence = 0;
 }
 
 async function startCapture() {
@@ -1845,6 +1852,8 @@ async function startCapture() {
   noiseFloor = 0.004;
   statSamples = 0;
   statPeak = 0;
+  idleSilence = 0;
+  hasFlushedChunk = false;
   ctx.createMediaStreamSource(stream).connect(node);
   voiceCapture = { stream, ctx, node };
   const track = stream.getAudioTracks()[0];
