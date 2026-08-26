@@ -70,9 +70,10 @@ const GLSL_PRELUDE = `
   uniform highp sampler3D tNoise;
   uniform vec3 uNoiseOff;
   #define NOISE_PERIOD 16.0
+  uniform float uOctave;
   vec4 noiseField(vec3 p) { return texture(tNoise, fract((p + uNoiseOff) * (1.0 / NOISE_PERIOD))); }
-  float snoise(vec3 v) { return noiseField(v).a; }
-  vec3 curlNoise(vec3 p) { return noiseField(p).rgb; }
+  float snoise(vec3 v) { return noiseField(v).a + uOctave * noiseField(v * 2.3 + 7.7).a * 0.5; }
+  vec3 curlNoise(vec3 p) { return normalize(noiseField(p).rgb + uOctave * noiseField(p * 2.6 + 13.1).rgb * 0.6); }
 `;
 
 const simVertexShader = `
@@ -91,10 +92,33 @@ const buildSimFragment = (formDef) => `
   ${GLSL_PRELUDE}
   ${formDef.force}
 
+  uniform sampler2D tDensity;
+  uniform float uDenseForce;
+  uniform float uDenseSwirl;
+  uniform float uRingR;
+  uniform float uRingAmp;
+
   void main() {
     vec3 pos = texture2D(tPositions, vUv).xyz;
     vec3 origin = texture2D(tOrigin, vUv).xyz;
     vec3 velocity = formForce(pos, origin) * (0.7 + uEnergy * 0.6);
+
+    if (abs(uDenseForce) > 0.001 || abs(uDenseSwirl) > 0.001) {
+      vec2 duv = pos.xy * 0.147 + 0.5;
+      float e = 0.02;
+      float dxp = texture2D(tDensity, duv + vec2(e, 0.0)).r;
+      float dxm = texture2D(tDensity, duv - vec2(e, 0.0)).r;
+      float dyp = texture2D(tDensity, duv + vec2(0.0, e)).r;
+      float dym = texture2D(tDensity, duv - vec2(0.0, e)).r;
+      vec2 grad = vec2(dxp - dxm, dyp - dym);
+      velocity.xy += grad * uDenseForce * 0.05;
+      velocity.xy += vec2(-grad.y, grad.x) * uDenseSwirl * 0.05;
+    }
+
+    if (uRingAmp > 0.001) {
+      float rd = length(pos.xy) - uRingR;
+      velocity.xy += normalize(pos.xy + vec2(0.0001, 0.0)) * exp(-rd * rd * 9.0) * uRingAmp * 0.05;
+    }
 
     vec2 pointerDelta = pos.xy - uPointer;
     float pointerDistance = max(length(pointerDelta), 0.12);
@@ -595,6 +619,40 @@ class ParticleField {
     this.simQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
     this.simScene.add(this.simQuad);
 
+    this.densityRT = new THREE.WebGLRenderTarget(96, 96, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    this.densityMaterial = new THREE.ShaderMaterial({
+      vertexShader: [
+        'uniform sampler2D tPositions;',
+        'void main() {',
+        '  vec3 p = texture2D(tPositions, position.xy).xyz;',
+        '  float keep = fract(sin(dot(position.xy, vec2(12.9898, 78.233))) * 43758.5453);',
+        '  gl_PointSize = keep < 0.3 ? 3.0 : 0.0;',
+        '  gl_Position = vec4(p.xy * 0.294, 0.0, 1.0);',
+        '}',
+      ].join('\n'),
+      fragmentShader: [
+        'void main() {',
+        '  vec2 q = gl_PointCoord - 0.5;',
+        '  gl_FragColor = vec4(exp(-dot(q, q) * 6.0) * 0.3, 0.0, 0.0, 1.0);',
+        '}',
+      ].join('\n'),
+      uniforms: { tPositions: { value: null } },
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.densityMaterial.toneMapped = false;
+    this.densityScene = new THREE.Scene();
+    this.densityActive = false;
+
     const size = this.textureSize;
     const options = {
       minFilter: THREE.NearestFilter,
@@ -625,6 +683,9 @@ class ParticleField {
     this.particles = new THREE.Points(this.geometry, null);
     this.particles.frustumCulled = false;
     this.scene.add(this.particles);
+    this.densityPoints = new THREE.Points(this.geometry, this.densityMaterial);
+    this.densityPoints.frustumCulled = false;
+    this.densityScene.add(this.densityPoints);
 
 
     this.setForm(FORM_INDEX.get('nebula'), '', { fromCenter: false, seedHash: sessionSalt });
@@ -656,6 +717,12 @@ class ParticleField {
         uDt: { value: 1 },
         uForm: { value: 0 },
         uNoiseOff: { value: new THREE.Vector3(0, 0, 0) },
+        uOctave: { value: 0 },
+        tDensity: { value: null },
+        uDenseForce: { value: 0 },
+        uDenseSwirl: { value: 0 },
+        uRingR: { value: 0 },
+        uRingAmp: { value: 0 },
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
         tNoise: { value: this.noiseTexture },
@@ -693,6 +760,7 @@ class ParticleField {
         uFxFog: { value: 0 },
         uForm: { value: 0 },
         uNoiseOff: { value: new THREE.Vector3(0, 0, 0) },
+        uOctave: { value: 0 },
       },
       transparent: true,
       blending: js.blending === 'normal' ? THREE.NormalBlending : THREE.AdditiveBlending,
@@ -832,6 +900,9 @@ class ParticleField {
       fog: roll(0xd3a2646c, 0.3),
       beat: roll(0xfd7046c5, 0.3),
       sizeWave: roll(0xb55a4f09, 0.28),
+      dense: roll(0x94d049bb, 0.55),
+      octave: roll(0xbf58476d, 0.5),
+      ring: roll(0x2545f491, 0.4),
     };
     if (!Object.values(fx).some(Boolean)) fx.turb = true;
     this.effects = fx;
@@ -851,6 +922,22 @@ class ParticleField {
     const nOff = new THREE.Vector3(v1 * 16, v2 * 16, v3 * 16);
     this.simMaterial.uniforms.uNoiseOff.value.copy(nOff);
     this.renderMaterial.uniforms.uNoiseOff.value.copy(nOff);
+    const su2 = this.simMaterial.uniforms;
+    const octave = fx.octave ? 0.35 + v2 * 0.45 : 0;
+    su2.uOctave.value = octave;
+    ru2.uOctave.value = octave;
+    this.densityActive = fx.dense;
+    if (fx.dense) {
+      const mode = (Math.imul(seedHash ^ 0x94d049bb, 2246822519) >>> 0) % 3;
+      su2.uDenseForce.value = mode === 0 ? -(0.5 + v1 * 0.7) : mode === 1 ? 0.4 + v3 * 0.6 : (v2 - 0.5) * 0.5;
+      su2.uDenseSwirl.value = mode === 2 ? (v1 < 0.5 ? -1 : 1) * (0.6 + v3 * 0.7) : 0;
+      su2.tDensity.value = this.densityRT.texture;
+    } else {
+      su2.uDenseForce.value = 0;
+      su2.uDenseSwirl.value = 0;
+    }
+    this.fxRing = fx.ring;
+    su2.uRingAmp.value = 0;
     this.trailPersist = fx.trails ? Math.min(0.9, Math.max(0.35, (js.trail ?? 0.5) + (v2 - 0.5) * 0.14)) : 0.08;
     this.particles.material = this.renderMaterial;
 
@@ -961,6 +1048,10 @@ class ParticleField {
     this.energyTarget = clamp(value, 0.2, 1.6);
   }
 
+  setVoiceLevel(rms) {
+    this.voiceLevel = (this.voiceLevel || 0) * 0.75 + rms * 0.25;
+  }
+
   pop(amount = 0.12) {
     this.exposurePop = Math.min(0.4, (this.exposurePop || 0) + amount);
   }
@@ -1053,6 +1144,16 @@ class ParticleField {
     this.energyCurrent = (this.energyCurrent ?? 0.5) + ((this.energyTarget ?? 0.5) - (this.energyCurrent ?? 0.5)) * 0.06;
     this.exposurePop = (this.exposurePop || 0) * Math.pow(0.86, dt);
     let exposure = 1.45 + this.exposurePop;
+    if (this.voiceLevel > 0.012) {
+      this.energyCurrent = Math.min(1.6, this.energyCurrent + this.voiceLevel * 2.4);
+      exposure += Math.min(0.55, this.voiceLevel * 1.8);
+      if (this.voiceLevel > 0.09 && now - (this.lastVoicePulse || 0) > 650) {
+        this.lastVoicePulse = now;
+        this.pulseType = 3;
+        this.pulse = Math.max(this.pulse, Math.min(1.1, this.voiceLevel * 4));
+      }
+      this.animatedUntil = Math.max(this.animatedUntil, now + 450);
+    }
     let surge = 0;
     if (this.releaseStarted) {
       const surgePhase = Math.min(1, ((now - this.releaseStarted) / 1000) / (this.envelope.inhale + 0.7));
@@ -1071,6 +1172,23 @@ class ParticleField {
     su.uRelease.value = releaseForce;
     su.uStir.value.copy(this.stir);
     su.uPulseCenter.value.copy(this.pulseAnchor || this.pointer);
+
+    if (this.fxRing && this.releaseStarted) {
+      const ringT = (now - this.releaseStarted) / 1000 - this.envelope.inhale;
+      if (ringT > 0) {
+        su.uRingR.value = ringT * 3.4;
+        su.uRingAmp.value = Math.max(0, 1 - ringT * 0.5) * (this.releaseEnergy || 1) * 1.7;
+      }
+    } else if (su.uRingAmp.value > 0) {
+      su.uRingAmp.value = 0;
+    }
+
+    if (this.densityActive) {
+      this.densityMaterial.uniforms.tPositions.value = this.targetA.texture;
+      this.renderer.setRenderTarget(this.densityRT);
+      this.renderer.render(this.densityScene, this.trailCamera);
+    }
+
     this.simQuad.material = this.simMaterial;
     su.tPositions.value = this.targetA.texture;
     this.renderer.setRenderTarget(this.targetB);
@@ -1125,6 +1243,8 @@ class ParticleField {
     this.warmTarget?.dispose();
     this.trailA?.dispose();
     this.trailB?.dispose();
+    this.densityRT?.dispose();
+    this.densityMaterial?.dispose();
     this.renderer?.dispose();
   }
 }
@@ -1398,10 +1518,47 @@ let recognizer = null;
 let listening = false;
 let voiceBase = '';
 
+let voiceAudio = null;
+
+async function startVoiceMeter() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!listening) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const bins = new Uint8Array(analyser.fftSize);
+    voiceAudio = { stream, ctx, analyser, bins, raf: 0 };
+    const meter = () => {
+      if (!voiceAudio) return;
+      analyser.getByteTimeDomainData(bins);
+      let sum = 0;
+      for (let i = 0; i < bins.length; i += 1) {
+        const d = (bins[i] - 128) / 128;
+        sum += d * d;
+      }
+      field?.setVoiceLevel(Math.sqrt(sum / bins.length));
+      voiceAudio.raf = requestAnimationFrame(meter);
+    };
+    meter();
+  } catch (_e) {}
+}
+
+function stopVoiceMeter() {
+  if (!voiceAudio) return;
+  cancelAnimationFrame(voiceAudio.raf);
+  voiceAudio.stream.getTracks().forEach((t) => t.stop());
+  voiceAudio.ctx.close().catch(() => {});
+  voiceAudio = null;
+  if (field) field.voiceLevel = 0;
+}
+
 function stopListening() {
   listening = false;
   speakButton.dataset.listening = 'false';
   try { recognizer?.stop(); } catch (_e) {}
+  stopVoiceMeter();
 }
 
 function feedVoice(transcript, isFinal) {
@@ -1443,6 +1600,7 @@ if (Recognition && speakButton) {
       recognizer.start();
       listening = true;
       speakButton.dataset.listening = 'true';
+      startVoiceMeter();
     } catch (_e) {
       stopListening();
     }
