@@ -1258,6 +1258,43 @@ class ParticleField {
   }
 }
 
+// ── content-free device diagnostics (ADR 0005): the machinery's health, never the words ─────────
+const diag = (() => {
+  const sid = Math.random().toString(36).slice(2, 10);
+  const build = (document.querySelector('meta[name=build]') || {}).content || '';
+  let buf = [];
+  const flush = () => {
+    if (!buf.length) return;
+    const body = JSON.stringify({ sid, build, probe: navigator.webdriver === true, events: buf.splice(0, 60) });
+    try {
+      if (!(navigator.sendBeacon && navigator.sendBeacon('/api/debug-log', new Blob([body], { type: 'application/json' })))) {
+        fetch('/api/debug-log', { method: 'POST', body, keepalive: true }).catch(() => {});
+      }
+    } catch (_e) {}
+  };
+  const log = (type, data) => {
+    buf.push({ ms: Math.round(performance.now()), type, ...(data || {}) });
+    if (buf.length >= 40) flush();
+  };
+  window.addEventListener('pagehide', flush);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+  setInterval(flush, 12000);
+  window.addEventListener('error', (e) => log('jserror', { msg: String(e.message || '').slice(0, 300), src: String(e.filename || '').slice(-80), line: e.lineno || 0 }));
+  window.addEventListener('unhandledrejection', (e) => log('rejection', { msg: String((e.reason && e.reason.message) || e.reason || '').slice(0, 300) }));
+  document.addEventListener('securitypolicyviolation', (e) => log('csp', { dir: e.violatedDirective, uri: String(e.blockedURI || '').slice(0, 100) }));
+  log('boot', {
+    gpu: !!navigator.gpu,
+    cores: navigator.hardwareConcurrency || 0,
+    mem: navigator.deviceMemory || 0,
+    dpr: Math.round(window.devicePixelRatio * 100) / 100,
+    w: window.innerWidth,
+    h: window.innerHeight,
+    touch: navigator.maxTouchPoints > 0,
+    lang: (navigator.language || '').slice(0, 12),
+  });
+  return log;
+})();
+
 // ───────────────────────────────────── experience shell ────────────────────────────────────────
 let field = null;
 let composing = false;
@@ -1306,9 +1343,11 @@ async function initializeField() {
     OutputPass = outputModule.OutputPass;
     field = new ParticleField(canvas);
     body.dataset.graphics = 'webgl';
-  } catch (_error) {
+  } catch (error) {
     body.dataset.graphics = 'fallback';
+    diag('graphics-fail', { msg: String((error && error.message) || error).slice(0, 200) });
   }
+  diag('graphics', { mode: body.dataset.graphics });
 }
 
 function setState(next, message) {
@@ -1458,6 +1497,14 @@ function beginRelease() {
       body.dataset.form = chosen.form.slug;
       field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash });
       setState('releasing', revealLine);
+      diag('release', {
+        slug: chosen.form.slug,
+        fx: field ? Object.keys(field.effects || {}).filter((k) => field.effects[k]).join(',') : '',
+        swapMs: field ? Math.round(field.lastSwapMs || 0) : -1,
+      });
+      window.setTimeout(() => {
+        if (field) diag('perf', { frameMs: Math.round(field.frameEma || 0), scale: Math.round((field.renderScale || 1) * 100) / 100 });
+      }, 3000);
     });
   }, swapAt);
 
@@ -1540,21 +1587,31 @@ const VOICE_GATE = 0.012;
 
 function ensureSttWorker() {
   if (sttWorker || sttFailed) return;
+  const sttStarted = performance.now();
+  let lastPct = 0;
+  diag('stt-init');
   sttWorker = new Worker(new URL('./stt-worker.js', import.meta.url), { type: 'module' });
   sttWorker.onmessage = (e) => {
     const msg = e.data;
     if (msg.t === 'progress') {
       speakButton.style.setProperty('--stt-pct', String(Math.round(msg.pct * 100)));
       speakButton.dataset.loading = 'true';
+      if (msg.pct - lastPct >= 0.25) {
+        lastPct = msg.pct;
+        diag('stt-progress', { pct: Math.round(msg.pct * 100) });
+      }
     } else if (msg.t === 'ready') {
       sttReady = true;
       speakButton.dataset.loading = 'false';
+      diag('stt-ready', { device: msg.device || '?', sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'text') {
       pendingChunks = Math.max(0, pendingChunks - 1);
       if (!pendingChunks) speakButton.dataset.busy = 'false';
+      diag('stt-text', { chars: (msg.text || '').length });
       if (msg.text && !locked) feedVoice(msg.text, true);
     } else if (msg.t === 'error') {
       pendingChunks = Math.max(0, pendingChunks - 1);
+      diag('stt-error', { msg: String(msg.message || '').slice(0, 250), fatal: !sttReady });
       if (!sttReady) {
         sttFailed = true;
         stopListening();
@@ -1562,7 +1619,8 @@ function ensureSttWorker() {
       }
     }
   };
-  sttWorker.onerror = () => {
+  sttWorker.onerror = (e) => {
+    diag('stt-worker-crash', { msg: String((e && e.message) || 'worker error').slice(0, 250) });
     sttFailed = true;
     stopListening();
     speakButton.hidden = true;
@@ -1607,6 +1665,7 @@ function flushChunk() {
   const samples = resampleTo16k(all, rate);
   pendingChunks += 1;
   speakButton.dataset.busy = 'true';
+  diag('chunk', { sec: Math.round(samples.length / 1600) / 10 });
   sttWorker.postMessage({ t: 'audio', samples, id: pendingChunks }, [samples.buffer]);
 }
 
@@ -1654,6 +1713,7 @@ async function startCapture() {
   }
   ctx.createMediaStreamSource(stream).connect(node);
   voiceCapture = { stream, ctx, node };
+  diag('capture', { rate: ctx.sampleRate });
 }
 
 function stopListening() {
@@ -1690,7 +1750,8 @@ if (speakButton && navigator.mediaDevices && window.Worker && window.AudioWorkle
     ensureSttWorker();
     try {
       await startCapture();
-    } catch (_e) {
+    } catch (err) {
+      diag('capture-error', { msg: String((err && err.name) || '') + ' ' + String((err && err.message) || err).slice(0, 200) });
       stopListening();
     }
   });

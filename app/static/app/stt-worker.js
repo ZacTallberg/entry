@@ -29,13 +29,15 @@ async function ensurePipeline() {
     dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
     progress_callback: reportProgress,
   };
+  let device = 'webgpu';
   try {
     try {
       asr = await pipeline('automatic-speech-recognition', 'moonshine-base-ONNX', { ...opts, device: 'webgpu' });
     } catch (_gpuErr) {
+      device = 'wasm';
       asr = await pipeline('automatic-speech-recognition', 'moonshine-base-ONNX', { ...opts, device: 'wasm' });
     }
-    postMessage({ t: 'ready' });
+    postMessage({ t: 'ready', device });
     while (queued.length) transcribe(queued.shift());
   } catch (err) {
     postMessage({ t: 'error', message: String((err && err.message) || err) });
