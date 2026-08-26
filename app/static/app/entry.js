@@ -1618,7 +1618,7 @@ function ensureSttWorker() {
       if (!sttReady) {
         sttFailed = true;
         stopListening();
-        speakButton.hidden = true;
+        speakButton.hidden = !serverSttOk;
       }
     }
   };
@@ -1626,7 +1626,7 @@ function ensureSttWorker() {
     diag('stt-worker-crash', { msg: String((e && e.message) || 'worker error').slice(0, 250) });
     sttFailed = true;
     stopListening();
-    speakButton.hidden = true;
+    speakButton.hidden = !serverSttOk;
   };
   sttWorker.postMessage({ t: 'init' });
 }
@@ -1654,7 +1654,7 @@ function resetChunker() {
 function flushChunk() {
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
   const minVoiced = rate * 0.4;
-  if (voicedLen < minVoiced || !sttWorker) {
+  if (voicedLen < minVoiced) {
     resetChunker();
     return;
   }
@@ -1666,9 +1666,54 @@ function flushChunk() {
   }
   resetChunker();
   const samples = resampleTo16k(all, rate);
+  diag('chunk', { sec: Math.round(samples.length / 1600) / 10 });
+  transcribeChunk(samples);
+}
+
+let serverSttOk = true;
+
+function settleChunk() {
+  pendingChunks = Math.max(0, pendingChunks - 1);
+  if (!pendingChunks) speakButton.dataset.busy = 'false';
+}
+
+async function transcribeChunk(samples) {
   pendingChunks += 1;
   speakButton.dataset.busy = 'true';
-  diag('chunk', { sec: Math.round(samples.length / 1600) / 10 });
+  if (serverSttOk) {
+    const t0 = performance.now();
+    try {
+      const ctrl = new AbortController();
+      const timer = window.setTimeout(() => ctrl.abort(), 25000);
+      const res = await fetch('/api/transcribe', {
+        method: 'POST',
+        body: samples.buffer,
+        headers: { 'Content-Type': 'application/octet-stream' },
+        signal: ctrl.signal,
+      });
+      window.clearTimeout(timer);
+      if (!res.ok) throw new Error('http ' + res.status);
+      const data = await res.json();
+      const ms = Math.round(performance.now() - t0);
+      diag('stt-server', { ms, chars: (data.text || '').length });
+      settleChunk();
+      if (data.text && !locked) feedVoice(data.text, true);
+      if (ms > 9000) {
+        serverSttOk = false;
+        diag('stt-server-demoted', { ms });
+        ensureSttWorker();
+      }
+      return;
+    } catch (err) {
+      serverSttOk = false;
+      diag('stt-server-fail', { msg: String((err && err.message) || err).slice(0, 120) });
+    }
+  }
+  ensureSttWorker();
+  if (!sttWorker || sttFailed) {
+    settleChunk();
+    return;
+  }
   sttWorker.postMessage({ t: 'audio', samples, id: pendingChunks }, [samples.buffer]);
 }
 
@@ -1765,12 +1810,11 @@ function feedVoice(transcript, isFinal) {
 if (speakButton && navigator.mediaDevices && window.Worker && window.AudioWorkletNode) {
   speakButton.hidden = false;
   speakButton.addEventListener('click', async () => {
-    if (locked || sttFailed) return;
+    if (locked || (sttFailed && !serverSttOk)) return;
     if (listening) { stopListening(); return; }
     listening = true;
     speakButton.dataset.listening = 'true';
     voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
-    ensureSttWorker();
     try {
       await startCapture();
     } catch (err) {

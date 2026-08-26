@@ -5,6 +5,10 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=5000 DJANGO_SETTINGS_MODUL
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# The transcription model is baked at build so the first spoken words after a deploy are not
+# waiting on a runtime download.
+RUN python -c "from faster_whisper.utils import download_model; download_model('small.en', output_dir='/app/.whisper/small.en')"
+ENV WHISPER_MODEL_DIR=/app/.whisper/small.en
 COPY . /app
 ARG GIT_REV=
 RUN if [ -n "$GIT_REV" ]; then echo "$GIT_REV" > /app/app/build_sha.txt; fi

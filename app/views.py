@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import threading
 import time
 
 from django.conf import settings
@@ -48,6 +49,55 @@ def health(request):
     response = JsonResponse({"status": "ok", "app": "entry", "build": _sha()})
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+# Server transcription (ADR 0006): the jobsite-proven engine (faster-whisper, CPU int8).
+# Audio arrives as raw 16kHz float32 PCM, is transcribed IN MEMORY, and is never written,
+# stored, or logged. VAD stays off — it deletes quiet speech (the jobsite lesson).
+_whisper_model = None
+_whisper_lock = threading.Lock()
+_TRANSCRIBE_BODY_CAP = 2 * 1024 * 1024
+
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+
+        source = os.environ.get("WHISPER_MODEL_DIR") or os.environ.get("WHISPER_MODEL", "small.en")
+        _whisper_model = WhisperModel(source, device="cpu", compute_type="int8")
+    return _whisper_model
+
+
+@csrf_exempt
+@require_POST
+def transcribe(request):
+    if len(request.body) > _TRANSCRIBE_BODY_CAP or len(request.body) < 3200:
+        return JsonResponse({"errors": [{"code": "size"}]}, status=413)
+    if not _whisper_lock.acquire(timeout=20):
+        return JsonResponse({"errors": [{"code": "busy"}]}, status=503)
+    try:
+        import numpy as np
+
+        samples = np.frombuffer(request.body, dtype=np.float32)
+        if not np.isfinite(samples).all():
+            return JsonResponse({"errors": [{"code": "payload"}]}, status=400)
+        model = _get_whisper()
+        chunks, _info = model.transcribe(
+            samples,
+            language="en",
+            beam_size=1,
+            vad_filter=False,
+            condition_on_previous_text=False,
+        )
+        text = " ".join(c.text.strip() for c in chunks if c.text.strip())
+        response = JsonResponse({"text": text[:400]})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except Exception:
+        return JsonResponse({"errors": [{"code": "engine"}]}, status=503)
+    finally:
+        _whisper_lock.release()
 
 
 def _rotate_debug_log():
