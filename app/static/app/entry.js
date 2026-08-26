@@ -1897,14 +1897,45 @@ function collectSamples() {
   return out;
 }
 
-function flushChunk() {
+function frameRms(f) {
+  let sum = 0;
+  for (let i = 0; i < f.length; i += 1) sum += f[i] * f[i];
+  return Math.sqrt(sum / f.length);
+}
+
+function flushChunk(atCap) {
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
   if (voicedLen < rate * 0.18) {
     resetChunker();
     return;
   }
+  let carry = null;
+  if (atCap && chunkBuf.length > 30) {
+    const windowFrames = Math.min(chunkBuf.length - 8, Math.ceil((rate * 1.6) / chunkBuf[0].length));
+    let bestIdx = chunkBuf.length - 1;
+    let bestRms = Infinity;
+    for (let i = chunkBuf.length - windowFrames; i < chunkBuf.length; i += 1) {
+      const r = frameRms(chunkBuf[i]);
+      if (r < bestRms) {
+        bestRms = r;
+        bestIdx = i;
+      }
+    }
+    carry = chunkBuf.slice(bestIdx);
+    chunkBuf = chunkBuf.slice(0, bestIdx);
+    chunkLen = 0;
+    for (const f of chunkBuf) chunkLen += f.length;
+  }
   const samples = collectSamples();
   resetChunker();
+  if (carry) {
+    chunkBuf = carry;
+    for (const f of carry) chunkLen += f.length;
+    const gate = Math.min(0.012, Math.max(0.0035, noiseFloor * 2.5 + 0.002));
+    for (const f of carry) {
+      if (frameRms(f) > gate) voicedLen += f.length;
+    }
+  }
   bufferGen += 1;
   chunkSeq += 1;
   const id = chunkSeq;
@@ -2058,8 +2089,12 @@ function onVoiceFrame(frame) {
   }
   if (!voicedLen && chunkLen > rate * 2) {
     while (chunkLen > rate * 0.75 && chunkBuf.length > 1) chunkLen -= chunkBuf.shift().length;
-  } else if ((voicedLen > rate * 0.18 && silenceLen > rate * 0.4) || chunkLen > rate * 7) {
-    flushChunk();
+  } else if (voicedLen > rate * 0.18 && silenceLen > rate * 0.4) {
+    flushChunk(false);
+    hasFlushedChunk = true;
+    idleSilence = 0;
+  } else if (chunkLen > rate * 7) {
+    flushChunk(true);
     hasFlushedChunk = true;
     idleSilence = 0;
   } else if (
