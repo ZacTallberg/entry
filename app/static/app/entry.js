@@ -1613,7 +1613,7 @@ function ensureSttWorker() {
       speakButton.dataset.loading = 'false';
       diag('stt-ready', { device: msg.device || '?', sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'interim') {
-      if (msg.gen === bufferGen && listening && !locked && msg.text) feedVoice(msg.text, false);
+      if (msg.gen === bufferGen && listening && msg.text) field?.setVoiceLevel(0.12);
       diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length });
     } else if (msg.t === 'final') {
       window.clearTimeout(wedgeTimer);
@@ -1922,8 +1922,7 @@ function startNative() {
         interim += chunk;
       }
     }
-    if (interim && !locked) feedVoice(interim, false);
-    field?.setVoiceLevel(0.1);
+    if (interim) field?.setVoiceLevel(0.12);
   };
   nativeRecognizer.onerror = (e) => {
     diag('stt-native-error', { err: (e && e.error) || '?' });
