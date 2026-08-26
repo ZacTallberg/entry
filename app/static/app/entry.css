@@ -525,6 +525,32 @@ body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
 #speak[data-busy="true"] .speak-dot {
   animation: speak-breathe .7s ease-in-out infinite;
 }
+.speak-wrap { position: relative; display: inline-flex; }
+#speak-hint {
+  position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  margin-top: 7px; font-size: 10px; letter-spacing: .14em; text-transform: lowercase;
+  color: rgba(174, 188, 226, .55); white-space: nowrap;
+  opacity: 0; transition: opacity .45s ease; pointer-events: none;
+}
+#speak-hint:not(:empty) { opacity: 1; }
+#speak { position: relative; }
+#speak[data-ready-pop="true"] .speak-dot { animation: speak-settle 1.1s cubic-bezier(.2, .9, .3, 1.35) 1; }
+#speak[data-ready-pop="true"]::after {
+  content: ""; position: absolute; inset: -1px; border-radius: 50%;
+  border: 1px solid rgba(203, 214, 255, .65);
+  opacity: 0; pointer-events: none;
+  animation: speak-ring-bloom 1.1s ease-out 1;
+}
+@keyframes speak-settle {
+  0% { transform: scale(.6); }
+  45% { transform: scale(1.35); }
+  70% { transform: scale(.94); }
+  100% { transform: scale(1); }
+}
+@keyframes speak-ring-bloom {
+  0% { transform: scale(.55); opacity: .75; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
 @keyframes speak-breathe {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.7); }

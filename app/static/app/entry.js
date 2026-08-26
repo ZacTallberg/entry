@@ -1571,6 +1571,12 @@ releaseButton.addEventListener('click', beginRelease);
 // leaves the page, exactly as the front door promises. One mic stream feeds both the field's
 // amplitude reactivity and the transcriber; chunks cut on natural pauses.
 const speakButton = document.getElementById('speak');
+const speakHint = document.getElementById('speak-hint');
+let speakInviteDone = false;
+
+function setSpeakHint(t) {
+  if (speakHint) speakHint.textContent = t;
+}
 let listening = false;
 let voiceBase = '';
 let sttWorker = null;
@@ -1598,6 +1604,7 @@ function ensureSttWorker() {
   const sttStarted = performance.now();
   let lastPct = 0;
   diag('stt-init', { wasm: sttWasmForced });
+  if (!sttReady) setSpeakHint('warming voice');
   sttWorker = new Worker(new URL('./stt-worker.js?v=' + assetVersion, import.meta.url), { type: 'module' });
   sttWorker.onmessage = (e) => {
     const msg = e.data;
@@ -1611,6 +1618,8 @@ function ensureSttWorker() {
     } else if (msg.t === 'ready') {
       sttReady = true;
       speakButton.dataset.loading = 'false';
+      speakButton.dataset.readyPop = 'true';
+      setSpeakHint(listening || speakInviteDone ? '' : 'tap to speak');
       diag('stt-ready', { device: msg.device || '?', sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'interim') {
       if (msg.gen === bufferGen && listening && msg.text) field?.setVoiceLevel(0.12);
@@ -1902,6 +1911,8 @@ let nativeRecognizer = null;
 
 function startNative() {
   listening = true;
+  speakInviteDone = true;
+  setSpeakHint('');
   speakButton.dataset.listening = 'true';
   voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
   nativeRecognizer = new SRNative();
@@ -1947,6 +1958,7 @@ if (speakButton && (SRNative || workerPathOk)) {
     SRNative.available({ langs: ['en-US'], processLocally: true }).then((status) => {
       nativeStatus = status;
       diag('stt-native', { status });
+      if (status === 'available' && !listening && !speakInviteDone) setSpeakHint('tap to speak');
       if (status === 'downloadable') {
         SRNative.install({ langs: ['en-US'], processLocally: true })
           .then((ok) => { diag('stt-native-install', { ok }); if (ok) nativeStatus = 'available'; })
@@ -1970,6 +1982,8 @@ if (speakButton && (SRNative || workerPathOk)) {
     }
     if (!workerPathOk || (sttFailed && !serverSttOk)) return;
     listening = true;
+    speakInviteDone = true;
+    setSpeakHint(sttReady ? '' : 'warming voice');
     speakButton.dataset.listening = 'true';
     voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
     try {

@@ -75,9 +75,12 @@
       </div>
 
       <div class="release-row">
-        <button id="speak" type="button" aria-label="Speak into the dark" hidden>
-          <span class="speak-dot" aria-hidden="true"></span>
-        </button>
+        <div class="speak-wrap">
+          <button id="speak" type="button" aria-label="Speak into the dark" hidden>
+            <span class="speak-dot" aria-hidden="true"></span>
+          </button>
+          <span id="speak-hint" role="status" aria-live="polite"></span>
+        </div>
         <button id="release" type="button" aria-label="Release these words" disabled>
           <span class="release-ring" aria-hidden="true"></span>
           <span class="release-label">release</span>
