@@ -1289,6 +1289,7 @@ function beginRelease() {
   releaseButton.disabled = true;
   releaseButton.setAttribute('aria-busy', 'true');
   setState('releasing', '');
+  if (listening) stopListening();
   const ready = field ? field.prepare(chosen.form, raw, chosen.hash) : Promise.resolve();
   field?.release(length, energy);
 
@@ -1363,6 +1364,65 @@ text.addEventListener('keydown', (event) => {
   }
 });
 releaseButton.addEventListener('click', beginRelease);
+
+// ── voice: speak into the dark (browser-native recognition; text joins the typing pipeline) ──────
+const speakButton = document.getElementById('speak');
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let listening = false;
+let voiceBase = '';
+
+function stopListening() {
+  listening = false;
+  speakButton.dataset.listening = 'false';
+  try { recognizer?.stop(); } catch (_e) {}
+}
+
+function feedVoice(transcript, isFinal) {
+  const joined = (voiceBase + transcript).slice(0, 360);
+  if (text.value === joined) return;
+  text.value = joined;
+  const tail = transcript.trim().slice(-1) || ' ';
+  onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: tail }));
+  if (isFinal) voiceBase = joined.endsWith(' ') ? joined : joined + ' ';
+}
+
+if (Recognition && speakButton) {
+  speakButton.hidden = false;
+  speakButton.addEventListener('click', () => {
+    if (locked) return;
+    if (listening) { stopListening(); return; }
+    recognizer = new Recognition();
+    recognizer.lang = navigator.language || 'en-US';
+    recognizer.continuous = true;
+    recognizer.interimResults = true;
+    voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
+    recognizer.onresult = (event) => {
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const chunk = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          voiceBase = (voiceBase + chunk).slice(0, 360);
+          voiceBase = voiceBase.endsWith(' ') ? voiceBase : voiceBase + ' ';
+          feedVoice('', true);
+        } else {
+          interim += chunk;
+        }
+      }
+      if (interim) feedVoice(interim, false);
+    };
+    recognizer.onend = stopListening;
+    recognizer.onerror = stopListening;
+    try {
+      recognizer.start();
+      listening = true;
+      speakButton.dataset.listening = 'true';
+    } catch (_e) {
+      stopListening();
+    }
+  });
+}
+
 
 document.addEventListener('pointermove', (event) => {
   const x = (event.clientX / window.innerWidth) - .5;

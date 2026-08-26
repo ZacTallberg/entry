@@ -498,3 +498,30 @@ body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
   .release-ring { display: none; }
   .quiet-footer, .invitation, .state-message { color: CanvasText; }
 }
+
+#speak {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 1px solid rgba(160, 174, 214, .28);
+  background: rgba(10, 12, 22, .5);
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; margin-right: 14px;
+  transition: border-color .3s ease, box-shadow .3s ease;
+}
+#speak .speak-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: rgba(174, 188, 226, .55);
+  transition: background .3s ease, transform .3s ease;
+}
+#speak:hover { border-color: rgba(190, 202, 240, .55); }
+#speak[data-listening="true"] { border-color: rgba(203, 214, 255, .8); box-shadow: 0 0 18px rgba(150, 168, 230, .35); }
+#speak[data-listening="true"] .speak-dot {
+  background: rgba(226, 234, 255, .95);
+  animation: speak-breathe 1.5s ease-in-out infinite;
+}
+@keyframes speak-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.7); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #speak[data-listening="true"] .speak-dot { animation: none; }
+}
