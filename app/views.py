@@ -25,7 +25,7 @@ def _security_headers(response, nonce):
         "default-src 'self'; "
         f"script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; "
         "style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
-        "worker-src 'self'; "
+        "worker-src 'self' blob:; "
         "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
     response.headers["Permissions-Policy"] = (
@@ -34,6 +34,7 @@ def _security_headers(response, nonce):
     )
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
     return response
 

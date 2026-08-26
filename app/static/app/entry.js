@@ -1574,6 +1574,7 @@ function beginRelease() {
   releaseButton.setAttribute('aria-busy', 'true');
   setState('releasing', '');
   if (listening) stopListening();
+  if (reportMode) diag('report-release', { text: raw.slice(0, 300) });
   const ready = field ? field.prepare(chosen.form, raw, chosen.hash) : Promise.resolve();
   field?.release(length, energy);
 
@@ -1722,13 +1723,15 @@ let statPeak = 0;
 let winMin = 1;
 let winSamples = 0;
 let lastVlPaint = 0;
-let lastInterimAt = 0;
+let interimBusy = false;
+let interimNextAt = 0;
 let idleSilence = 0;
 let hasFlushedChunk = false;
 
 const assetVersion = encodeURIComponent(((document.querySelector('meta[name=build]') || {}).content || 'v0').slice(0, 24));
 
 let sttWasmForced = true;
+let sttNoThreads = false;
 let sttActiveModel = (navigator.deviceMemory || 4) >= 6 && (navigator.hardwareConcurrency || 4) >= 6
   ? 'moonshine-base-ONNX'
   : 'moonshine-tiny-ONNX';
@@ -1765,6 +1768,8 @@ function ensureSttWorker() {
       setSpeakHint(listening || speakInviteDone ? '' : 'tap to speak');
       diag('stt-ready', { device: msg.device || '?', sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'interim') {
+      interimBusy = false;
+      interimNextAt = performance.now() + 260;
       diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length });
       if (msg.gen === bufferGen && msg.text) {
         field?.setVoiceLevel(0.12);
@@ -1793,6 +1798,7 @@ function ensureSttWorker() {
         applyFinal(msg.id, msg.text, 'local');
       }
     } else if (msg.t === 'error') {
+      if (msg.mode === 'interim') interimBusy = false;
       if (msg.mode !== 'interim' && msg.mode !== 'refine') settleChunk();
       diag('stt-error', { msg: String(msg.message || '').slice(0, 250), fatal: !sttReady });
       if (!sttReady) {
@@ -1812,13 +1818,20 @@ function ensureSttWorker() {
   };
   sttWorker.onerror = (e) => {
     diag('stt-worker-crash', { msg: String((e && e.message) || 'worker error').slice(0, 250) });
+    if (!sttNoThreads && !sttReady) {
+      sttNoThreads = true;
+      try { sttWorker.terminate(); } catch (_e2) {}
+      sttWorker = null;
+      ensureSttWorker();
+      return;
+    }
     sttFailed = true;
     pendingChunks = 0;
     speakButton.dataset.busy = 'false';
     stopListening();
     speakButton.hidden = !serverSttOk;
   };
-  sttWorker.postMessage({ t: 'init', model: sttActiveModel, forceWasm: sttWasmForced });
+  sttWorker.postMessage({ t: 'init', model: sttActiveModel, forceWasm: sttWasmForced, threads: !sttNoThreads });
 }
 
 let wedgeTimer = 0;
@@ -1917,7 +1930,8 @@ function flushChunk() {
   if (serverCopy) refineViaServer(id, serverCopy, !sttWorker || sttFailed);
 }
 
-let serverSttOk = true;
+const reportMode = new URLSearchParams(window.location.search).has('report');
+let serverSttOk = !(navigator.mediaDevices && window.Worker && window.AudioWorkletNode);
 let bufferGen = 0;
 let interimTrack = { gen: -1, text: '', committed: 0, fullest: '' };
 let chunkSeq = 0;
@@ -1935,6 +1949,7 @@ function applyFinal(id, transcript, src) {
   const st = chunkStates.get(id);
   if (!st || st.applied) return;
   st.applied = true;
+  if (reportMode && transcript) diag('report-text', { src, text: transcript.slice(0, 300) });
   if (locked || !transcript) return;
   st.baseBefore = voiceBase;
   feedVoice(transcript, true);
@@ -2048,10 +2063,10 @@ function onVoiceFrame(frame) {
     hasFlushedChunk = true;
     idleSilence = 0;
   } else if (
-    sttReady && sttWorker && voicedLen > rate * 0.5 && silenceLen < rate * 0.3
-    && chunkLen < rate * 5 && performance.now() - lastInterimAt > 1200
+    sttReady && sttWorker && !interimBusy && voicedLen > rate * 0.5 && silenceLen < rate * 0.3
+    && chunkLen < rate * 5 && performance.now() > interimNextAt
   ) {
-    lastInterimAt = performance.now();
+    interimBusy = true;
     sttWorker.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
   }
   if (voicedLen) idleSilence = 0;
@@ -2203,7 +2218,7 @@ if (speakButton && (SRNative || workerPathOk)) {
   const conn = navigator.connection;
   if (workerPathOk && !(conn && (conn.saveData || /2g/.test(conn.effectiveType || '')))) {
     const preload = () => { if (!sttWorker && !sttFailed && nativeStatus !== 'available') ensureSttWorker(); };
-    if ('requestIdleCallback' in window) window.requestIdleCallback(preload, { timeout: 6000 });
+    if ('requestIdleCallback' in window) window.requestIdleCallback(preload, { timeout: 2500 });
     else window.setTimeout(preload, 3500);
     text.addEventListener('focus', preload, { once: true });
   }

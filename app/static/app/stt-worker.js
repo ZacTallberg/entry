@@ -70,9 +70,14 @@ async function work() {
         let out = await asr(job.samples);
         let text = (out.text || '').trim();
         if (!text && job.mode === 'final' && job.samples && job.samples.length > 24000) {
-          const tail = job.samples.length > 96000 ? job.samples.subarray(job.samples.length - 96000) : job.samples;
-          out = await asr(tail);
+          const padded = new Float32Array(job.samples.length + 5600);
+          padded.set(job.samples);
+          out = await asr(padded);
           text = (out.text || '').trim();
+          if (!text && job.samples.length > 96000) {
+            out = await asr(padded.subarray(padded.length - 101600));
+            text = (out.text || '').trim();
+          }
         }
         postMessage({
           t: job.mode,
@@ -96,6 +101,11 @@ onmessage = (e) => {
   if (msg.t === 'init') {
     if (msg.model) modelId = msg.model;
     forceWasm = !!msg.forceWasm;
+    if (msg.threads && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) {
+      env.backends.onnx.wasm.numThreads = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2));
+    } else {
+      env.backends.onnx.wasm.numThreads = 1;
+    }
     boot();
   } else if (msg.t === 'audio') {
     if (msg.mode === 'interim' && (busy || queue.length || !asr)) return;
