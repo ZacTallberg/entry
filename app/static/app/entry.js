@@ -1899,7 +1899,7 @@ async function startCapture() {
   mute.gain.value = 0;
   node.connect(mute).connect(ctx.destination);
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
   });
   if (!listening) {
     stream.getTracks().forEach((t) => t.stop());
@@ -1914,7 +1914,12 @@ async function startCapture() {
   ctx.createMediaStreamSource(stream).connect(node);
   voiceCapture = { stream, ctx, node };
   const track = stream.getAudioTracks()[0];
-  diag('capture', { rate: ctx.sampleRate, state: ctx.state, track: track ? track.readyState : 'none', muted: track ? track.muted : null });
+  const ts = track && track.getSettings ? track.getSettings() : {};
+  diag('capture', {
+    rate: ctx.sampleRate, state: ctx.state, track: track ? track.readyState : 'none',
+    muted: track ? track.muted : null,
+    trackRate: ts.sampleRate || 0, ec: ts.echoCancellation, ns: ts.noiseSuppression, agc: ts.autoGainControl,
+  });
   if (ctx.state !== 'running') ctx.resume().catch(() => {});
   track?.addEventListener('mute', () => diag('track-mute'));
   track?.addEventListener('ended', () => diag('track-ended'));
