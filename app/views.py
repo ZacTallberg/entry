@@ -29,7 +29,8 @@ def _security_headers(response, nonce):
         "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
     response.headers["Permissions-Policy"] = (
-        "camera=(), microphone=(self), geolocation=(), payment=(), usb=(), browsing-topics=()"
+        "camera=(), microphone=(self), geolocation=(), payment=(), usb=(), browsing-topics=(), "
+        "on-device-speech-recognition=(self)"
     )
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"

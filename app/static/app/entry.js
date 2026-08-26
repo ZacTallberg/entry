@@ -1858,6 +1858,11 @@ function stopListening() {
   const wasListening = listening;
   listening = false;
   speakButton.dataset.listening = 'false';
+  if (nativeRecognizer) {
+    const r = nativeRecognizer;
+    nativeRecognizer = null;
+    try { r.stop(); } catch (_e) {}
+  }
   if (voiceCapture) {
     if (wasListening) flushChunk();
     voiceCapture.stream.getTracks().forEach((t) => t.stop());
@@ -1877,18 +1882,85 @@ function feedVoice(transcript, isFinal) {
   if (isFinal) voiceBase = joined.endsWith(' ') ? joined : joined + ' ';
 }
 
-if (speakButton && navigator.mediaDevices && window.Worker && window.AudioWorkletNode) {
+// The transcription ladder: the platform's own on-device recognizer first (true streaming,
+// nothing downloaded, audio never leaves the device), the in-page model second, the server
+// only ever as quiet refinement. No rung is load-bearing for a device that lacks it.
+const SRNative = window.SpeechRecognition || window.webkitSpeechRecognition;
+const workerPathOk = !!(navigator.mediaDevices && window.Worker && window.AudioWorkletNode);
+let nativeStatus = 'unavailable';
+let nativeFailed = false;
+let nativeRecognizer = null;
+
+function startNative() {
+  listening = true;
+  speakButton.dataset.listening = 'true';
+  voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
+  nativeRecognizer = new SRNative();
+  nativeRecognizer.processLocally = true;
+  nativeRecognizer.lang = 'en-US';
+  nativeRecognizer.continuous = true;
+  nativeRecognizer.interimResults = true;
+  nativeRecognizer.onresult = (event) => {
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const chunk = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        voiceBase = (voiceBase + chunk).slice(0, 360);
+        if (!voiceBase.endsWith(' ')) voiceBase += ' ';
+        feedVoice('', true);
+        diag('stt-native-final', { chars: chunk.length });
+      } else {
+        interim += chunk;
+      }
+    }
+    if (interim && !locked) feedVoice(interim, false);
+    field?.setVoiceLevel(0.1);
+  };
+  nativeRecognizer.onerror = (e) => {
+    diag('stt-native-error', { err: (e && e.error) || '?' });
+    const wasListening = listening;
+    nativeFailed = true;
+    stopListening();
+    if (wasListening && workerPathOk && !sttFailed && !locked) speakButton.click();
+  };
+  nativeRecognizer.onend = () => { if (listening && nativeRecognizer) stopListening(); };
+  try {
+    nativeRecognizer.start();
+    diag('stt-native-start');
+  } catch (_e) {
+    nativeFailed = true;
+    stopListening();
+  }
+}
+
+if (speakButton && (SRNative || workerPathOk)) {
   speakButton.hidden = false;
+  if (SRNative && typeof SRNative.available === 'function') {
+    SRNative.available({ langs: ['en-US'], processLocally: true }).then((status) => {
+      nativeStatus = status;
+      diag('stt-native', { status });
+      if (status === 'downloadable') {
+        SRNative.install({ langs: ['en-US'], processLocally: true })
+          .then((ok) => { diag('stt-native-install', { ok }); if (ok) nativeStatus = 'available'; })
+          .catch(() => {});
+      }
+    }).catch(() => {});
+  }
   const conn = navigator.connection;
-  if (!(conn && (conn.saveData || /2g/.test(conn.effectiveType || '')))) {
-    const preload = () => { if (!sttWorker && !sttFailed) ensureSttWorker(); };
+  if (workerPathOk && !(conn && (conn.saveData || /2g/.test(conn.effectiveType || '')))) {
+    const preload = () => { if (!sttWorker && !sttFailed && nativeStatus !== 'available') ensureSttWorker(); };
     if ('requestIdleCallback' in window) window.requestIdleCallback(preload, { timeout: 6000 });
     else window.setTimeout(preload, 3500);
     text.addEventListener('focus', preload, { once: true });
   }
   speakButton.addEventListener('click', async () => {
-    if (locked || (sttFailed && !serverSttOk)) return;
+    if (locked) return;
     if (listening) { stopListening(); return; }
+    if (SRNative && nativeStatus === 'available' && !nativeFailed) {
+      startNative();
+      return;
+    }
+    if (!workerPathOk || (sttFailed && !serverSttOk)) return;
     listening = true;
     speakButton.dataset.listening = 'true';
     voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
