@@ -49,6 +49,7 @@ async function boot() {
       });
       device = 'wasm';
     }
+    try { await asr(new Float32Array(6400)); } catch (_w) {}
     postMessage({ t: 'ready', device, model: modelId });
     work();
   } catch (err) {
@@ -66,10 +67,15 @@ async function work() {
       const job = queue.shift();
       try {
         const t0 = performance.now();
-        const out = await asr(job.samples);
+        let out = await asr(job.samples);
+        let text = (out.text || '').trim();
+        if (!text && job.mode === 'final' && job.samples && job.samples.length > 24000) {
+          out = await asr(job.samples);
+          text = (out.text || '').trim();
+        }
         postMessage({
           t: job.mode,
-          text: (out.text || '').trim(),
+          text,
           id: job.id,
           gen: job.gen,
           ms: Math.round(performance.now() - t0),

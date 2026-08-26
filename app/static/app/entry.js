@@ -1598,12 +1598,15 @@ let hasFlushedChunk = false;
 const assetVersion = encodeURIComponent(((document.querySelector('meta[name=build]') || {}).content || 'v0').slice(0, 24));
 
 let sttWasmForced = true;
+const sttModel = (navigator.deviceMemory || 4) >= 6 && (navigator.hardwareConcurrency || 4) >= 6
+  ? 'moonshine-base-ONNX'
+  : 'moonshine-tiny-ONNX';
 
 function ensureSttWorker() {
   if (sttWorker || sttFailed) return;
   const sttStarted = performance.now();
   let lastPct = 0;
-  diag('stt-init', { wasm: sttWasmForced });
+  diag('stt-init', { wasm: sttWasmForced, model: sttModel });
   if (!sttReady) {
     body.dataset.voice = 'warming';
     setSpeakHint('');
@@ -1632,13 +1635,34 @@ function ensureSttWorker() {
       setSpeakHint(listening || speakInviteDone ? '' : 'tap to speak');
       diag('stt-ready', { device: msg.device || '?', sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'interim') {
-      if (msg.gen === bufferGen && listening && msg.text) field?.setVoiceLevel(0.12);
       diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length });
+      if (msg.gen === bufferGen && msg.text) {
+        field?.setVoiceLevel(0.12);
+        if (msg.gen !== interimTrack.gen) {
+          interimTrack = { gen: msg.gen, text: msg.text, committed: 0, fullest: msg.text };
+        } else {
+          const prev = interimTrack.text.split(/\s+/);
+          const cur = msg.text.split(/\s+/);
+          let k = 0;
+          while (k < prev.length - 1 && k < cur.length - 1 && prev[k] === cur[k]) k += 1;
+          if (k > interimTrack.committed) interimTrack.committed = k;
+          interimTrack.text = msg.text;
+          if (msg.text.length > interimTrack.fullest.length) interimTrack.fullest = msg.text;
+        }
+        const settled = msg.text.split(/\s+/).slice(0, interimTrack.committed).join(' ');
+        if (settled && listening && !locked) feedVoice(settled, false);
+      }
     } else if (msg.t === 'final') {
       window.clearTimeout(wedgeTimer);
       settleChunk();
       diag('stt-final', { ms: msg.ms, chars: (msg.text || '').length, len: msg.len });
-      applyFinal(msg.id, msg.text, 'tiny');
+      const st = chunkStates.get(msg.id);
+      if (!msg.text && st && st.fallbackText && (msg.len || 0) > 24000) {
+        diag('stt-final-fallback', { chars: st.fallbackText.length });
+        applyFinal(msg.id, st.fallbackText, 'interim-fallback');
+      } else {
+        applyFinal(msg.id, msg.text, 'local');
+      }
     } else if (msg.t === 'error') {
       if (msg.mode !== 'interim' && msg.mode !== 'refine') settleChunk();
       diag('stt-error', { msg: String(msg.message || '').slice(0, 250), fatal: !sttReady });
@@ -1657,7 +1681,7 @@ function ensureSttWorker() {
     stopListening();
     speakButton.hidden = !serverSttOk;
   };
-  sttWorker.postMessage({ t: 'init', model: 'moonshine-tiny-ONNX', forceWasm: sttWasmForced });
+  sttWorker.postMessage({ t: 'init', model: sttModel, forceWasm: sttWasmForced });
 }
 
 let wedgeTimer = 0;
@@ -1721,11 +1745,16 @@ function flushChunk() {
   bufferGen += 1;
   chunkSeq += 1;
   const id = chunkSeq;
-  chunkStates.set(id, { applied: false, baseBefore: '', snapshot: '', finalText: '' });
+  chunkStates.set(id, {
+    applied: false, baseBefore: '', snapshot: '', finalText: '',
+    fallbackText: interimTrack.gen === bufferGen - 1 ? '' : interimTrack.fullest,
+  });
   chunkStates.delete(id - 8);
   pendingChunks += 1;
   speakButton.dataset.busy = 'true';
   diag('chunk', { sec: Math.round(samples.length / 1600) / 10 });
+  const provisional = chunkStates.get(id).fallbackText;
+  if (provisional && !locked) feedVoice(provisional, false);
   const serverCopy = serverSttOk ? samples.slice(0) : null;
   ensureSttWorker();
   if (sttWorker && !sttFailed) {
@@ -1740,6 +1769,7 @@ function flushChunk() {
 
 let serverSttOk = true;
 let bufferGen = 0;
+let interimTrack = { gen: -1, text: '', committed: 0, fullest: '' };
 let chunkSeq = 0;
 const chunkStates = new Map();
 
