@@ -101,11 +101,7 @@ onmessage = (e) => {
   if (msg.t === 'init') {
     if (msg.model) modelId = msg.model;
     forceWasm = !!msg.forceWasm;
-    if (msg.threads && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) {
-      env.backends.onnx.wasm.numThreads = Math.max(2, Math.min(6, (navigator.hardwareConcurrency || 4) - 2));
-    } else {
-      env.backends.onnx.wasm.numThreads = 1;
-    }
+    env.backends.onnx.wasm.numThreads = 1;
     boot();
   } else if (msg.t === 'audio') {
     if (msg.mode === 'interim' && (busy || queue.length || !asr)) return;
