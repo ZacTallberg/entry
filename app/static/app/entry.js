@@ -97,6 +97,9 @@ const buildSimFragment = (formDef) => `
   uniform float uDenseSwirl;
   uniform float uRingR;
   uniform float uRingAmp;
+  uniform float uVoice;
+  uniform vec2 uDriftDir;
+  uniform float uFxDrift;
 
   void main() {
     vec3 pos = texture2D(tPositions, vUv).xyz;
@@ -119,6 +122,9 @@ const buildSimFragment = (formDef) => `
       float rd = length(pos.xy) - uRingR;
       velocity.xy += normalize(pos.xy + vec2(0.0001, 0.0)) * exp(-rd * rd * 9.0) * uRingAmp * 0.05;
     }
+
+    velocity += normalize(pos + vec3(0.0001)) * uVoice * (0.032 + 0.022 * sin(uTime * 2.6));
+    velocity.xy += uDriftDir * uFxDrift * 0.015;
 
     vec2 pointerDelta = pos.xy - uPointer;
     float pointerDistance = max(length(pointerDelta), 0.12);
@@ -174,6 +180,11 @@ const buildRenderVertex = (formDef) => `
   uniform float uFxShimmer;
   uniform float uFxSizeWave;
   uniform float uFxFog;
+  uniform float uVoice;
+  uniform float uFxBands;
+  uniform float uFxZones;
+  uniform vec2 uZoneDir;
+  uniform float uZoneHue;
   varying float vDepthA;
   void main() {
     vec3 p = texture2D(tPositions, position.xy).xyz;
@@ -186,6 +197,9 @@ const buildRenderVertex = (formDef) => `
     vec3 base = formColor(p, uTime, id, glow) * shimmer;
     base *= 1.0 - uFxTurb * 0.5 + uFxTurb * (snoise(p * 1.6 + uSeed * 0.13) * 0.5 + 0.5);
     base = hueRotate(base, uHueShift);
+    base *= 1.0 - uFxBands * 0.32 + uFxBands * 0.64 * (0.5 + 0.5 * sin(length(p) * 5.5 - uTime * 0.35 + uSeed));
+    float zone = smoothstep(-0.7, 0.7, dot(p.xy, uZoneDir));
+    base = mix(base, hueRotate(base, uZoneHue), zone * uFxZones);
     float speed = length(p - prev);
     float ignite = smoothstep(0.02, 0.12, speed) * uIgnite;
     vColor = mix(base, vec3(1.0, 0.97, 0.9) * (1.0 + ignite * 1.6), ignite * 0.7);
@@ -193,7 +207,7 @@ const buildRenderVertex = (formDef) => `
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
     float size = uPointSize * FORM_SIZE / max(0.48, -mvPosition.z);
     size *= 1.0 + uFxSizeWave * 0.4 * sin(uTime * 1.9 + id * TAU);
-    size *= 1.0 + uForm * 0.45;
+    size *= 1.0 + uForm * 0.45 + uVoice * 0.3;
     gl_PointSize = size;
     gl_Position = projectionMatrix * mvPosition;
   }
@@ -723,6 +737,9 @@ class ParticleField {
         uDenseSwirl: { value: 0 },
         uRingR: { value: 0 },
         uRingAmp: { value: 0 },
+        uVoice: { value: 0 },
+        uDriftDir: { value: new THREE.Vector2(0, 0) },
+        uFxDrift: { value: 0 },
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
         tNoise: { value: this.noiseTexture },
@@ -758,6 +775,11 @@ class ParticleField {
         uFxShimmer: { value: 0 },
         uFxSizeWave: { value: 0 },
         uFxFog: { value: 0 },
+        uVoice: { value: 0 },
+        uFxBands: { value: 0 },
+        uFxZones: { value: 0 },
+        uZoneDir: { value: new THREE.Vector2(1, 0) },
+        uZoneHue: { value: 0 },
         uForm: { value: 0 },
         uNoiseOff: { value: new THREE.Vector3(0, 0, 0) },
         uOctave: { value: 0 },
@@ -903,9 +925,12 @@ class ParticleField {
       dense: roll(0x94d049bb, 0.55),
       octave: roll(0xbf58476d, 0.5),
       ring: roll(0x2545f491, 0.4),
+      bands: roll(0x7f4a7c15, 0.32),
+      drift: roll(0xe6546b64, 0.3),
+      zones: roll(0xcc9e2d51, 0.32),
     };
     if (!Object.values(fx).some(Boolean)) fx.turb = true;
-    const cosmeticDropOrder = ['beat', 'sizeWave', 'shimmer', 'fog', 'turb', 'hueDrift', 'ignite'];
+    const cosmeticDropOrder = ['beat', 'sizeWave', 'shimmer', 'fog', 'turb', 'bands', 'zones', 'drift', 'hueDrift', 'ignite'];
     let activeCount = Object.values(fx).filter(Boolean).length;
     for (const k of cosmeticDropOrder) {
       if (activeCount <= 3) break;
@@ -920,14 +945,15 @@ class ParticleField {
     this.hueDriftRate = fx.hueDrift ? 0.04 + v2 * 0.05 : 0;
     ru2.uHueShift.value = this.baseHueShift;
     ru2.uIgnite.value = fx.ignite ? (js.ignite ?? 1) : 0;
-    ru2.uFxTurb.value = fx.turb ? 0.22 + v3 * 0.2 : 0.1;
+    this.baseTurb = fx.turb ? 0.22 + v3 * 0.2 : 0.1;
+    ru2.uFxTurb.value = this.baseTurb;
     ru2.uFxShimmer.value = fx.shimmer ? 0.22 + v1 * 0.25 : 0;
     ru2.uFxSizeWave.value = fx.sizeWave ? 0.35 + v2 * 0.35 : 0;
     ru2.uFxFog.value = fx.fog ? 0.35 + v1 * 0.3 : 0;
     this.beatTempo = fx.beat ? 0.6 + v3 * 0.8 : 0;
     ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.88 + v2 * 0.28);
-    this.speedVariant = 0.78 + v3 * 0.24;
-    this.timeScale = 0.62 + (((seedHash >>> 11) % 1000) / 1000) * 0.38;
+    this.speedVariant = 0.7 + v3 * 0.2;
+    this.timeScale = 0.55 + (((seedHash >>> 11) % 1000) / 1000) * 0.3;
     const nOff = new THREE.Vector3(v1 * 16, v2 * 16, v3 * 16);
     this.simMaterial.uniforms.uNoiseOff.value.copy(nOff);
     this.renderMaterial.uniforms.uNoiseOff.value.copy(nOff);
@@ -936,17 +962,28 @@ class ParticleField {
     su2.uOctave.value = octave;
     ru2.uOctave.value = octave;
     this.densityActive = fx.dense;
+    this.baseDenseActive = fx.dense;
     if (fx.dense) {
       const mode = (Math.imul(seedHash ^ 0x94d049bb, 2246822519) >>> 0) % 3;
       su2.uDenseForce.value = mode === 0 ? -(0.42 + v1 * 0.6) : mode === 1 ? 0.35 + v3 * 0.5 : (v2 - 0.5) * 0.4;
+      this.baseDense = su2.uDenseForce.value;
       su2.uDenseSwirl.value = mode === 2 ? (v1 < 0.5 ? -1 : 1) * (0.5 + v3 * 0.6) : 0;
       su2.tDensity.value = this.densityRT.texture;
     } else {
       su2.uDenseForce.value = 0;
       su2.uDenseSwirl.value = 0;
+      this.baseDense = 0;
     }
     this.fxRing = fx.ring;
     su2.uRingAmp.value = 0;
+    this.baseBands = fx.bands ? 0.5 + v1 * 0.4 : 0;
+    this.baseZones = fx.zones ? 0.55 + v3 * 0.35 : 0;
+    ru2.uFxBands.value = this.baseBands;
+    ru2.uFxZones.value = this.baseZones;
+    ru2.uZoneHue.value = (v1 - 0.5) * 1.6;
+    su2.uFxDrift.value = fx.drift ? 0.6 + v2 * 0.5 : 0;
+    const driftA = (((seedHash >>> 21) % 1000) / 1000) * Math.PI * 2;
+    su2.uDriftDir.value.set(Math.cos(driftA), Math.sin(driftA));
     this.trailPersist = fx.trails ? Math.min(0.9, Math.max(0.35, (js.trail ?? 0.5) + (v2 - 0.5) * 0.14)) : 0.08;
     this.particles.material = this.renderMaterial;
 
@@ -1061,6 +1098,21 @@ class ParticleField {
     this.voiceLevel = (this.voiceLevel || 0) * 0.75 + rms * 0.25;
   }
 
+  fireVoiceEvent(now) {
+    this.voiceSeed = ((Math.imul(this.voiceSeed || 0x9e3779b9, 1664525) + 1013904223) >>> 0);
+    const kind = this.voiceSeed % 8;
+    this.vfx ||= { bands: 0, zones: 0, turb: 0, dense: 0, hue: 0 };
+    this.lastVoiceFx = ['bloom', 'breath', 'ring', 'hue', 'bands', 'zones', 'dense', 'turb'][kind];
+    if (kind === 0) this.excite('outward', 0.55);
+    else if (kind === 1) this.excite('inward', 0.5);
+    else if (kind === 2 && !this.releaseStarted) this.voiceRingStart = now;
+    else if (kind === 3) this.vfx.hue = (this.voiceSeed & 1 ? 1 : -1) * (0.18 + (this.voiceSeed % 97) / 400);
+    else if (kind === 4) this.vfx.bands = 0.55;
+    else if (kind === 5) this.vfx.zones = 0.5;
+    else if (kind === 6) this.vfx.dense = 0.5;
+    else this.vfx.turb = 0.22;
+  }
+
   pop(amount = 0.12) {
     this.exposurePop = Math.min(0.4, (this.exposurePop || 0) + amount);
   }
@@ -1171,7 +1223,21 @@ class ParticleField {
     }
 
 
+    this.voiceLevel = (this.voiceLevel || 0) * Math.pow(0.97, dt);
+    const vLevel = Math.min(1, this.voiceLevel * 6);
+    if (vLevel > 0.32 && now > (this.voiceEventAt || 0)) {
+      this.voiceEventAt = now + 1500 + (((this.voiceSeed || 7) % 700));
+      this.fireVoiceEvent(now);
+    }
+    this.vfx ||= { bands: 0, zones: 0, turb: 0, dense: 0, hue: 0 };
+    const vDecay = Math.pow(0.986, dt);
+    this.vfx.bands *= vDecay;
+    this.vfx.zones *= vDecay;
+    this.vfx.turb *= vDecay;
+    this.vfx.dense *= vDecay;
+    this.vfx.hue *= vDecay;
     const su = this.simMaterial.uniforms;
+    su.uVoice.value = vLevel;
     su.uDt.value = dt * (this.speedVariant || 1);
     su.uTime.value = time * (this.timeScale || 1);
     su.uEnergy.value = this.energyCurrent;
@@ -1187,6 +1253,15 @@ class ParticleField {
       if (ringT > 0) {
         su.uRingR.value = ringT * 3.4;
         su.uRingAmp.value = Math.max(0, 1 - ringT * 0.5) * (this.releaseEnergy || 1) * 1.25;
+      }
+    } else if (this.voiceRingStart && !this.releaseStarted) {
+      const vt = (now - this.voiceRingStart) / 1000;
+      if (vt > 2.8) {
+        this.voiceRingStart = 0;
+        su.uRingAmp.value = 0;
+      } else {
+        su.uRingR.value = vt * 1.15;
+        su.uRingAmp.value = 0.5 * (1 - vt / 2.8);
       }
     } else if (su.uRingAmp.value > 0) {
       su.uRingAmp.value = 0;
@@ -1204,6 +1279,9 @@ class ParticleField {
     this.renderer.render(this.simScene, this.simCamera);
     [this.targetA, this.targetB] = [this.targetB, this.targetA];
     const ru = this.renderMaterial.uniforms;
+    ru.uVoice.value = vLevel;
+    const zA = time * 0.025;
+    ru.uZoneDir.value.set(Math.cos(zA), Math.sin(zA));
     ru.tPositions.value = this.targetA.texture;
     ru.tPrev.value = this.targetB.texture;
     ru.uTime.value = time * (this.timeScale || 1);
@@ -1213,7 +1291,18 @@ class ParticleField {
     su.uForm.value = formPhase;
     ru.uForm.value = formPhase;
     exposure += formPhase * 0.3;
-    if (this.hueDriftRate) ru.uHueShift.value = this.baseHueShift + time * this.hueDriftRate;
+    ru.uFxBands.value = (this.baseBands || 0) + this.vfx.bands;
+    ru.uFxZones.value = (this.baseZones || 0) + this.vfx.zones;
+    ru.uFxTurb.value = (this.baseTurb || 0.1) + this.vfx.turb;
+    if (this.vfx.dense > 0.03) {
+      su.tDensity.value = this.densityRT.texture;
+      su.uDenseForce.value = (this.baseDense || 0) - this.vfx.dense;
+      this.densityActive = true;
+    } else {
+      su.uDenseForce.value = this.baseDense || 0;
+      this.densityActive = this.baseDenseActive || false;
+    }
+    ru.uHueShift.value = this.baseHueShift + this.vfx.hue + (this.hueDriftRate ? time * this.hueDriftRate : 0);
     if (this.beatTempo) exposure += 0.12 * Math.sin(time * this.beatTempo);
     ru.uExposure.value = exposure;
 
@@ -2187,6 +2276,7 @@ window.entryExperience = Object.freeze({
   release: beginRelease,
   reset: resetExperience,
   mode: () => body.dataset.graphics,
+  lastVoiceFx: () => field?.lastVoiceFx,
   state: () => body.dataset.state,
   forms: () => FORMS.map((f) => f.slug),
   families: () => FORMS.map((f) => [f.slug, f.family]),
