@@ -49,7 +49,11 @@ async function boot() {
       });
       device = 'wasm';
     }
-    try { await asr(new Float32Array(6400)); } catch (_w) {}
+    try {
+      const warm = new Float32Array(32000);
+      for (let i = 0; i < warm.length; i += 1) warm[i] = Math.sin(i * 0.09) * 0.25 * Math.sin(i * 0.0021);
+      await asr(warm);
+    } catch (_w) {}
     postMessage({ t: 'ready', device, model: modelId });
     work();
   } catch (err) {
@@ -104,7 +108,11 @@ onmessage = (e) => {
   if (msg.t === 'init') {
     if (msg.model) modelId = msg.model;
     forceWasm = !!msg.forceWasm;
-    env.backends.onnx.wasm.numThreads = 1;
+    if (msg.threads && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) {
+      env.backends.onnx.wasm.numThreads = Math.max(2, Math.min(4, (navigator.hardwareConcurrency || 4) - 2));
+    } else {
+      env.backends.onnx.wasm.numThreads = 1;
+    }
     boot();
   } else if (msg.t === 'audio') {
     if (msg.mode === 'interim' && (busy || queue.length || !asr)) return;

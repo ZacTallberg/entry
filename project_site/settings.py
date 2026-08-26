@@ -117,11 +117,15 @@ WHITENOISE_SKIP_COMPRESS_EXTENSIONS = [
 
 
 def _immutable_asset_headers(headers, path, url):
+    headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+    headers["Cross-Origin-Resource-Policy"] = "same-origin"
     if "/app/models/" in url or "/app/vendor/transformers/" in url:
         headers["Cache-Control"] = "public, max-age=31536000, immutable"
 
 
 WHITENOISE_ADD_HEADERS_FUNCTION = _immutable_asset_headers
+WHITENOISE_USE_FINDERS = DEBUG
+WHITENOISE_AUTOREFRESH = DEBUG
 
 # Token for hub writes (X-Write-Token). Public reads, token-gated writes (keeps a public Plot safe).
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")

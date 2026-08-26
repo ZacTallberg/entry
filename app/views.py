@@ -34,6 +34,7 @@ def _security_headers(response, nonce):
     )
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
     return response
 
@@ -130,6 +131,7 @@ def serve_asset(request, kind, path):
     response = FileResponse(open(full, "rb"), content_type=ctype)
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
     return response
 
 

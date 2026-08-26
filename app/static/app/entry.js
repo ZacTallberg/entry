@@ -1160,7 +1160,7 @@ class ParticleField {
     this.raf = 0;
     if (this.disposed || !this.active) return;
     const interacting = this.pulse > 0.03 || this.releaseStarted > 0 || now < this.animatedUntil;
-    const interval = interacting ? 1000 / 50 : 1000 / 30;
+    const interval = this.decodeBusy ? 1000 / 30 : (interacting ? 1000 / 50 : 1000 / 30);
     if (now - this.lastFrame < interval) {
       this.raf = requestAnimationFrame(this.frame);
       return;
@@ -1732,6 +1732,7 @@ const assetVersion = encodeURIComponent(((document.querySelector('meta[name=buil
 
 let sttWasmForced = true;
 let sttNoThreads = false;
+let sttBootTimer = 0;
 let sttActiveModel = (navigator.deviceMemory || 4) >= 6 && (navigator.hardwareConcurrency || 4) >= 6
   ? 'moonshine-base-ONNX'
   : 'moonshine-tiny-ONNX';
@@ -1759,6 +1760,7 @@ function ensureSttWorker() {
       }
     } else if (msg.t === 'ready') {
       sttReady = true;
+      window.clearTimeout(sttBootTimer);
       speakButton.dataset.loading = 'false';
       body.style.setProperty('--stt-pct', '100');
       if (body.dataset.voice === 'warming') {
@@ -1832,6 +1834,17 @@ function ensureSttWorker() {
     speakButton.hidden = !serverSttOk;
   };
   sttWorker.postMessage({ t: 'init', model: sttActiveModel, forceWasm: sttWasmForced, threads: !sttNoThreads });
+  window.clearTimeout(sttBootTimer);
+  sttBootTimer = window.setTimeout(() => {
+    if (sttReady || !sttWorker) return;
+    diag('stt-boot-hang', { threads: !sttNoThreads });
+    if (!sttNoThreads) {
+      sttNoThreads = true;
+      try { sttWorker.terminate(); } catch (_e) {}
+      sttWorker = null;
+      ensureSttWorker();
+    }
+  }, 25000);
 }
 
 let wedgeTimer = 0;
@@ -1952,6 +1965,7 @@ function flushChunk(atCap) {
   chunkStates.delete(id - 8);
   pendingChunks += 1;
   speakButton.dataset.busy = 'true';
+  if (field) field.decodeBusy = true;
   diag('chunk', { sec: Math.round(samples.length / 1600) / 10, gain: Math.round(lastNormGain * 10) / 10 });
   const provisional = chunkStates.get(id).fallbackText;
   if (provisional && !locked) feedVoice(provisional, false);
@@ -1978,6 +1992,7 @@ function settleChunk() {
   pendingChunks = Math.max(0, pendingChunks - 1);
   if (!pendingChunks) {
     speakButton.dataset.busy = 'false';
+    if (field) field.decodeBusy = false;
     if (!listening) scheduleRelease();
   }
 }
@@ -2104,7 +2119,7 @@ function onVoiceFrame(frame) {
     hasFlushedChunk = true;
     idleSilence = 0;
   } else if (
-    sttReady && sttWorker && !interimBusy && voicedLen > rate * 0.5 && silenceLen < rate * 0.3
+    sttReady && sttWorker && !interimBusy && voicedLen > rate * 0.5 && silenceLen < rate * 0.12
     && chunkLen < rate * 5 && performance.now() > interimNextAt
   ) {
     interimBusy = true;
