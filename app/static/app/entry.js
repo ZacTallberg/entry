@@ -2346,6 +2346,7 @@ if (speakButton && (SRNative || workerPathOk)) {
     if (listening) { stopListening(); return; }
     if (SRNative && nativeStatus === 'available' && !nativeFailed) {
       startNative();
+      window.setTimeout(preload, 2200);
       return;
     }
     if (!workerPathOk || (sttFailed && !serverSttOk)) return;
