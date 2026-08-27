@@ -2384,7 +2384,6 @@ function releaseHeldAudio(session, srate) {
 // ahead of the bytes we have confirmed.
 let dialReal = 0;
 let dialShown = 0;
-let dialFrom = 0;
 let dialLast = 0;
 let dialFrame = 0;
 
@@ -2408,7 +2407,6 @@ function dialStep(now) {
 }
 
 function dialReport(frac) {
-  if (!dialFrom) dialFrom = performance.now();
   dialReal = Math.max(dialReal, Math.min(0.999, frac));
   if (!dialFrame) dialFrame = requestAnimationFrame(dialStep);
 }
