@@ -1,7 +1,16 @@
 """Pulls transcription assets onto the assets mount. Keys, not URLs — dokku run
 eval-mangles quoted arguments, so everything here is a bare word."""
 import os
+import shutil
 import urllib.request
+
+_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0 Safari/537.36"
+
+
+def _fetch(url, dest):
+    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "*/*"})
+    with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
 
 from django.core.management.base import BaseCommand
 
@@ -68,7 +77,7 @@ class Command(BaseCommand):
         for url, rel in ASSETS[options["key"]]:
             dest = os.path.join(base, rel)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            urllib.request.urlretrieve(url, dest)
+            _fetch(url, dest)
             size = os.path.getsize(dest)
             total += size
             self.stdout.write(f"{rel} {size}")
