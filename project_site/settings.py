@@ -125,6 +125,8 @@ def _immutable_asset_headers(headers, path, url):
 
 WHITENOISE_ADD_HEADERS_FUNCTION = _immutable_asset_headers
 WHITENOISE_USE_FINDERS = DEBUG
+# the mounted model weights are symlinked into STATIC_ROOT at boot; whitenoise must follow
+WHITENOISE_ALLOW_ALL_ORIGINS = False
 WHITENOISE_AUTOREFRESH = DEBUG
 
 # Token for hub writes (X-Write-Token). Public reads, token-gated writes (keeps a public Plot safe).

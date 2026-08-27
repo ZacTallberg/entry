@@ -19,4 +19,4 @@ EXPOSE 5000
 # Migrate and idempotently seed the task plane on boot, then keep the push-first Hub on one coherent
 # ASGI process. Uvicorn serves product and SSE connections asynchronously; horizontal workers
 # require a configured shared HUB_REALTIME_BROKER before they are safe. Secrets are injected by Dokku.
-CMD sh -c "python manage.py migrate --noinput && python manage.py seedhub && exec uvicorn project_site.asgi:application --host 0.0.0.0 --port ${PORT} --workers 1 --proxy-headers --forwarded-allow-ips='*'"
+CMD sh -c "mkdir -p /app/staticfiles/app && ln -sfn /app/assets/models /app/staticfiles/app/models && python manage.py migrate --noinput && python manage.py seedhub && exec uvicorn project_site.asgi:application --host 0.0.0.0 --port ${PORT} --workers 1 --proxy-headers --forwarded-allow-ips='*'"
