@@ -116,20 +116,20 @@ export function createWordDust(host) {
     writeHeadAt = startAt + duration + 40;
     const font = `${cs.fontStyle} ${cs.fontWeight} ${parseFloat(cs.fontSize) * dpr}px ${cs.fontFamily}`;
     sctx.font = font;
+    // Each glyph sits where the DOM puts it: measure the prefix so kerning is kept, and add the
+    // element's letter-spacing per character. Summing bare glyph widths draws the word wider than
+    // its span, and long words run into the next one.
+    const tracking = (parseFloat(cs.letterSpacing) || 0) * dpr;
     const chars = [];
-    let cursor = 0;
     for (let i = 0; i < label.length; i += 1) {
       const ch = label[i];
-      const wid = sctx.measureText(ch).width;
-      if (ch.trim()) {
-        chars.push({
-          ch,
-          dx: cursor,
-          at: startAt + chars.length * perLetter,
-          seed: Math.random() * 1000,
-        });
-      }
-      cursor += wid;
+      if (!ch.trim()) continue;
+      chars.push({
+        ch,
+        dx: sctx.measureText(label.slice(0, i)).width + tracking * i,
+        at: startAt + chars.length * perLetter,
+        seed: Math.random() * 1000,
+      });
     }
     return {
       label,

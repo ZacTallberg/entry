@@ -252,6 +252,7 @@ body[data-state="returned"] #entry-text::placeholder { opacity: 0; }
   min-height: 1.5em;
   padding: 10px 12px 14px;
   overflow: auto;
+  scrollbar-width: none;
   border: 0;
   outline: 0;
   background: transparent;
@@ -610,7 +611,10 @@ body[data-dictating="true"] .composer::before {
 }
 
 /* the DOM words only hold the layout; the dust is what you see */
-body[data-dictating="true"] #dictation-mirror .w { color: transparent; }
+/* The dust draws the glyphs; the DOM word only holds the layout the dust reads. Leaving the
+   resolve animation running here stretched every arriving word by up to .12em of letter-spacing
+   — invisible, but it spread the words apart and rewrapped the line under the dust. */
+body[data-dictating="true"] #dictation-mirror .w { color: transparent; animation: none; }
 body[data-dictating="true"] #dictation-mirror .w::before { content: none; }
 body[data-dictating="true"] #entry-text { color: transparent; }
 

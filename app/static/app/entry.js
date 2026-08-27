@@ -2318,6 +2318,14 @@ function paintMirror(full) {
     mirror.appendChild(span);
     mirrorWords.push(token);
   }
+  // The textarea scrolls to keep the newest words in view; the mirror is what the visitor
+  // actually reads, so it has to follow, and the dust reads its positions after it has moved.
+  if (body.dataset.dictating === 'true') {
+    text.scrollTop = text.scrollHeight;
+    mirror.scrollTop = mirror.scrollHeight;
+  } else {
+    mirror.scrollTop = text.scrollTop;
+  }
   if (dust) {
     requestAnimationFrame(() => {
       if (dust) dust.sync(Array.from(mirror.querySelectorAll('.w')));
@@ -2611,6 +2619,12 @@ if (speakButton && (SRNative || workerPathOk)) {
     if ('requestIdleCallback' in window) window.requestIdleCallback(preload, { timeout: 2500 });
     else window.setTimeout(preload, 3500);
     text.addEventListener('focus', preload, { once: true });
+  }
+  if (mirror) {
+    text.addEventListener('scroll', () => {
+      mirror.scrollTop = text.scrollTop;
+      if (dust) dust.sync(Array.from(mirror.querySelectorAll('.w')));
+    }, { passive: true });
   }
   ensureStreaming();
   speakButton.addEventListener('click', async () => {
