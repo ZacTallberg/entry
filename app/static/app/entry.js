@@ -1731,7 +1731,7 @@ let hasFlushedChunk = false;
 const assetVersion = encodeURIComponent(((document.querySelector('meta[name=build]') || {}).content || 'v0').slice(0, 24));
 
 let sttWasmForced = true;
-let sttNoThreads = false;
+let sttNoThreads = true;
 let sttBootTimer = 0;
 let sttActiveModel = 'moonshine-tiny-ONNX';
 const refinerWanted = (navigator.deviceMemory || 4) >= 6 && (navigator.hardwareConcurrency || 4) >= 6;
@@ -1836,7 +1836,7 @@ function ensureSttWorker() {
       sttWorker = null;
       ensureSttWorker();
     }
-  }, 8000);
+  }, 6000);
 }
 
 let wedgeTimer = 0;
