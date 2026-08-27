@@ -594,6 +594,13 @@ body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
 }
 
 body[data-dictating="true"] #dictation-mirror { opacity: 1; }
+body[data-dictating="true"] #entry-text::placeholder { color: transparent; }
+
+/* the dark deepens under the writing line so dust reads as words, not field */
+body[data-dictating="true"] .composer::before {
+  background: radial-gradient(ellipse, rgba(2, 2, 7, .96), rgba(2, 2, 7, .82) 42%, transparent 74%);
+  transition: background .6s ease;
+}
 
 .dust-canvas {
   position: absolute;
