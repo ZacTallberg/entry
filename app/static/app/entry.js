@@ -2093,6 +2093,7 @@ function onVoiceFrame(frame) {
       streamSession.addAudio(merged, srate);
     }
   }
+  if (dust && listening && rms > 0.006) dust.breathe(Math.min(1, rms * 7));
   waveAccum += rms;
   waveCount += 1;
   if (waveCount >= 5) {
