@@ -570,6 +570,10 @@ body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
 
 .speak-wrap { position: relative; display: inline-flex; }
 
+body[data-voice-partial="true"] #entry-text {
+  text-shadow: 0 0 34px rgba(169, 188, 255, .3);
+}
+
 body[data-voice="warming"] #entry-text::placeholder { color: transparent; }
 
 @media (pointer: coarse) {

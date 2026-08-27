@@ -2077,6 +2077,9 @@ function onVoiceFrame(frame) {
   for (let i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
   const rms = Math.sqrt(sum / frame.length);
   field?.setVoiceLevel(rms * 2.2);
+  if (streamSession) {
+    streamSession.addAudio(frame, voiceCapture ? voiceCapture.ctx.sampleRate : 16000);
+  }
   waveAccum += rms;
   waveCount += 1;
   if (waveCount >= 5) {
@@ -2120,6 +2123,15 @@ function onVoiceFrame(frame) {
     });
     statSamples = 0;
     statPeak = 0;
+  }
+  if (streamSession) {
+    if (!voicedLen && rms <= gate) {
+      idleSilence += frame.length;
+      if (idleSilence > rate * 9) stopListening();
+    } else if (rms > gate) {
+      idleSilence = 0;
+    }
+    return;
   }
   if (!voicedLen) {
     idleSilence += frame.length;
@@ -2201,8 +2213,14 @@ function stopListening() {
     nativeRecognizer = null;
     try { r.stop(); } catch (_e) {}
   }
+  if (streamSession) {
+    const sess = streamSession;
+    streamSession = null;
+    sess.stop();
+    body.dataset.voicePartial = 'false';
+  }
   if (voiceCapture) {
-    if (wasListening) flushChunk();
+    if (wasListening && !streamReady) flushChunk();
     voiceCapture.stream.getTracks().forEach((t) => t.stop());
     voiceCapture.ctx.close().catch(() => {});
     voiceCapture = null;
@@ -2229,6 +2247,85 @@ function feedVoice(transcript, isFinal) {
 // nothing downloaded, audio never leaves the device), the in-page model second, the server
 // only ever as quiet refinement. No rung is load-bearing for a device that lacks it.
 const SRNative = window.SpeechRecognition || window.webkitSpeechRecognition;
+let streamMod = null;
+let streamReady = false;
+let streamFailed = false;
+let streamSession = null;
+let streamLoading = false;
+let streamBase = '';
+let preload = () => {};
+
+async function ensureStreaming() {
+  if (streamReady || streamFailed || streamLoading) return streamReady;
+  streamLoading = true;
+  const t0 = performance.now();
+  try {
+    streamMod = await import('./stream-stt.js?v=' + assetVersion);
+    if (!streamMod.streamingSupported()) {
+      streamFailed = true;
+      diag('rung-a-unsupported');
+      return false;
+    }
+    diag('rung-a-load');
+    await streamMod.loadStreaming((frac) => {
+      const pct = String(Math.round(frac * 100));
+      speakButton.style.setProperty('--stt-pct', pct);
+      body.style.setProperty('--stt-pct', pct);
+      speakButton.dataset.loading = 'true';
+      if (!body.dataset.voice) body.dataset.voice = 'warming';
+    });
+    streamReady = true;
+    speakButton.dataset.loading = 'false';
+    if (body.dataset.voice === 'warming') {
+      body.dataset.voice = 'ready';
+      window.setTimeout(() => { if (body.dataset.voice === 'ready') delete body.dataset.voice; }, 1200);
+    }
+    diag('rung-a-ready', { sec: Math.round((performance.now() - t0) / 100) / 10 });
+    return true;
+  } catch (err) {
+    streamFailed = true;
+    diag('rung-a-fail', { msg: String((err && err.message) || err).slice(0, 200) });
+    return false;
+  } finally {
+    streamLoading = false;
+  }
+}
+
+function startStreaming() {
+  streamBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
+  let firstAt = 0;
+  const startedAt = performance.now();
+  streamSession = streamMod.openStream({
+    onText: (committed, partial) => {
+      if (!listening || locked) return;
+      if (!firstAt && (committed || partial)) {
+        firstAt = performance.now();
+        diag('rung-a-first', { ms: Math.round(firstAt - startedAt) });
+      }
+      const joined = (streamBase + committed + (partial ? (committed ? ' ' : '') + partial : '')).slice(0, 360);
+      body.dataset.voicePartial = partial ? 'true' : 'false';
+      if (text.value !== joined) {
+        text.value = joined;
+        onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' }));
+      }
+      if (committed) voiceBase = (streamBase + committed).endsWith(' ') ? streamBase + committed : streamBase + committed + ' ';
+      field?.setVoiceLevel(0.1);
+    },
+    onLag: (ms) => diag('rung-a-lag', { ms: Math.round(ms) }),
+    onError: (msg) => {
+      diag('rung-a-error', { msg: String(msg).slice(0, 160) });
+      streamFailed = true;
+      const was = listening;
+      stopListening();
+      if (was && !locked) window.setTimeout(() => speakButton.click(), 80);
+    },
+  });
+  listening = true;
+  speakInviteDone = true;
+  setSpeakHint('');
+  speakButton.dataset.listening = 'true';
+  return startCapture();
+}
 const workerPathOk = !!(navigator.mediaDevices && window.Worker && window.AudioWorkletNode);
 let nativeStatus = 'unavailable';
 let nativeLocal = false;
@@ -2336,20 +2433,35 @@ if (speakButton && (SRNative || workerPathOk)) {
   }
   const conn = navigator.connection;
   if (workerPathOk && !(conn && (conn.saveData || /2g/.test(conn.effectiveType || '')))) {
-    const preload = () => { if (!sttWorker && !sttFailed) ensureSttWorker(); };
+    preload = () => { if (!sttWorker && !sttFailed) ensureSttWorker(); };
     if ('requestIdleCallback' in window) window.requestIdleCallback(preload, { timeout: 2500 });
     else window.setTimeout(preload, 3500);
     text.addEventListener('focus', preload, { once: true });
   }
+  ensureStreaming();
   speakButton.addEventListener('click', async () => {
     if (locked) return;
     if (listening) { stopListening(); return; }
+    if (streamReady && !streamFailed) {
+      diag('rung-start', { rung: 'A' });
+      try {
+        await startStreaming();
+        return;
+      } catch (err) {
+        diag('rung-a-capture-fail', { msg: String((err && err.name) || err).slice(0, 120) });
+        streamFailed = true;
+        stopListening();
+      }
+    }
+    if (!streamFailed && !streamReady) ensureStreaming();
     if (SRNative && nativeStatus === 'available' && !nativeFailed) {
+      diag('rung-start', { rung: 'B' });
       startNative();
       window.setTimeout(preload, 2200);
       return;
     }
     if (!workerPathOk || (sttFailed && !serverSttOk)) return;
+    diag('rung-start', { rung: 'C' });
     listening = true;
     speakInviteDone = true;
     setSpeakHint('');

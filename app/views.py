@@ -23,7 +23,7 @@ _DEBUG_EVENTS_CAP = 60
 def _security_headers(response, nonce):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        f"script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; "
+        f"script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval' 'unsafe-eval'; "
         "style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
         "worker-src 'self' blob:; "
         "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
@@ -112,6 +112,8 @@ _ASSET_TYPES = {
     ".mjs": "text/javascript; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
     ".json": "application/json; charset=utf-8",
+    ".ort": "application/octet-stream",
+    ".bin": "application/octet-stream",
 }
 
 
@@ -120,9 +122,13 @@ def serve_asset(request, kind, path):
     from django.http import FileResponse, Http404
     from django.utils._os import safe_join
 
+    kinds = {
+        "models": "models",
+        "vendor/transformers": os.path.join("vendor", "transformers"),
+        "vendor/moonshine": os.path.join("vendor", "moonshine"),
+    }
     try:
-        base = "models" if kind == "models" else os.path.join("vendor", "transformers")
-        full = safe_join(_ASSETS_DIR, base, path)
+        full = safe_join(_ASSETS_DIR, kinds[kind], path)
     except ValueError:
         raise Http404
     if not os.path.isfile(full):

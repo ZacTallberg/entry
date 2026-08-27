@@ -4,7 +4,7 @@ from . import views
 app_name = "app"
 urlpatterns = [
     re_path(
-        r"^static/app/(?P<kind>models|vendor/transformers)/(?P<path>.+)$",
+        r"^static/app/(?P<kind>models|vendor/transformers|vendor/moonshine)/(?P<path>.+)$",
         views.serve_asset,
         name="serve_asset",
     ),
