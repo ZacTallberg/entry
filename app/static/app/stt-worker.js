@@ -49,12 +49,15 @@ async function boot() {
       });
       device = 'wasm';
     }
-    try {
-      const warm = new Float32Array(32000);
-      for (let i = 0; i < warm.length; i += 1) warm[i] = Math.sin(i * 0.09) * 0.25 * Math.sin(i * 0.0021);
-      await asr(warm);
-    } catch (_w) {}
-    postMessage({ t: 'ready', device, model: modelId });
+    postMessage({ t: 'ready', device, model: modelId, threads: env.backends.onnx.wasm.numThreads || 1 });
+    if (!queue.length) {
+      try {
+        const warm = new Float32Array(32000);
+        for (let i = 0; i < warm.length; i += 1) warm[i] = Math.sin(i * 0.09) * 0.25 * Math.sin(i * 0.0021);
+        busy = true;
+        await asr(warm);
+      } catch (_w) {} finally { busy = false; }
+    }
     work();
   } catch (err) {
     postMessage({ t: 'error', message: String((err && err.message) || err) });

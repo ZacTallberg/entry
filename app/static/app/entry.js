@@ -1768,7 +1768,7 @@ function ensureSttWorker() {
         window.setTimeout(() => { if (body.dataset.voice === 'ready') delete body.dataset.voice; }, 1200);
       }
       setSpeakHint(listening || speakInviteDone ? '' : 'tap to speak');
-      diag('stt-ready', { device: msg.device || '?', sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
+      diag('stt-ready', { device: msg.device || '?', threads: msg.threads || 1, sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'interim') {
       interimBusy = false;
       interimNextAt = performance.now() + 260;
@@ -1844,7 +1844,7 @@ function ensureSttWorker() {
       sttWorker = null;
       ensureSttWorker();
     }
-  }, 25000);
+  }, 8000);
 }
 
 let wedgeTimer = 0;
@@ -2114,13 +2114,13 @@ function onVoiceFrame(frame) {
     flushChunk(false);
     hasFlushedChunk = true;
     idleSilence = 0;
-  } else if (chunkLen > rate * 7) {
+  } else if (chunkLen > rate * 5) {
     flushChunk(true);
     hasFlushedChunk = true;
     idleSilence = 0;
   } else if (
     sttReady && sttWorker && !interimBusy && voicedLen > rate * 0.5 && silenceLen < rate * 0.12
-    && chunkLen < rate * 5 && performance.now() > interimNextAt
+    && performance.now() > interimNextAt
   ) {
     interimBusy = true;
     sttWorker.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
