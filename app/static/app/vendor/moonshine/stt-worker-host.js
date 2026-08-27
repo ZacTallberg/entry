@@ -209,4 +209,3 @@ export class SttWorkerHost {
         this.worker.terminate();
     }
 }
-//# sourceMappingURL=stt-worker-host.js.map

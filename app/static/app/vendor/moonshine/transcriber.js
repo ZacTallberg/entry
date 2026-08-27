@@ -227,4 +227,3 @@ export class Transcriber {
         this.close();
     }
 }
-//# sourceMappingURL=transcriber.js.map

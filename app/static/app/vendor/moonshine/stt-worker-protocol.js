@@ -6,4 +6,3 @@
  * on the main thread and is out of scope here.
  */
 export {};
-//# sourceMappingURL=stt-worker-protocol.js.map

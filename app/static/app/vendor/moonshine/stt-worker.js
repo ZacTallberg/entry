@@ -228,4 +228,3 @@ onmessage = (event) => {
     }
     opChain = opChain.then(() => handle(msg)).catch((err) => failOp(msg, err));
 };
-//# sourceMappingURL=stt-worker.js.map

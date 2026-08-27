@@ -6,4 +6,3 @@
  * the main thread and is out of scope here.
  */
 export {};
-//# sourceMappingURL=tts-worker-protocol.js.map

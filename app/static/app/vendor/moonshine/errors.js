@@ -126,4 +126,3 @@ export function wrapErrors(fn) {
         throw toMoonshineError(err);
     }
 }
-//# sourceMappingURL=errors.js.map

@@ -143,4 +143,3 @@ export class Stream {
         this.close();
     }
 }
-//# sourceMappingURL=stream.js.map

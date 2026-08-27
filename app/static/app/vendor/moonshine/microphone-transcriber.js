@@ -153,4 +153,3 @@ class MoonshineCaptureProcessor extends AudioWorkletProcessor {
 }
 registerProcessor('moonshine-capture', MoonshineCaptureProcessor);
 `;
-//# sourceMappingURL=microphone-transcriber.js.map

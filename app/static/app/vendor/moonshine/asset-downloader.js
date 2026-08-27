@@ -196,4 +196,3 @@ function basename(url) {
     const idx = clean.lastIndexOf('/');
     return idx >= 0 ? clean.slice(idx + 1) : clean;
 }
-//# sourceMappingURL=asset-downloader.js.map

@@ -120,4 +120,3 @@ export class TtsWorkerHost {
         this.worker.terminate();
     }
 }
-//# sourceMappingURL=tts-worker-host.js.map

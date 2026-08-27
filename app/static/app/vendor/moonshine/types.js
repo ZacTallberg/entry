@@ -57,4 +57,3 @@ export function normalizeTranscript(raw) {
     }));
     return { lines };
 }
-//# sourceMappingURL=types.js.map

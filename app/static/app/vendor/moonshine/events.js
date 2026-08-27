@@ -54,4 +54,3 @@ function dispatch(listeners, fn) {
         }
     }
 }
-//# sourceMappingURL=events.js.map

@@ -816,4 +816,3 @@ function splitSayUtterancesWith(module, text, language) {
 function floatPcmToBytes(pcm) {
     return new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 }
-//# sourceMappingURL=text-to-speech.js.map

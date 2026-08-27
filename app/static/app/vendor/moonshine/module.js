@@ -103,4 +103,3 @@ export function loadMoonshineModule(options = {}) {
 export function resetMoonshineModule() {
     cached = undefined;
 }
-//# sourceMappingURL=module.js.map

@@ -47,4 +47,3 @@ export var TranscribeFlags;
     TranscribeFlags[TranscribeFlags["ForceUpdate"] = 1] = "ForceUpdate";
     TranscribeFlags[TranscribeFlags["SpellingMode"] = 2] = "SpellingMode";
 })(TranscribeFlags || (TranscribeFlags = {}));
-//# sourceMappingURL=enums.js.map
