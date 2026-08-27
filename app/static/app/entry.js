@@ -2275,6 +2275,7 @@ let streamReady = false;
 let streamFailed = false;
 let streamSession = null;
 let streamLoading = false;
+const streamingPossible = typeof SharedArrayBuffer === 'function' && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
 let streamBase = '';
 const mirror = document.getElementById('dictation-mirror');
 const mirrorWords = [];
@@ -2510,7 +2511,12 @@ if (speakButton && (SRNative || workerPathOk)) {
   }
   const conn = navigator.connection;
   if (workerPathOk && !(conn && (conn.saveData || /2g/.test(conn.effectiveType || '')))) {
-    preload = () => { if (!sttWorker && !sttFailed) ensureSttWorker(); };
+    // the legacy chunk worker is a last resort — it must never download alongside the
+    // streaming engine, or the two together choke the connection
+    preload = () => {
+      if (streamReady || streamLoading || (!streamFailed && streamingPossible)) return;
+      if (!sttWorker && !sttFailed) ensureSttWorker();
+    };
     if ('requestIdleCallback' in window) window.requestIdleCallback(preload, { timeout: 2500 });
     else window.setTimeout(preload, 3500);
     text.addEventListener('focus', preload, { once: true });
