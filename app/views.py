@@ -14,7 +14,19 @@ from .context import _sha
 
 # Content-free device diagnostics (ADR 0005): errors, capability flags, and voice-pipeline
 # stage timings from real devices — never the visitor's words, transcripts, audio, or IP.
-_DEBUG_LOG_PATH = "/tmp/entry-device-log.jsonl"
+def _debug_log_path():
+    """On the mount, so a deploy does not erase the device history it is being judged by."""
+    mount = os.environ.get("ENTRY_ASSETS_DIR", "/app/assets")
+    try:
+        os.makedirs(mount, exist_ok=True)
+        if os.access(mount, os.W_OK):
+            return os.path.join(mount, "device-log.jsonl")
+    except OSError:
+        pass
+    return "/tmp/entry-device-log.jsonl"
+
+
+_DEBUG_LOG_PATH = _debug_log_path()
 _DEBUG_LOG_MAX_BYTES = 4 * 1024 * 1024
 _DEBUG_BODY_CAP = 32 * 1024
 _DEBUG_EVENTS_CAP = 60

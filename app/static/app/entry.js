@@ -2080,6 +2080,10 @@ function onVoiceFrame(frame) {
   for (let i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
   const rms = Math.sqrt(sum / frame.length);
   field?.setVoiceLevel(rms * 2.2);
+  if (!streamSession && holding && holdLen < HOLD_CAP) {
+    holdFrames.push(frame.slice(0));
+    holdLen += frame.length;
+  }
   if (streamSession) {
     const srate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
     streamBatch.push(frame);
@@ -2138,7 +2142,9 @@ function onVoiceFrame(frame) {
     statSamples = 0;
     statPeak = 0;
   }
-  if (streamSession) {
+  // while the engine loads the audio is held, not chunked — the legacy path must not
+  // transcribe the same words underneath it
+  if (streamSession || holding) {
     if (!voicedLen && rms <= gate) {
       idleSilence += frame.length;
       if (idleSilence > rate * 9) stopListening();
@@ -2221,6 +2227,9 @@ function stopListening() {
   const wasListening = listening;
   listening = false;
   speakButton.dataset.listening = 'false';
+  holding = false;
+  holdFrames.length = 0;
+  holdLen = 0;
   window.clearTimeout(nativeSilentTimer);
   if (nativeRecognizer) {
     const r = nativeRecognizer;
@@ -2275,6 +2284,7 @@ let streamReady = false;
 let streamFailed = false;
 let streamSession = null;
 let streamLoading = false;
+let streamPending = null;
 const streamingPossible = typeof SharedArrayBuffer === 'function' && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
 let streamBase = '';
 const mirror = document.getElementById('dictation-mirror');
@@ -2327,8 +2337,48 @@ const streamBatch = [];
 let streamBatchLen = 0;
 let preload = () => {};
 
-async function ensureStreaming() {
-  if (streamReady || streamFailed || streamLoading) return streamReady;
+// The weights are fifty megabytes. Rather than send the first utterance to a platform
+// recogniser while they arrive, the microphone opens immediately and the audio waits here;
+// the engine is faster than real time, so it catches up as soon as it can speak.
+const holdFrames = [];
+const HOLD_CAP = 48000 * 40;
+let holdLen = 0;
+let holding = false;
+
+function releaseHeldAudio(session, srate) {
+  const span = Math.max(1, Math.round(srate * 0.5));
+  let batch = [];
+  let batchLen = 0;
+  const flush = () => {
+    if (!batchLen) return;
+    const merged = new Float32Array(batchLen);
+    let at = 0;
+    for (const f of batch) { merged.set(f, at); at += f.length; }
+    session.addAudio(merged, srate);
+    batch = [];
+    batchLen = 0;
+  };
+  for (const frame of holdFrames) {
+    batch.push(frame);
+    batchLen += frame.length;
+    if (batchLen >= span) flush();
+  }
+  flush();
+  holdFrames.length = 0;
+  holdLen = 0;
+  holding = false;
+}
+
+// A load already in flight is awaited, not reported as "not ready" — the held-audio path
+// depends on being able to wait for the engine that is already on its way.
+function ensureStreaming() {
+  if (streamReady || streamFailed) return Promise.resolve(streamReady);
+  if (streamPending) return streamPending;
+  streamPending = loadStreamingOnce().finally(() => { streamPending = null; });
+  return streamPending;
+}
+
+async function loadStreamingOnce() {
   streamLoading = true;
   const t0 = performance.now();
   try {
@@ -2366,8 +2416,20 @@ async function ensureStreaming() {
   }
 }
 
-function startStreaming() {
+function enterDictation() {
   streamBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
+  listening = true;
+  speakInviteDone = true;
+  setSpeakHint('');
+  speakButton.dataset.listening = 'true';
+  clearMirror();
+  body.dataset.dictating = 'true';
+  ensureDust().then(() => { if (dust) dust.resize(); });
+  paintMirror(text.value);
+  for (const n of mirror ? mirror.childNodes : []) n.classList.add('settled');
+}
+
+function openStreamSession() {
   let firstAt = 0;
   const startedAt = performance.now();
   streamSession = streamMod.openStream({
@@ -2396,16 +2458,42 @@ function startStreaming() {
       if (was && !locked) window.setTimeout(() => speakButton.click(), 80);
     },
   });
-  listening = true;
-  speakInviteDone = true;
-  setSpeakHint('');
-  speakButton.dataset.listening = 'true';
-  clearMirror();
-  body.dataset.dictating = 'true';
-  ensureDust().then(() => { if (dust) dust.resize(); });
-  paintMirror(text.value);
-  for (const n of mirror ? mirror.childNodes : []) n.classList.add('settled');
+  return streamSession;
+}
+
+function startStreaming() {
+  enterDictation();
+  openStreamSession();
   return startCapture();
+}
+
+// The engine is still downloading: open the microphone anyway and hold what is said.
+async function startStreamingHeld() {
+  enterDictation();
+  holdFrames.length = 0;
+  holdLen = 0;
+  holding = true;
+  const heldFrom = performance.now();
+  await startCapture();
+  const ok = await ensureStreaming();
+  if (!listening || locked) {
+    holding = false;
+    holdFrames.length = 0;
+    holdLen = 0;
+    return;
+  }
+  if (!ok) {
+    holding = false;
+    holdFrames.length = 0;
+    holdLen = 0;
+    stopListening();
+    if (!locked) window.setTimeout(() => speakButton.click(), 60);
+    return;
+  }
+  const session = openStreamSession();
+  const srate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
+  diag('rung-a-held', { ms: Math.round(performance.now() - heldFrom), sec: Math.round(holdLen / srate * 10) / 10 });
+  releaseHeldAudio(session, srate);
 }
 const workerPathOk = !!(navigator.mediaDevices && window.Worker && window.AudioWorkletNode);
 let nativeStatus = 'unavailable';
@@ -2539,7 +2627,17 @@ if (speakButton && (SRNative || workerPathOk)) {
         stopListening();
       }
     }
-    if (!streamFailed && !streamReady) ensureStreaming();
+    if (!streamFailed && !streamReady && streamingPossible) {
+      diag('rung-start', { rung: 'A-held' });
+      try {
+        await startStreamingHeld();
+        return;
+      } catch (err) {
+        diag('rung-a-held-fail', { msg: String((err && err.name) || err).slice(0, 120) });
+        holding = false;
+        stopListening();
+      }
+    }
     if (SRNative && nativeStatus === 'available' && !nativeFailed) {
       diag('rung-start', { rung: 'B' });
       startNative();
