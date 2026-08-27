@@ -2377,6 +2377,50 @@ function releaseHeldAudio(session, srate) {
   holding = false;
 }
 
+// The dial fills like a clock while the weights come down. The engine's downloader writes each
+// file into Cache Storage before it streams it, so a large file reports nothing at all for
+// seconds — the thirty-two megabyte decoder alone goes quiet for most of the wait. The hand
+// keeps moving at the rate we have actually measured, and never runs more than a quarter turn
+// ahead of the bytes we have confirmed.
+let dialReal = 0;
+let dialShown = 0;
+let dialFrom = 0;
+let dialLast = 0;
+let dialFrame = 0;
+
+function dialPaint(frac) {
+  const pct = String(Math.round(frac * 1000) / 10);
+  speakButton.style.setProperty('--stt-pct', pct);
+  body.style.setProperty('--stt-pct', pct);
+}
+
+function dialStep(now) {
+  dialFrame = 0;
+  const dt = dialLast ? Math.min(0.25, (now - dialLast) / 1000) : 0;
+  dialLast = now;
+  // confirmed bytes always win; between them the hand eases on, slowing as it goes, so a
+  // silent file reads as a long minute rather than a stopped clock
+  dialShown = Math.max(dialShown, dialReal);
+  const room = 0.97 - dialShown;
+  if (room > 0) dialShown += Math.min(room, Math.max(room * 0.14, 0.005) * dt);
+  dialPaint(dialShown);
+  if (dialShown < 0.999) dialFrame = requestAnimationFrame(dialStep);
+}
+
+function dialReport(frac) {
+  if (!dialFrom) dialFrom = performance.now();
+  dialReal = Math.max(dialReal, Math.min(0.999, frac));
+  if (!dialFrame) dialFrame = requestAnimationFrame(dialStep);
+}
+
+function dialFinish() {
+  if (dialFrame) cancelAnimationFrame(dialFrame);
+  dialFrame = 0;
+  dialReal = 1;
+  dialShown = 1;
+  dialPaint(1);
+}
+
 // A load already in flight is awaited, not reported as "not ready" — the held-audio path
 // depends on being able to wait for the engine that is already on its way.
 function ensureStreaming() {
@@ -2397,13 +2441,16 @@ async function loadStreamingOnce() {
       return false;
     }
     diag('rung-a-load');
+    // the empty face is up before the first byte, so the wait has a clock on it
+    dialPaint(0);
+    speakButton.dataset.loading = 'true';
+    if (!body.dataset.voice) body.dataset.voice = 'warming';
     await streamMod.loadStreaming((frac) => {
-      const pct = String(Math.round(frac * 100));
-      speakButton.style.setProperty('--stt-pct', pct);
-      body.style.setProperty('--stt-pct', pct);
+      dialReport(frac);
       speakButton.dataset.loading = 'true';
       if (!body.dataset.voice) body.dataset.voice = 'warming';
     });
+    dialFinish();
     streamReady = true;
     speakButton.dataset.loading = 'false';
     if (body.dataset.voice === 'warming') {

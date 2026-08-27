@@ -60,9 +60,16 @@ export async function loadStreaming(onProgress) {
     for (const name of MODEL_FILES) files[name] = MODEL + name;
     const opts = { modelArch: mod.ModelArch.TinyStreaming, wasmUrl: RUNTIME + 'moonshine.wasm' };
     if (onProgress) {
-      opts.onProgress = (p) => {
-        const bytes = (p && (p.loaded || (p.bytes && p.bytes.loaded))) || 0;
-        onProgress(Math.min(0.995, bytes / MODEL_BYTES));
+      // The downloader reports positionally — (loadedBytes, totalBytes, file) — and loadFromUrls
+      // opens its session without a declared total, so the bytes are cumulative across all seven
+      // files and the total is undefined. Reading the first argument as an object left the dial
+      // pinned at zero for the whole load.
+      let seen = 0;
+      opts.onProgress = (loaded, total) => {
+        const bytes = Number(loaded) || 0;
+        const whole = Number(total) || MODEL_BYTES;
+        seen = Math.max(seen, bytes / whole);
+        onProgress(Math.max(0, Math.min(0.995, seen)));
       };
     }
     try {

@@ -500,6 +500,13 @@ body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
   .quiet-footer, .invitation, .state-message { color: CanvasText; }
 }
 
+/* registered so the sweep glides between download reports instead of stepping */
+@property --stt-pct {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0;
+}
+
 #speak {
   --vl: 0;
   position: relative;
@@ -526,13 +533,35 @@ body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
   transition: opacity .5s ease;
 }
 
+#speak::after {
+  position: absolute;
+  inset: -1.5px;
+  border-radius: 50%;
+  content: "";
+  opacity: 0;
+  transition: opacity .5s ease;
+  pointer-events: none;
+}
+
+/* While the engine downloads, the dial fills like a clock: a soft face sweeping
+   clockwise from twelve, and a bright rim arc holding the exact hand position. */
 #speak[data-loading="true"]::before {
   background: conic-gradient(
-    rgba(174, 194, 255, .6) calc(var(--stt-pct, 0) * 1%),
-    rgba(174, 194, 255, .08) 0
+    rgba(170, 192, 255, .17) calc(var(--stt-pct, 0) * 1%),
+    rgba(150, 170, 235, .022) 0
   );
-  -webkit-mask: radial-gradient(circle, transparent calc(100% - 2px), #000 calc(100% - 1px));
-  mask: radial-gradient(circle, transparent calc(100% - 2px), #000 calc(100% - 1px));
+  -webkit-mask: radial-gradient(circle closest-side, #000 calc(100% - 9px), transparent calc(100% - 7px));
+  mask: radial-gradient(circle closest-side, #000 calc(100% - 9px), transparent calc(100% - 7px));
+  opacity: 1;
+}
+
+#speak[data-loading="true"]::after {
+  background: conic-gradient(
+    rgba(204, 218, 255, .82) calc(var(--stt-pct, 0) * 1%),
+    rgba(174, 194, 255, .07) 0
+  );
+  -webkit-mask: radial-gradient(circle closest-side, transparent calc(100% - 3px), #000 calc(100% - 1.5px));
+  mask: radial-gradient(circle closest-side, transparent calc(100% - 3px), #000 calc(100% - 1.5px));
   opacity: 1;
 }
 
