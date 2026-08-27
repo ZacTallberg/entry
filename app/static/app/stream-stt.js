@@ -14,6 +14,9 @@ export const MODEL_BYTES = 45233659;
 let transcriber = null;
 let stream = null;
 let loading = null;
+// The engine keeps its lines across sessions; ids retired with a session must never
+// reappear in the next one, or a second utterance inherits the first one's words.
+const retiredIds = new Set();
 
 export function streamingSupported() {
   return typeof SharedArrayBuffer === 'function'
@@ -60,7 +63,9 @@ export function openStream(listener) {
   };
   const upsert = (line, complete) => {
     if (!line || typeof line.text !== 'string') return;
-    lines.set(String(line.id), { text: line.text.trim(), complete: complete || !!line.isComplete });
+    const id = String(line.id);
+    if (retiredIds.has(id)) return;
+    lines.set(id, { text: line.text.trim(), complete: complete || !!line.isComplete });
     emit();
     if (listener.onLag && typeof line.lastTranscriptionLatencyMs === 'number') {
       listener.onLag(line.lastTranscriptionLatencyMs);
@@ -86,6 +91,7 @@ export function openStream(listener) {
     stop() {
       try { transcriber.stop(); } catch (_e) {}
       try { transcriber.removeAllListeners(); } catch (_e) {}
+      for (const id of lines.keys()) retiredIds.add(id);
       lines.clear();
       stream = null;
     },
