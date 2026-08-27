@@ -2299,13 +2299,18 @@ function paintMirror(full) {
   mirrorWords.length = keep;
   const fresh = [];
   for (let i = keep; i < words.length; i += 1) {
+    if (!words[i].trim()) {
+      mirror.appendChild(document.createTextNode(words[i]));
+      mirrorWords.push(words[i]);
+      continue;
+    }
     const span = document.createElement('span');
     span.className = 'w';
     span.textContent = words[i];
     span.dataset.w = words[i];
     mirror.appendChild(span);
     mirrorWords.push(words[i]);
-    if (words[i].trim()) fresh.push(span);
+    fresh.push(span);
   }
   if (fresh.length && dust) {
     requestAnimationFrame(() => { for (const span of fresh) dust.spawn(span); });

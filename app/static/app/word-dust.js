@@ -2,7 +2,7 @@
 // are revealed through it, left to right — the smoke eats the edges of the glyphs until
 // the phrase settles. Never beads, never a hard paste-in.
 
-const MAX_PUFFS = 90;
+const MAX_PUFFS = 150;
 
 export function createWordDust(host) {
   const canvas = document.createElement('canvas');
@@ -58,7 +58,7 @@ export function createWordDust(host) {
 
   // Voice heard: vapour gathers along the line the words will occupy.
   function breathe(level) {
-    const want = Math.min(MAX_PUFFS, Math.round(14 + level * 46));
+    const want = Math.min(MAX_PUFFS, Math.round(26 + level * 90));
     if (puffs.length >= want) return;
     puffs.push({
       x: canvas.width * (0.18 + Math.random() * 0.64),
@@ -90,48 +90,38 @@ export function createWordDust(host) {
     const duration = Math.max(200, label.trim().length * perLetter);
     const startAt = Math.max(nowMs, writeHeadAt);
     writeHeadAt = startAt + duration + 40;
+    const font = `${cs.fontStyle} ${cs.fontWeight} ${parseFloat(cs.fontSize) * dpr}px ${cs.fontFamily}`;
+    sctx.font = font;
+    const chars = [];
+    let cursor = 0;
+    for (let i = 0; i < label.length; i += 1) {
+      const ch = label[i];
+      const wid = sctx.measureText(ch).width;
+      if (ch.trim()) {
+        chars.push({
+          ch,
+          dx: cursor,
+          at: startAt + chars.length * perLetter,
+          seed: Math.random() * 1000,
+        });
+      }
+      cursor += wid;
+    }
     words.push({
-      text: label,
       x: (r.left - hostRect.left) * dpr,
       y: (r.top - hostRect.top) * dpr,
       w: r.width * dpr,
       h: r.height * dpr,
-      font: `${cs.fontStyle} ${cs.fontWeight} ${parseFloat(cs.fontSize) * dpr}px ${cs.fontFamily}`,
+      font,
       baseline: parseFloat(cs.fontSize) * dpr * 0.8,
+      chars,
       startAt,
       duration,
-      seed: Math.random() * 1000,
     });
     start();
   }
 
-  // The reveal edge is ragged and breathing — vapour eating into the glyphs.
-  function maskWord(word, progress, t) {
-    const pad = 26 * dpr;
-    const left = word.x - pad;
-    const width = word.w + pad * 2;
-    const edgeX = left + width * progress;
-    const feather = 62 * dpr;
-    sctx.globalCompositeOperation = 'destination-in';
-    const grad = sctx.createLinearGradient(edgeX - feather, 0, edgeX + feather * 0.35, 0);
-    grad.addColorStop(0, 'rgba(0,0,0,1)');
-    grad.addColorStop(0.55, 'rgba(0,0,0,0.55)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    sctx.fillStyle = grad;
-    sctx.fillRect(left, word.y - pad, width, word.h + pad * 2);
-    // ragged bites out of the leading edge so it never reads as a wipe
-    sctx.globalCompositeOperation = 'destination-out';
-    for (let i = 0; i < 5; i += 1) {
-      const ph = word.seed + i * 1.7;
-      const bx = edgeX + Math.sin(t * 0.9 + ph) * 26 * dpr - i * 9 * dpr;
-      const by = word.y + word.h * (0.18 + 0.66 * ((Math.sin(ph * 3.1) + 1) / 2));
-      const br = (13 + 12 * ((Math.cos(ph * 2.3) + 1) / 2)) * dpr;
-      sctx.globalAlpha = 0.5;
-      sctx.drawImage(puff, bx - br, by - br, br * 2, br * 2);
-    }
-    sctx.globalAlpha = 1;
-    sctx.globalCompositeOperation = 'source-over';
-  }
+  const CHAR_FADE = 380;
 
   function frame(now) {
     raf = 0;
@@ -158,7 +148,7 @@ export function createWordDust(host) {
       h.y += h.vy * dt;
       h.rot += h.spin * dt;
       const radius = h.r0 + h.life * h.grow;
-      const alpha = 0.05 * Math.min(1, aged * 6) * Math.pow(1 - aged, 1.35);
+      const alpha = 0.085 * Math.min(1, aged * 6) * Math.pow(1 - aged, 1.3);
       if (alpha <= 0.002) continue;
       ctx.save();
       ctx.globalAlpha = alpha;
@@ -169,29 +159,51 @@ export function createWordDust(host) {
     }
     ctx.globalCompositeOperation = 'source-over';
 
-    // then the words, each revealed through the vapour
+    // then the letters, each one condensing in its turn
     let pending = false;
+    ctx.textBaseline = 'alphabetic';
     for (const word of words) {
-      const elapsed = now - word.startAt;
-      if (elapsed < 0) { pending = true; continue; }
-      const progress = Math.min(1, elapsed / word.duration);
-      if (progress < 1) pending = true;
-      const settle = Math.min(1, Math.max(0, (elapsed - word.duration) / 620));
-      if (settle < 1) pending = true;
-      const rx = Math.max(0, word.x - 46 * dpr);
-      const ry = Math.max(0, word.y - 46 * dpr);
-      const rw = Math.min(canvas.width - rx, word.w + 92 * dpr);
-      const rh = Math.min(canvas.height - ry, word.h + 92 * dpr);
-      sctx.clearRect(rx, ry, rw, rh);
-      const blur = (1 - settle) * 2.4;
-      sctx.filter = blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : 'none';
-      sctx.fillStyle = 'rgba(246, 248, 255, 0.97)';
-      sctx.font = word.font;
-      sctx.textBaseline = 'alphabetic';
-      sctx.fillText(word.text, word.x, word.y + word.baseline);
-      sctx.filter = 'none';
-      if (progress < 1 || settle < 1) maskWord(word, progress, t);
-      if (rw > 0 && rh > 0) ctx.drawImage(scratch, rx, ry, rw, rh, rx, ry, rw, rh);
+      const baseY = word.y + word.baseline;
+      for (const c of word.chars) {
+        const age = now - c.at;
+        if (age < 0) { pending = true; continue; }
+        const a = Math.min(1, age / CHAR_FADE);
+        if (a < 1) pending = true;
+        const x = word.x + c.dx;
+        // the letter's own breath of vapour, thinning as it condenses
+        if (a < 1) {
+          // each letter arrives wrapped in its own vapour
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          for (let q = 0; q < 3; q += 1) {
+            const spread = (1 - a) * (10 + q * 9) * dpr;
+            const puffR = (18 + q * 12 + 26 * (1 - a)) * dpr;
+            ctx.globalAlpha = (0.34 - q * 0.08) * (1 - a * 0.85);
+            ctx.save();
+            ctx.translate(
+              x + word.h * 0.16 + Math.sin(c.seed + q * 2.1 + t * 0.6) * spread,
+              baseY - word.h * 0.3 + Math.cos(c.seed * 1.4 + q + t * 0.5) * spread * 0.6,
+            );
+            ctx.rotate(c.seed + q);
+            ctx.drawImage(puff, -puffR, -puffR * 0.78, puffR * 2, puffR * 1.56);
+            ctx.restore();
+          }
+          ctx.restore();
+        }
+        ctx.font = word.font;
+        if (a < 1) {
+          const blur = (1 - a) * 7;
+          ctx.filter = `blur(${blur.toFixed(2)}px)`;
+          ctx.globalAlpha = Math.min(1, a * 1.25);
+          ctx.fillStyle = 'rgba(246, 248, 255, 0.97)';
+          ctx.fillText(c.ch, x, baseY + (1 - a) * 2 * dpr);
+          ctx.filter = 'none';
+          ctx.globalAlpha = 1;
+        } else {
+          ctx.fillStyle = 'rgba(246, 248, 255, 0.97)';
+          ctx.fillText(c.ch, x, baseY);
+        }
+      }
     }
 
     if (puffs.length || pending) raf = requestAnimationFrame(frame);

@@ -616,7 +616,7 @@ body[data-dictating="true"] #entry-text { color: transparent; }
 
 #dictation-mirror .w {
   position: relative;
-  display: inline-block;
+  display: inline;
   white-space: pre;
   animation: word-resolve 780ms cubic-bezier(.2, .7, .25, 1) both;
 }
