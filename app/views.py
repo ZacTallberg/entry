@@ -24,7 +24,7 @@ def _security_headers(response, nonce):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         f"script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval' 'unsafe-eval'; "
-        "style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
+        "style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob:; "
         "worker-src 'self' blob:; "
         "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
@@ -117,9 +117,57 @@ _ASSET_TYPES = {
 }
 
 
+_ASSET_BLOCK = 512 * 1024
+
+
+async def _asset_blocks(full, start, length):
+    """Reads happen off the event loop. A synchronous iterator handed to the ASGI
+    handler is consumed inside the loop and the body is cut at an arbitrary offset,
+    which silently truncated every weight file larger than a single read."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    remaining = length
+    handle = await loop.run_in_executor(None, open, full, "rb")
+    try:
+        if start:
+            await loop.run_in_executor(None, handle.seek, start)
+        while remaining > 0:
+            block = await loop.run_in_executor(None, handle.read, min(_ASSET_BLOCK, remaining))
+            if not block:
+                break
+            remaining -= len(block)
+            yield block
+    finally:
+        await loop.run_in_executor(None, handle.close)
+
+
+def _parse_range(header, size):
+    if not header:
+        return None
+    header = header.strip()
+    if not header.startswith("bytes=") or "," in header:
+        return None
+    first, _, last = header[6:].partition("-")
+    try:
+        if not first:
+            if not last:
+                return None
+            start, end = max(0, size - int(last)), size - 1
+        else:
+            start = int(first)
+            end = int(last) if last else size - 1
+    except ValueError:
+        return None
+    end = min(end, size - 1)
+    if start > end or start >= size:
+        return None
+    return start, end
+
+
 @require_safe
 def serve_asset(request, kind, path):
-    from django.http import FileResponse, Http404
+    from django.http import Http404, StreamingHttpResponse
     from django.utils._os import safe_join
 
     kinds = {
@@ -129,12 +177,24 @@ def serve_asset(request, kind, path):
     }
     try:
         full = safe_join(_ASSETS_DIR, kinds[kind], path)
-    except ValueError:
+    except (ValueError, KeyError):
         raise Http404
     if not os.path.isfile(full):
         raise Http404
     ctype = _ASSET_TYPES.get(os.path.splitext(full)[1].lower(), "application/octet-stream")
-    response = FileResponse(open(full, "rb"), content_type=ctype)
+    size = os.path.getsize(full)
+    span = _parse_range(request.headers.get("Range"), size)
+    start, end = span if span else (0, max(0, size - 1))
+    length = 0 if not size else end - start + 1
+    response = StreamingHttpResponse(
+        _asset_blocks(full, start, length),
+        content_type=ctype,
+        status=206 if span else 200,
+    )
+    response.headers["Content-Length"] = str(length)
+    response.headers["Accept-Ranges"] = "bytes"
+    if span:
+        response.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
     response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"

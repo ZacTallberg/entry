@@ -9,11 +9,51 @@ const MODEL_FILES = [
   'frontend.ort', 'encoder.ort', 'adapter.ort', 'cross_kv.ort',
   'decoder_kv.ort', 'streaming_config.json', 'tokenizer.bin',
 ];
-export const MODEL_BYTES = 45233659;
+export const MODEL_BYTES = 51441771;
+
+// A response can end early while still advertising its full Content-Length, and the loader
+// would hand the engine a half-read weight file. Every file is measured against what the
+// server declared and any shortfall is re-requested by range before the engine sees it.
+async function fetchWhole(url, onDelta) {
+  const parts = [];
+  let have = 0;
+  let total = 0;
+  let stalls = 0;
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const init = have ? { headers: { Range: `bytes=${have}-` } } : {};
+    const res = await fetch(url, init);
+    if (res.status !== 200 && res.status !== 206) throw new Error(`${url} → ${res.status}`);
+    if (!total) {
+      const range = res.headers.get('Content-Range');
+      total = range ? Number(range.split('/').pop()) : Number(res.headers.get('Content-Length') || 0);
+    }
+    const body = new Uint8Array(await res.arrayBuffer());
+    // a server that ignores Range replays from the start; keep only what is still missing
+    const fresh = res.status === 206 ? body : body.subarray(Math.min(have, body.length));
+    if (fresh.length) {
+      parts.push(fresh);
+      have += fresh.length;
+      stalls = 0;
+      if (onDelta) onDelta(fresh.length);
+    } else if ((stalls += 1) >= 3) {
+      break;
+    }
+    if (!total || have >= total) break;
+  }
+  if (total && have < total) throw new Error(`short read ${url} ${have}/${total}`);
+  if (parts.length === 1) return parts[0];
+  const whole = new Uint8Array(have);
+  let at = 0;
+  for (const part of parts) { whole.set(part, at); at += part.length; }
+  return whole;
+}
 
 let transcriber = null;
 let stream = null;
 let loading = null;
+let fetchIssue = '';
+
+export function lastFetchIssue() { return fetchIssue; }
 // The engine keeps its lines across sessions; ids retired with a session must never
 // reappear in the next one, or a second utterance inherits the first one's words.
 const retiredIds = new Set();
@@ -29,16 +69,33 @@ export async function loadStreaming(onProgress) {
   if (loading) return loading;
   loading = (async () => {
     const mod = await import(RUNTIME + 'index.js');
+    let loaded = 0;
+    const tick = (n) => {
+      loaded += n;
+      if (onProgress) onProgress(Math.min(0.995, loaded / MODEL_BYTES));
+    };
     const files = {};
-    for (const name of MODEL_FILES) files[name] = MODEL + name;
-    const opts = { modelArch: mod.ModelArch.TinyStreaming, wasmUrl: RUNTIME + 'moonshine.wasm' };
-    if (onProgress) {
-      opts.onProgress = (p) => {
-        const loaded = (p && (p.loaded || (p.bytes && p.bytes.loaded))) || 0;
-        onProgress(Math.min(0.995, loaded / MODEL_BYTES));
-      };
+    const blobs = [];
+    try {
+      // each file becomes a blob the moment it lands, so the peak is one file's bytes
+      // and not the whole fifty megabytes held twice
+      await Promise.all(MODEL_FILES.map((name) => fetchWhole(MODEL + name, tick).then((bytes) => {
+        const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+        files[name] = url;
+        blobs.push(url);
+      })));
+    } catch (err) {
+      // repair failed: fall back to letting the loader fetch directly rather than refusing to start
+      for (const url of blobs.splice(0)) URL.revokeObjectURL(url);
+      fetchIssue = String((err && err.message) || err);
+      for (const name of MODEL_FILES) files[name] = MODEL + name;
     }
-    transcriber = await mod.Transcriber.loadFromUrls(files, opts);
+    const opts = { modelArch: mod.ModelArch.TinyStreaming, wasmUrl: RUNTIME + 'moonshine.wasm' };
+    try {
+      transcriber = await mod.Transcriber.loadFromUrls(files, opts);
+    } finally {
+      for (const url of blobs) URL.revokeObjectURL(url);
+    }
     return transcriber;
   })();
   try {
