@@ -75,12 +75,36 @@ export function createWordDust(host) {
     start();
   }
 
-  // A word joins the line and waits its turn to be written.
-  function spawn(span) {
+  // The line is re-synced on every revision: words that survive keep their timing and
+  // simply move; words that changed are rewritten; words that vanished are dropped. The
+  // engine revises constantly, so nothing may be pinned to a stale position.
+  function sync(spans) {
     const hostRect = host.getBoundingClientRect();
-    const r = span.getBoundingClientRect();
+    const next = [];
+    for (let i = 0; i < spans.length; i += 1) {
+      const span = spans[i];
+      const label = span.textContent || '';
+      if (!label.trim()) continue;
+      const r = span.getBoundingClientRect();
+      if (r.width < 1) continue;
+      const prev = words[next.length];
+      if (prev && prev.label === label) {
+        prev.x = (r.left - hostRect.left) * dpr;
+        prev.y = (r.top - hostRect.top) * dpr;
+        prev.w = r.width * dpr;
+        prev.h = r.height * dpr;
+        next.push(prev);
+        continue;
+      }
+      const built = build(span, r, hostRect);
+      if (built) next.push(built);
+    }
+    words = next;
+    if (words.length) start();
+  }
+
+  function build(span, r, hostRect) {
     const label = span.textContent || '';
-    if (!label.trim() || r.width < 1) return;
     const cs = window.getComputedStyle(span);
     const nowMs = performance.now();
     let perLetter = 78;
@@ -107,7 +131,8 @@ export function createWordDust(host) {
       }
       cursor += wid;
     }
-    words.push({
+    return {
+      label,
       x: (r.left - hostRect.left) * dpr,
       y: (r.top - hostRect.top) * dpr,
       w: r.width * dpr,
@@ -117,8 +142,7 @@ export function createWordDust(host) {
       chars,
       startAt,
       duration,
-    });
-    start();
+    };
   }
 
   const CHAR_FADE = 380;
@@ -219,7 +243,7 @@ export function createWordDust(host) {
 
   return {
     resize,
-    spawn,
+    sync,
     breathe,
     clear() {
       words = [];

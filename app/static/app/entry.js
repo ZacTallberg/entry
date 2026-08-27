@@ -2291,32 +2291,27 @@ async function ensureDust() {
 
 function paintMirror(full) {
   if (!mirror) return;
-  const words = full.length ? full.split(/(\s+)/).filter((w) => w.length) : [];
-  // Only the tail that actually changed re-fuzzes; settled words stay still.
-  let keep = 0;
-  while (keep < mirrorWords.length && keep < words.length && mirrorWords[keep] === words[keep]) keep += 1;
-  while (mirror.childNodes.length > keep) mirror.removeChild(mirror.lastChild);
-  mirrorWords.length = keep;
-  const fresh = [];
-  for (let i = keep; i < words.length; i += 1) {
-    if (!words[i].trim()) {
-      mirror.appendChild(document.createTextNode(words[i]));
-      mirrorWords.push(words[i]);
+  const tokens = full.length ? full.split(/(\s+)/).filter((w) => w.length) : [];
+  // The engine revises the line constantly; rebuilding it whole keeps spacing honest.
+  mirror.textContent = '';
+  mirrorWords.length = 0;
+  for (const token of tokens) {
+    if (!token.trim()) {
+      mirror.appendChild(document.createTextNode(token));
       continue;
     }
     const span = document.createElement('span');
     span.className = 'w';
-    span.textContent = words[i];
-    span.dataset.w = words[i];
+    span.textContent = token;
+    span.dataset.w = token;
     mirror.appendChild(span);
-    mirrorWords.push(words[i]);
-    fresh.push(span);
+    mirrorWords.push(token);
   }
-  if (fresh.length && dust) {
-    requestAnimationFrame(() => { for (const span of fresh) dust.spawn(span); });
+  if (dust) {
+    requestAnimationFrame(() => {
+      if (dust) dust.sync(Array.from(mirror.querySelectorAll('.w')));
+    });
   }
-  const settleAll = mirror.childNodes.length && !listening;
-  if (settleAll) for (const n of mirror.childNodes) n.classList.add('settled');
 }
 
 function clearMirror() {
