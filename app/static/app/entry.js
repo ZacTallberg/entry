@@ -1522,6 +1522,7 @@ function classifyInput(event) {
 
 function onInput(event) {
   if (locked) return;
+  if (body.dataset.dictating === 'true' && event && event.isTrusted) paintMirror(text.value);
   const now = performance.now();
   if (lastInputAt) cadence = cadence * 0.72 + clamp(now - lastInputAt, 45, 1100) * 0.28;
   lastInputAt = now;
