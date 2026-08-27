@@ -1599,7 +1599,9 @@ function beginRelease() {
     });
   }, swapAt);
 
+  if (dust) dust.disperse();
   clearTimer = window.setTimeout(() => {
+    clearMirror();
     text.value = '';
     autoSize();
     body.dataset.hasText = 'false';
@@ -2078,7 +2080,17 @@ function onVoiceFrame(frame) {
   const rms = Math.sqrt(sum / frame.length);
   field?.setVoiceLevel(rms * 2.2);
   if (streamSession) {
-    streamSession.addAudio(frame, voiceCapture ? voiceCapture.ctx.sampleRate : 16000);
+    const srate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
+    streamBatch.push(frame);
+    streamBatchLen += frame.length;
+    if (streamBatchLen >= srate * 0.064) {
+      const merged = new Float32Array(streamBatchLen);
+      let at = 0;
+      for (const f of streamBatch) { merged.set(f, at); at += f.length; }
+      streamBatch.length = 0;
+      streamBatchLen = 0;
+      streamSession.addAudio(merged, srate);
+    }
   }
   waveAccum += rms;
   waveCount += 1;
@@ -2216,8 +2228,17 @@ function stopListening() {
   if (streamSession) {
     const sess = streamSession;
     streamSession = null;
+    if (streamBatchLen) {
+      const merged = new Float32Array(streamBatchLen);
+      let at = 0;
+      for (const f of streamBatch) { merged.set(f, at); at += f.length; }
+      sess.addAudio(merged, voiceCapture ? voiceCapture.ctx.sampleRate : 16000);
+    }
+    streamBatch.length = 0;
+    streamBatchLen = 0;
     sess.stop();
     body.dataset.voicePartial = 'false';
+    window.setTimeout(clearMirror, 700);
   }
   if (voiceCapture) {
     if (wasListening && !streamReady) flushChunk();
@@ -2253,6 +2274,54 @@ let streamFailed = false;
 let streamSession = null;
 let streamLoading = false;
 let streamBase = '';
+const mirror = document.getElementById('dictation-mirror');
+const mirrorWords = [];
+let dust = null;
+
+async function ensureDust() {
+  if (dust || !mirror) return dust;
+  const mod = await import('./word-dust.js?v=' + assetVersion);
+  dust = mod.createWordDust(mirror.parentElement, mirror);
+  dust.resize();
+  window.addEventListener('resize', () => dust && dust.resize(), { passive: true });
+  return dust;
+}
+
+function paintMirror(full) {
+  if (!mirror) return;
+  const words = full.length ? full.split(/(\s+)/).filter((w) => w.length) : [];
+  // Only the tail that actually changed re-fuzzes; settled words stay still.
+  let keep = 0;
+  while (keep < mirrorWords.length && keep < words.length && mirrorWords[keep] === words[keep]) keep += 1;
+  while (mirror.childNodes.length > keep) mirror.removeChild(mirror.lastChild);
+  mirrorWords.length = keep;
+  const fresh = [];
+  for (let i = keep; i < words.length; i += 1) {
+    const span = document.createElement('span');
+    span.className = 'w';
+    span.textContent = words[i];
+    span.dataset.w = words[i];
+    mirror.appendChild(span);
+    mirrorWords.push(words[i]);
+    if (words[i].trim()) fresh.push(span);
+  }
+  if (fresh.length && dust) {
+    requestAnimationFrame(() => { for (const span of fresh) dust.spawn(span); });
+  }
+  const settleAll = mirror.childNodes.length && !listening;
+  if (settleAll) for (const n of mirror.childNodes) n.classList.add('settled');
+}
+
+function clearMirror() {
+  if (!mirror) return;
+  mirror.textContent = '';
+  mirrorWords.length = 0;
+  body.dataset.dictating = 'false';
+  if (dust) dust.clear();
+}
+
+const streamBatch = [];
+let streamBatchLen = 0;
 let preload = () => {};
 
 async function ensureStreaming() {
@@ -2306,6 +2375,7 @@ function startStreaming() {
       body.dataset.voicePartial = partial ? 'true' : 'false';
       if (text.value !== joined) {
         text.value = joined;
+        paintMirror(joined);
         onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' }));
       }
       if (committed) voiceBase = (streamBase + committed).endsWith(' ') ? streamBase + committed : streamBase + committed + ' ';
@@ -2324,6 +2394,11 @@ function startStreaming() {
   speakInviteDone = true;
   setSpeakHint('');
   speakButton.dataset.listening = 'true';
+  clearMirror();
+  body.dataset.dictating = 'true';
+  ensureDust().then(() => { if (dust) dust.resize(); });
+  paintMirror(text.value);
+  for (const n of mirror ? mirror.childNodes : []) n.classList.add('settled');
   return startCapture();
 }
 const workerPathOk = !!(navigator.mediaDevices && window.Worker && window.AudioWorkletNode);

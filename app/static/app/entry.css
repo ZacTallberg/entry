@@ -570,8 +570,117 @@ body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
 
 .speak-wrap { position: relative; display: inline-flex; }
 
-body[data-voice-partial="true"] #entry-text {
-  text-shadow: 0 0 34px rgba(169, 188, 255, .3);
+:root {
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.55' numOctaves='4' seed='7'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23g)'/%3E%3C/svg%3E");
+}
+
+#dictation-mirror {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  padding: 10px 12px 14px;
+  overflow: hidden;
+  color: rgba(245, 246, 252, .94);
+  font-size: clamp(1.55rem, 1rem + 2vw, 3.15rem);
+  font-variation-settings: "wght" 280, "wdth" 104, "opsz" 52;
+  font-weight: 280;
+  letter-spacing: -.022em;
+  line-height: 1.32;
+  text-align: center;
+  text-wrap: balance;
+  pointer-events: none;
+  opacity: 0;
+  text-shadow: 0 0 28px rgba(178, 195, 255, .12);
+}
+
+body[data-dictating="true"] #dictation-mirror { opacity: 1; }
+
+.dust-canvas {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* the DOM words only hold the layout; the dust is what you see */
+body[data-dictating="true"] #dictation-mirror .w { color: transparent; }
+body[data-dictating="true"] #dictation-mirror .w::before { content: none; }
+body[data-dictating="true"] #entry-text { color: transparent; }
+
+#dictation-mirror .w {
+  position: relative;
+  display: inline-block;
+  white-space: pre;
+  animation: word-resolve 780ms cubic-bezier(.2, .7, .25, 1) both;
+}
+
+/* the grain the word gathers from: a masked double that speckles, tightens, and hands off */
+#dictation-mirror .w::before {
+  position: absolute;
+  inset: 0;
+  color: rgba(226, 233, 255, .92);
+  content: attr(data-w);
+  pointer-events: none;
+  -webkit-mask-image: var(--grain);
+  mask-image: var(--grain);
+  -webkit-mask-mode: luminance;
+  mask-mode: luminance;
+  -webkit-mask-repeat: repeat;
+  mask-repeat: repeat;
+  animation: word-gather 780ms cubic-bezier(.2, .7, .25, 1) both;
+}
+
+#dictation-mirror .w.settled { animation: none; opacity: 1; filter: none; }
+#dictation-mirror .w.settled::before { content: none; }
+
+@keyframes word-resolve {
+  0%, 42% { opacity: 0; filter: blur(3px); letter-spacing: .12em; }
+  75% { opacity: .72; filter: blur(.8px); letter-spacing: .02em; }
+  100% { opacity: 1; filter: blur(0); letter-spacing: -.022em; }
+}
+
+@keyframes word-gather {
+  0% {
+    opacity: .95;
+    filter: blur(3.5px);
+    letter-spacing: .3em;
+    transform: translate3d(0, 3px, 0) scale(1.12);
+    -webkit-mask-size: 1500% 1500%;
+    mask-size: 1500% 1500%;
+    -webkit-mask-position: 22% 68%;
+    mask-position: 22% 68%;
+  }
+  45% {
+    opacity: 1;
+    filter: blur(1.4px);
+    letter-spacing: .1em;
+    transform: translate3d(0, 1px, 0) scale(1.04);
+    -webkit-mask-size: 520% 520%;
+    mask-size: 520% 520%;
+  }
+  78% {
+    opacity: .6;
+    filter: blur(.4px);
+    letter-spacing: .01em;
+    transform: none;
+    -webkit-mask-size: 190% 190%;
+    mask-size: 190% 190%;
+    -webkit-mask-position: 56% 40%;
+    mask-position: 56% 40%;
+  }
+  100% {
+    opacity: 0;
+    filter: blur(0);
+    letter-spacing: -.022em;
+    transform: none;
+    -webkit-mask-size: 120% 120%;
+    mask-size: 120% 120%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #dictation-mirror .w { animation: none; opacity: 1; }
+  #dictation-mirror .w::before { content: none; }
 }
 
 body[data-voice="warming"] #entry-text::placeholder { color: transparent; }
