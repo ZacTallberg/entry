@@ -2356,7 +2356,10 @@ async function ensureStreaming() {
     return true;
   } catch (err) {
     streamFailed = true;
-    diag('rung-a-fail', { msg: String((err && err.message) || err).slice(0, 200) });
+    diag('rung-a-fail', {
+      msg: String((err && err.message) || err).slice(0, 200),
+      delivery: (streamMod.lastFetchIssue && streamMod.lastFetchIssue()) || '',
+    });
     return false;
   } finally {
     streamLoading = false;

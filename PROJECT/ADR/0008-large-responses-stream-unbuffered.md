@@ -46,6 +46,16 @@ and why the cut offset varied with client speed.
   length the server declared and re-requests any shortfall by range before the engine sees a byte.
   A file that cannot be completed falls back to a direct URL rather than refusing to start.
 
+**Amendment (2026-08-27):** the client-side repair is withdrawn. Handing the loader `blob:` URLs
+broke it outright — the engine stores its weights in Cache Storage and `cache.put()` rejects a blob
+request scheme (`rung-a-fail: Request scheme 'blob' is unsupported`), so 6ca3e10 shipped a working
+transport with a dead engine and fell through to the retired legacy rung. That cache is also what
+spares a returning visitor the fifty-megabyte download, so intercepting the fetch was wrong twice.
+The engine fetches the real URLs itself; what remains client-side is `auditDelivery()`, which on a
+load failure asks each file whether it is reachable and whether the server can still hand over its
+final bytes, and reports that alongside the error. Range support on the server is what makes that
+audit possible and stays. Caught by the behavioural prod check, not by any status-code green.
+
 ## Consequences
 
 - All seven files now deliver complete, including the 32,583,720-byte decoder, and prod voice
