@@ -188,6 +188,12 @@ export function createWordDust(host) {
     ctx.textBaseline = 'alphabetic';
     for (const word of words) {
       const baseY = word.y + word.baseline;
+      let leaving = 0;
+      if (word.dissolveAt) {
+        leaving = Math.min(1, Math.max(0, (now - word.dissolveAt) / 780));
+        if (leaving >= 1) continue;
+        pending = true;
+      }
       for (const c of word.chars) {
         const age = now - c.at;
         if (age < 0) { pending = true; continue; }
@@ -215,12 +221,14 @@ export function createWordDust(host) {
           ctx.restore();
         }
         ctx.font = word.font;
-        if (a < 1) {
-          const blur = (1 - a) * 7;
-          ctx.filter = `blur(${blur.toFixed(2)}px)`;
-          ctx.globalAlpha = Math.min(1, a * 1.25);
+        const blur = (1 - a) * 7 + leaving * 9;
+        const alpha = Math.min(1, a * 1.25) * (1 - leaving);
+        const lift = (1 - a) * 2 * dpr - leaving * 10 * dpr;
+        if (blur > 0.05 || alpha < 1) {
+          ctx.filter = blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : 'none';
+          ctx.globalAlpha = Math.max(0, alpha);
           ctx.fillStyle = 'rgba(246, 248, 255, 0.97)';
-          ctx.fillText(c.ch, x, baseY + (1 - a) * 2 * dpr);
+          ctx.fillText(c.ch, x, baseY + lift);
           ctx.filter = 'none';
           ctx.globalAlpha = 1;
         } else {
@@ -254,14 +262,35 @@ export function createWordDust(host) {
       running = false;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     },
+    // the dark takes the words: they blur, lift, and leave vapour behind
     disperse() {
-      for (const h of puffs) { h.vy -= 0.35 * dpr; h.grow += 0.4; }
-      words = [];
+      const at = performance.now();
+      for (const h of puffs) { h.vy -= 0.3 * dpr; h.grow += 0.35; }
+      for (const word of words) {
+        word.dissolveAt = at + Math.random() * 160;
+        for (let ci = 0; ci < word.chars.length; ci += 3) {
+          const c = word.chars[ci];
+          const puffR = (18 + Math.random() * 20) * dpr;
+          puffs.push({
+            x: word.x + c.dx,
+            y: word.y + word.baseline - word.h * 0.3,
+            vx: (Math.random() - 0.5) * 0.5 * dpr,
+            vy: -(0.1 + Math.random() * 0.3) * dpr,
+            rot: Math.random() * Math.PI * 2,
+            spin: (Math.random() - 0.5) * 0.01,
+            r0: puffR,
+            grow: (0.3 + Math.random() * 0.4) * dpr,
+            span: 130 + Math.random() * 110,
+            life: 0,
+          });
+        }
+      }
       start();
       window.setTimeout(() => {
+        words = [];
         puffs = [];
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }, 1200);
+      }, 1500);
     },
   };
 }
