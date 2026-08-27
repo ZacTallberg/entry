@@ -1772,7 +1772,7 @@ function ensureSttWorker() {
       diag('stt-ready', { device: msg.device || '?', threads: msg.threads || 1, sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'interim') {
       interimBusy = false;
-      interimNextAt = performance.now() + 260;
+      interimNextAt = performance.now() + 160;
       diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length });
       if (msg.gen === bufferGen && msg.text) {
         field?.setVoiceLevel(0.12);
@@ -1949,7 +1949,7 @@ function frameRms(f) {
 
 function flushChunk(atCap) {
   const rate = voiceCapture ? voiceCapture.ctx.sampleRate : 16000;
-  if (voicedLen < rate * 0.18) {
+  if (voicedLen < rate * 0.14) {
     resetChunker();
     return;
   }
