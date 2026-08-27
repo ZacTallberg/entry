@@ -1761,6 +1761,7 @@ function ensureSttWorker() {
     } else if (msg.t === 'ready') {
       sttReady = true;
       window.clearTimeout(sttBootTimer);
+      window.setTimeout(ensureLiveWorker, 400);
       speakButton.dataset.loading = 'false';
       body.style.setProperty('--stt-pct', '100');
       if (body.dataset.voice === 'warming') {
@@ -1864,6 +1865,36 @@ function armWedgeWatchdog(id, samplesCopy) {
       sttWorker.postMessage({ t: 'audio', mode: 'final', id, samples: samplesCopy }, [samplesCopy.buffer]);
     }
   }, 6000);
+}
+
+let liveWorker = null;
+let liveReady = false;
+let liveFailed = false;
+
+function ensureLiveWorker() {
+  if (liveWorker || liveFailed || sttActiveModel === 'moonshine-tiny-ONNX') return;
+  liveWorker = new Worker(new URL('./stt-worker.js?v=' + assetVersion + '-live', import.meta.url), { type: 'module' });
+  liveWorker.onmessage = (e) => {
+    const msg = e.data;
+    if (msg.t === 'ready') {
+      liveReady = true;
+      diag('stt-live-ready', { threads: msg.threads || 1, sec: Math.round((performance.now() - liveStarted) / 100) / 10 });
+    } else if (msg.t === 'interim') {
+      interimBusy = false;
+      interimNextAt = performance.now() + 160;
+      diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length, live: true });
+      if (msg.gen === bufferGen && msg.text && listening && !locked) {
+        field?.setVoiceLevel(0.12);
+        feedVoice(msg.text, false);
+      }
+    } else if (msg.t === 'error') {
+      interimBusy = false;
+      if (!liveReady) liveFailed = true;
+    }
+  };
+  liveWorker.onerror = () => { liveFailed = true; liveReady = false; };
+  const liveStarted = performance.now();
+  liveWorker.postMessage({ t: 'init', model: 'moonshine-tiny-ONNX', forceWasm: sttWasmForced, threads: !sttNoThreads });
 }
 
 function resampleTo16k(samples, fromRate) {
@@ -2119,11 +2150,12 @@ function onVoiceFrame(frame) {
     hasFlushedChunk = true;
     idleSilence = 0;
   } else if (
-    sttReady && sttWorker && !interimBusy && voicedLen > rate * 0.5 && silenceLen < rate * 0.12
-    && performance.now() > interimNextAt
+    (liveReady || sttReady) && sttWorker && !interimBusy && voicedLen > rate * 0.35
+    && silenceLen < rate * 0.12 && performance.now() > interimNextAt
   ) {
     interimBusy = true;
-    sttWorker.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
+    const target = liveReady && !liveFailed ? liveWorker : sttWorker;
+    target.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
   }
   if (voicedLen) idleSilence = 0;
 }
