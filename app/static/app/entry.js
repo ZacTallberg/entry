@@ -1725,6 +1725,7 @@ let winSamples = 0;
 let lastVlPaint = 0;
 let interimBusy = false;
 let interimNextAt = 0;
+let interimAudioLen = 0;
 let idleSilence = 0;
 let hasFlushedChunk = false;
 
@@ -1771,8 +1772,10 @@ function ensureSttWorker() {
       diag('stt-ready', { device: msg.device || '?', threads: msg.threads || 1, sec: Math.round((performance.now() - sttStarted) / 100) / 10 });
     } else if (msg.t === 'interim') {
       interimBusy = false;
-      interimNextAt = performance.now() + 160;
-      diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length });
+      const decodedSec = interimAudioLen / (voiceCapture ? voiceCapture.ctx.sampleRate : 16000);
+      const rtf = decodedSec > 0 ? msg.ms / (decodedSec * 1000) : 0;
+      interimNextAt = performance.now() + Math.min(900, Math.max(120, msg.ms * 0.35));
+      diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length, rtf: Math.round(rtf * 100) / 100 });
       if (msg.gen === bufferGen && msg.text) {
         field?.setVoiceLevel(0.12);
         if (msg.gen !== interimTrack.gen) {
@@ -2136,10 +2139,11 @@ function onVoiceFrame(frame) {
     hasFlushedChunk = true;
     idleSilence = 0;
   } else if (
-    sttReady && sttWorker && !interimBusy && voicedLen > rate * 0.35
+    sttReady && sttWorker && !interimBusy && voicedLen > rate * 0.3
     && silenceLen < rate * 0.12 && performance.now() > interimNextAt
   ) {
     interimBusy = true;
+    interimAudioLen = chunkLen;
     sttWorker.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
   }
   if (voicedLen) idleSilence = 0;
