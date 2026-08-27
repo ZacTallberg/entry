@@ -49,7 +49,15 @@ async function boot() {
       });
       device = 'wasm';
     }
-    postMessage({ t: 'ready', device, model: modelId, threads: env.backends.onnx.wasm.numThreads || 1 });
+    postMessage({
+      t: 'ready',
+      device,
+      model: modelId,
+      threads: env.backends.onnx.wasm.numThreads || 1,
+      iso: typeof crossOriginIsolated !== 'undefined' ? !!crossOriginIsolated : null,
+      hw: navigator.hardwareConcurrency || 0,
+      proxy: !!env.backends.onnx.wasm.proxy,
+    });
     if (!queue.length) {
       try {
         const warm = new Float32Array(32000);

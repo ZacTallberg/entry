@@ -1733,9 +1733,8 @@ const assetVersion = encodeURIComponent(((document.querySelector('meta[name=buil
 let sttWasmForced = true;
 let sttNoThreads = false;
 let sttBootTimer = 0;
-let sttActiveModel = (navigator.deviceMemory || 4) >= 6 && (navigator.hardwareConcurrency || 4) >= 6
-  ? 'moonshine-base-ONNX'
-  : 'moonshine-tiny-ONNX';
+let sttActiveModel = 'moonshine-tiny-ONNX';
+const refinerWanted = (navigator.deviceMemory || 4) >= 6 && (navigator.hardwareConcurrency || 4) >= 6;
 
 function ensureSttWorker() {
   if (sttWorker || sttFailed) return;
@@ -1761,7 +1760,7 @@ function ensureSttWorker() {
     } else if (msg.t === 'ready') {
       sttReady = true;
       window.clearTimeout(sttBootTimer);
-      window.setTimeout(ensureLiveWorker, 400);
+      window.setTimeout(ensureRefiner, 1200);
       speakButton.dataset.loading = 'false';
       body.style.setProperty('--stt-pct', '100');
       if (body.dataset.voice === 'warming') {
@@ -1805,14 +1804,6 @@ function ensureSttWorker() {
       if (msg.mode !== 'interim' && msg.mode !== 'refine') settleChunk();
       diag('stt-error', { msg: String(msg.message || '').slice(0, 250), fatal: !sttReady });
       if (!sttReady) {
-        if (sttActiveModel === 'moonshine-base-ONNX') {
-          diag('stt-model-fallback');
-          sttActiveModel = 'moonshine-tiny-ONNX';
-          try { sttWorker.terminate(); } catch (_e) {}
-          sttWorker = null;
-          ensureSttWorker();
-          return;
-        }
         sttFailed = true;
         stopListening();
         speakButton.hidden = !serverSttOk;
@@ -1867,34 +1858,27 @@ function armWedgeWatchdog(id, samplesCopy) {
   }, 6000);
 }
 
-let liveWorker = null;
-let liveReady = false;
-let liveFailed = false;
+let refWorker = null;
+let refReady = false;
+let refFailed = false;
 
-function ensureLiveWorker() {
-  if (liveWorker || liveFailed || sttActiveModel === 'moonshine-tiny-ONNX') return;
-  liveWorker = new Worker(new URL('./stt-worker.js?v=' + assetVersion + '-live', import.meta.url), { type: 'module' });
-  liveWorker.onmessage = (e) => {
+function ensureRefiner() {
+  if (refWorker || refFailed || !refinerWanted) return;
+  const refStarted = performance.now();
+  refWorker = new Worker(new URL('./stt-worker.js?v=' + assetVersion + '-ref', import.meta.url), { type: 'module' });
+  refWorker.onmessage = (e) => {
     const msg = e.data;
     if (msg.t === 'ready') {
-      liveReady = true;
-      diag('stt-live-ready', { threads: msg.threads || 1, sec: Math.round((performance.now() - liveStarted) / 100) / 10 });
-    } else if (msg.t === 'interim') {
-      interimBusy = false;
-      interimNextAt = performance.now() + 160;
-      diag('stt-interim', { ms: msg.ms, chars: (msg.text || '').length, live: true });
-      if (msg.gen === bufferGen && msg.text && listening && !locked) {
-        field?.setVoiceLevel(0.12);
-        feedVoice(msg.text, false);
-      }
-    } else if (msg.t === 'error') {
-      interimBusy = false;
-      if (!liveReady) liveFailed = true;
+      refReady = true;
+      diag('stt-refiner-ready', { threads: msg.threads || 1, sec: Math.round((performance.now() - refStarted) / 100) / 10 });
+    } else if (msg.t === 'final') {
+      maybeRefine(msg.id, msg.text, 'base', msg.ms);
+    } else if (msg.t === 'error' && !refReady) {
+      refFailed = true;
     }
   };
-  liveWorker.onerror = () => { liveFailed = true; liveReady = false; };
-  const liveStarted = performance.now();
-  liveWorker.postMessage({ t: 'init', model: 'moonshine-tiny-ONNX', forceWasm: sttWasmForced, threads: !sttNoThreads });
+  refWorker.onerror = () => { refFailed = true; refReady = false; };
+  refWorker.postMessage({ t: 'init', model: 'moonshine-base-ONNX', forceWasm: sttWasmForced, threads: !sttNoThreads });
 }
 
 function resampleTo16k(samples, fromRate) {
@@ -2001,6 +1985,7 @@ function flushChunk(atCap) {
   const provisional = chunkStates.get(id).fallbackText;
   if (provisional && !locked) feedVoice(provisional, false);
   const serverCopy = serverSttOk ? samples.slice(0) : null;
+  const refCopy = refReady && !refFailed ? samples.slice(0) : null;
   ensureSttWorker();
   if (sttWorker && !sttFailed) {
     const wedgeCopy = sttWasmForced ? null : samples.slice(0);
@@ -2009,6 +1994,7 @@ function flushChunk(atCap) {
   } else if (!serverCopy) {
     settleChunk();
   }
+  if (refCopy) refWorker.postMessage({ t: 'audio', mode: 'final', id, samples: refCopy }, [refCopy.buffer]);
   if (serverCopy) refineViaServer(id, serverCopy, !sttWorker || sttFailed);
 }
 
@@ -2150,12 +2136,11 @@ function onVoiceFrame(frame) {
     hasFlushedChunk = true;
     idleSilence = 0;
   } else if (
-    (liveReady || sttReady) && sttWorker && !interimBusy && voicedLen > rate * 0.35
+    sttReady && sttWorker && !interimBusy && voicedLen > rate * 0.35
     && silenceLen < rate * 0.12 && performance.now() > interimNextAt
   ) {
     interimBusy = true;
-    const target = liveReady && !liveFailed ? liveWorker : sttWorker;
-    target.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
+    sttWorker.postMessage({ t: 'audio', mode: 'interim', gen: bufferGen, samples: collectSamples() });
   }
   if (voicedLen) idleSilence = 0;
 }
@@ -2206,6 +2191,7 @@ function stopListening() {
   const wasListening = listening;
   listening = false;
   speakButton.dataset.listening = 'false';
+  window.clearTimeout(nativeSilentTimer);
   if (nativeRecognizer) {
     const r = nativeRecognizer;
     nativeRecognizer = null;
@@ -2241,21 +2227,37 @@ function feedVoice(transcript, isFinal) {
 const SRNative = window.SpeechRecognition || window.webkitSpeechRecognition;
 const workerPathOk = !!(navigator.mediaDevices && window.Worker && window.AudioWorkletNode);
 let nativeStatus = 'unavailable';
+let nativeLocal = false;
+let nativeHeard = false;
+let nativeEmptyRuns = 0;
+let nativeSilentTimer = 0;
 let nativeFailed = false;
 let nativeRecognizer = null;
 
 function startNative() {
   listening = true;
   speakInviteDone = true;
+  nativeHeard = false;
+  nativeEmptyRuns = 0;
+  window.clearTimeout(nativeSilentTimer);
+  nativeSilentTimer = window.setTimeout(() => {
+    if (!listening || nativeHeard || nativeFailed) return;
+    diag('stt-native-silent');
+    nativeFailed = true;
+    stopListening();
+    if (workerPathOk && !sttFailed && !locked) window.setTimeout(() => speakButton.click(), 60);
+  }, 6000);
   setSpeakHint('');
   speakButton.dataset.listening = 'true';
   voiceBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
   nativeRecognizer = new SRNative();
-  nativeRecognizer.processLocally = true;
+  if (nativeLocal) nativeRecognizer.processLocally = true;
   nativeRecognizer.lang = 'en-US';
   nativeRecognizer.continuous = true;
   nativeRecognizer.interimResults = true;
   nativeRecognizer.onresult = (event) => {
+    nativeHeard = true;
+    nativeEmptyRuns = 0;
     let interim = '';
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const chunk = event.results[i][0].transcript;
@@ -2272,16 +2274,36 @@ function startNative() {
     if (interim) field?.setVoiceLevel(0.12);
   };
   nativeRecognizer.onerror = (e) => {
-    diag('stt-native-error', { err: (e && e.error) || '?' });
+    const err = (e && e.error) || '?';
+    diag('stt-native-error', { err });
+    if (err === 'no-speech' || err === 'aborted') {
+      nativeEmptyRuns += 1;
+      if (nativeEmptyRuns >= 2 && !nativeHeard) {
+        diag('stt-native-dead', { runs: nativeEmptyRuns });
+        nativeFailed = true;
+        const wasListening = listening;
+        stopListening();
+        if (wasListening && workerPathOk && !sttFailed && !locked) window.setTimeout(() => speakButton.click(), 60);
+      }
+      return;
+    }
     const wasListening = listening;
     nativeFailed = true;
     stopListening();
     if (wasListening && workerPathOk && !sttFailed && !locked) speakButton.click();
   };
-  nativeRecognizer.onend = () => { if (listening && nativeRecognizer) stopListening(); };
+  nativeRecognizer.onend = () => {
+    if (!listening || !nativeRecognizer) return;
+    try {
+      nativeRecognizer.start();
+      diag('stt-native-restart');
+    } catch (_e) {
+      stopListening();
+    }
+  };
   try {
     nativeRecognizer.start();
-    diag('stt-native-start');
+    diag('stt-native-start', { local: nativeLocal });
   } catch (_e) {
     nativeFailed = true;
     stopListening();
@@ -2291,21 +2313,26 @@ function startNative() {
 if (speakButton && (SRNative || workerPathOk)) {
   speakButton.hidden = false;
   drawWave();
-  if (SRNative && typeof SRNative.available === 'function') {
-    SRNative.available({ langs: ['en-US'], processLocally: true }).then((status) => {
-      nativeStatus = status;
-      diag('stt-native', { status });
-      if (status === 'available' && !listening && !speakInviteDone) setSpeakHint('tap to speak');
-      if (status === 'downloadable') {
-        SRNative.install({ langs: ['en-US'], processLocally: true })
-          .then((ok) => { diag('stt-native-install', { ok }); if (ok) nativeStatus = 'available'; })
-          .catch(() => {});
-      }
-    }).catch(() => {});
+  if (SRNative) {
+    nativeStatus = 'available';
+    diag('stt-native', { status: 'platform' });
+    if (typeof SRNative.available === 'function') {
+      SRNative.available({ langs: ['en-US'], processLocally: true }).then((status) => {
+        diag('stt-native-local', { status });
+        if (status === 'available') nativeLocal = true;
+        else if (status === 'downloadable') {
+          SRNative.install({ langs: ['en-US'], processLocally: true })
+            .then((ok) => { diag('stt-native-install', { ok }); if (ok) nativeLocal = true; })
+            .catch(() => {});
+        }
+      }).catch(() => {});
+    }
+    if (!speakInviteDone) setSpeakHint('tap to speak');
+    if (body.dataset.voice === 'warming') delete body.dataset.voice;
   }
   const conn = navigator.connection;
   if (workerPathOk && !(conn && (conn.saveData || /2g/.test(conn.effectiveType || '')))) {
-    const preload = () => { if (!sttWorker && !sttFailed && nativeStatus !== 'available') ensureSttWorker(); };
+    const preload = () => { if (!sttWorker && !sttFailed) ensureSttWorker(); };
     if ('requestIdleCallback' in window) window.requestIdleCallback(preload, { timeout: 2500 });
     else window.setTimeout(preload, 3500);
     text.addEventListener('focus', preload, { once: true });
