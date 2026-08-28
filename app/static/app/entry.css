@@ -390,23 +390,27 @@ body[data-has-text="true"] #release {
   box-shadow: 0 0 0 2px var(--black), 0 0 0 3px rgba(200, 211, 255, .7), 0 0 28px rgba(154, 176, 255, .25);
 }
 
+/* The named form is the only copy the piece shows, and it stays a whisper: small, widely
+   tracked, barely there. It should read as something the dark almost said. */
 .state-message {
   min-height: 1.4em;
-  margin: 12px 0 0;
-  color: rgba(226, 230, 244, .2);
-  font-size: .57rem;
+  margin: 14px 0 0;
+  color: rgba(226, 230, 244, .13);
+  font-size: .5rem;
   font-weight: 350;
-  letter-spacing: .19em;
+  letter-spacing: .26em;
   text-transform: lowercase;
   opacity: 0;
-  transition: opacity .9s ease, color .9s ease;
+  transition: opacity 1.5s ease, color 1.5s ease;
 }
 
 body[data-state="holding"] .state-message,
 body[data-state="releasing"] .state-message,
 body[data-state="returned"] .state-message { opacity: 1; }
 
-body[data-state="releasing"] .state-message { color: rgba(203, 214, 255, .46); }
+body[data-state="releasing"] .state-message,
+body[data-state="returned"] .state-message { color: rgba(214, 223, 248, .26); }
+
 
 .quiet-footer {
   position: fixed;
