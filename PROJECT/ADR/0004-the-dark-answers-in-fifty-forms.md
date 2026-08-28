@@ -45,3 +45,20 @@ existing GPGPU engine (ping-pong position simulation + additive point cloud + bl
   origin generation gains eight layouts; selection gains the listener.
 - Proof = the real operation, headless: every form force-selected, rendered non-blank, zero
   console/GL errors, then the live front door serves the new build (deploy canary).
+
+**Amendment (2026-08-27):** fifty became eighty. Ten families of five grew to ten families of
+eight — thirty new forms in `app/static/app/forms-more.js`, concatenated into the same registry, so
+the chooser, the no-repeat ring and the structural listener all widen without changing. Six new
+origin layouts join the nine (`helix`, `shell`, `rain`, `dunes`, `orbit`, `veil`). The form data
+contract is unchanged; nothing in the engine needed to know.
+
+`?form=<slug>` now opens the piece on a named form. Without it a form can only be reached by
+chance through the no-repeat ring, which made it impossible to put eyes on a specific one — and
+eyes are the only instrument that judges these. Every one of the thirty was photographed and
+measured this way; four came out too faint to be worth showing (`smoke` 2.8% of frame lit,
+`darkflow` 1.2%, `tidal` 2.4%, `lagrange` 1.0%) and were retuned until they read.
+
+The measuring itself needed a correction worth recording: sampling the WebGL canvas through a 2D
+context returns pure black, because the drawing buffer is not preserved after compositing. That
+instrument called all thirty forms dead. The screenshot is the honest instrument — it is what the
+visitor sees — so brightness is measured from the captured PNG, never from the live canvas.

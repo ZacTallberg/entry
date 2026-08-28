@@ -331,6 +331,75 @@ const ORIGIN_GENERATORS = {
       values[i + 3] = 1;
     }
   },
+  helix(values, rng) {
+    const count = values.length / 4;
+    for (let n = 0; n < count; n += 1) {
+      const i = n * 4;
+      const strand = n % 2;
+      const t = (n / count) * Math.PI * 9;
+      const r = 1.05 + (rng() - 0.5) * 0.22;
+      values[i] = Math.cos(t + strand * Math.PI) * r;
+      values[i + 1] = (n / count - 0.5) * 4.4 + (rng() - 0.5) * 0.06;
+      values[i + 2] = Math.sin(t + strand * Math.PI) * r * 0.7;
+      values[i + 3] = 1;
+    }
+  },
+  shell(values, rng) {
+    const count = values.length / 4;
+    for (let n = 0; n < count; n += 1) {
+      const i = n * 4;
+      const frac = n / count;
+      const theta = frac * Math.PI * 7.5;
+      const r = 0.22 * Math.exp(frac * 2.55);
+      values[i] = Math.cos(theta) * r;
+      values[i + 1] = Math.sin(theta) * r * 0.66;
+      values[i + 2] = (rng() - 0.5) * 0.3 * (1 - frac * 0.6);
+      values[i + 3] = 1;
+    }
+  },
+  rain(values, rng) {
+    for (let i = 0; i < values.length; i += 4) {
+      values[i] = (rng() - 0.5) * 6.2;
+      values[i + 1] = (rng() - 0.5) * 5.0;
+      values[i + 2] = (rng() - 0.5) * 1.2;
+      values[i + 3] = 1;
+    }
+  },
+  dunes(values, rng) {
+    const ridges = 7;
+    for (let i = 0; i < values.length; i += 4) {
+      const x = (rng() - 0.5) * 5.8;
+      const ridge = Math.floor(rng() * ridges);
+      const crest = Math.sin(x * 0.8 + ridge * 1.7) * 0.34;
+      values[i] = x;
+      values[i + 1] = (ridge / (ridges - 1) - 0.5) * 3.0 + crest + (rng() - 0.5) * 0.16;
+      values[i + 2] = (rng() - 0.5) * 0.9;
+      values[i + 3] = 1;
+    }
+  },
+  orbit(values, rng) {
+    const lanes = 5;
+    for (let i = 0; i < values.length; i += 4) {
+      const lane = Math.floor(rng() * lanes);
+      const r = 0.6 + lane * 0.44;
+      const tilt = (lane / lanes - 0.5) * 0.9;
+      const theta = rng() * Math.PI * 2;
+      values[i] = Math.cos(theta) * r;
+      values[i + 1] = Math.sin(theta) * r * 0.55 + Math.cos(theta) * tilt;
+      values[i + 2] = Math.sin(theta) * r * tilt * 0.8 + (rng() - 0.5) * 0.08;
+      values[i + 3] = 1;
+    }
+  },
+  veil(values, rng) {
+    for (let i = 0; i < values.length; i += 4) {
+      const x = (rng() - 0.5) * 6.0;
+      const fall = Math.pow(rng(), 0.75);
+      values[i] = x;
+      values[i + 1] = (fall - 0.5) * 3.4 + Math.sin(x * 0.7) * 0.22;
+      values[i + 2] = (rng() - 0.5) * 0.42;
+      values[i + 3] = 1;
+    }
+  },
   glyph(values, rng, utterance) {
     const words = (utterance || '').trim() || '○';
     const off = document.createElement('canvas');
@@ -702,7 +771,10 @@ class ParticleField {
     this.densityScene.add(this.densityPoints);
 
 
-    this.setForm(FORM_INDEX.get('nebula'), '', { fromCenter: false, seedHash: sessionSalt });
+    // ?form=<slug> opens on a named form — the only way to put eyes on one deliberately
+    const wanted = new URLSearchParams(window.location.search).get('form');
+    const opening = (wanted && FORM_INDEX.get(wanted)) || FORM_INDEX.get('nebula');
+    this.setForm(opening, '', { fromCenter: false, seedHash: sessionSalt });
 
     this.resize = this.resize.bind(this);
     this.frame = this.frame.bind(this);
