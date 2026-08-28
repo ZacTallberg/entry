@@ -1,4 +1,4 @@
-// The forms of the dark (ADR 0004, amended 2026-08-27: fifty became eighty). Each form is data: a GLSL force program, a GLSL palette,
+// The forms of the dark (ADR 0004, amended: fifty became eighty, then a hundred). Each form is data: a GLSL force program, a GLSL palette,
 // tuning defines, a JS config, and an origin layout. The engine (entry.js) injects force/color into
 // its shared shader templates and compiles lazily, once per form. Contract available to form GLSL:
 //   uniforms  uTime uSeed uEnergy uRelease uPulse uPointer
@@ -848,8 +848,9 @@ form({
 });
 
 import { MORE } from './forms-more.js';
+import { WILD } from './forms-wild.js';
 
-const ALL = F.concat(MORE);
+const ALL = F.concat(MORE, WILD);
 
 export const FORMS = ALL;
 export const FORM_INDEX = new Map(ALL.map((f) => [f.slug, f]));

@@ -636,11 +636,22 @@ body[data-dictating="true"] .composer::before {
   transition: background .6s ease;
 }
 
+/* The canvas reaches well past the text box so vapour can drift out and thin, and its own
+   edges are feathered — clipped square at the field, the smoke ended in a visible rectangle. */
 .dust-canvas {
+  --dust-fade: 68px;
   position: absolute;
   z-index: 4;
-  inset: 0;
+  inset: -74px -104px;
   pointer-events: none;
+  -webkit-mask-image:
+    linear-gradient(to right, transparent, #000 var(--dust-fade), #000 calc(100% - var(--dust-fade)), transparent),
+    linear-gradient(to bottom, transparent, #000 var(--dust-fade), #000 calc(100% - var(--dust-fade)), transparent);
+  mask-image:
+    linear-gradient(to right, transparent, #000 var(--dust-fade), #000 calc(100% - var(--dust-fade)), transparent),
+    linear-gradient(to bottom, transparent, #000 var(--dust-fade), #000 calc(100% - var(--dust-fade)), transparent);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
 }
 
 /* the DOM words only hold the layout; the dust is what you see */

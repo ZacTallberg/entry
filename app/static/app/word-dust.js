@@ -36,14 +36,26 @@ export function createWordDust(host) {
   let running = false;
   let lastAt = 0;
   let writeHeadAt = 0;
+  let padX = 0;
+  let padY = 0;
+  let hostW = 0;
+  let hostH = 0;
 
+  // The canvas is deliberately larger than the field it sits over (the negative inset in CSS),
+  // so vapour has somewhere to drift and thin out instead of being cut off square at the text
+  // box. Everything is drawn in canvas space, which is the host's space shifted by that margin.
   function resize() {
-    const r = host.getBoundingClientRect();
+    const hostRect = host.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
     dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = Math.max(2, Math.floor(r.width * dpr));
-    canvas.height = Math.max(2, Math.floor(r.height * dpr));
-    canvas.style.width = r.width + 'px';
-    canvas.style.height = r.height + 'px';
+    padX = hostRect.left - canvasRect.left;
+    padY = hostRect.top - canvasRect.top;
+    const w = Math.max(2, canvasRect.width);
+    const h = Math.max(2, canvasRect.height);
+    hostW = hostRect.width;
+    hostH = hostRect.height;
+    canvas.width = Math.max(2, Math.floor(w * dpr));
+    canvas.height = Math.max(2, Math.floor(h * dpr));
     scratch.width = canvas.width;
     scratch.height = canvas.height;
   }
@@ -61,8 +73,8 @@ export function createWordDust(host) {
     const want = Math.min(MAX_PUFFS, Math.round(26 + level * 90));
     if (puffs.length >= want) return;
     puffs.push({
-      x: canvas.width * (0.18 + Math.random() * 0.64),
-      y: canvas.height * (0.44 + Math.random() * 0.28),
+      x: (padX + hostW * (0.14 + Math.random() * 0.72)) * dpr,
+      y: (padY + hostH * (0.34 + Math.random() * 0.42)) * dpr,
       vx: (Math.random() - 0.5) * 0.16 * dpr,
       vy: -(0.02 + Math.random() * 0.08) * dpr,
       rot: Math.random() * Math.PI * 2,
@@ -89,8 +101,8 @@ export function createWordDust(host) {
       if (r.width < 1) continue;
       const prev = words[next.length];
       if (prev && prev.label === label) {
-        prev.x = (r.left - hostRect.left) * dpr;
-        prev.y = (r.top - hostRect.top) * dpr;
+        prev.x = (r.left - hostRect.left + padX) * dpr;
+        prev.y = (r.top - hostRect.top + padY) * dpr;
         prev.w = r.width * dpr;
         prev.h = r.height * dpr;
         next.push(prev);
@@ -133,8 +145,8 @@ export function createWordDust(host) {
     }
     return {
       label,
-      x: (r.left - hostRect.left) * dpr,
-      y: (r.top - hostRect.top) * dpr,
+      x: (r.left - hostRect.left + padX) * dpr,
+      y: (r.top - hostRect.top + padY) * dpr,
       w: r.width * dpr,
       h: r.height * dpr,
       font,

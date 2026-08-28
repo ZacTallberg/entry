@@ -62,3 +62,11 @@ The measuring itself needed a correction worth recording: sampling the WebGL can
 context returns pure black, because the drawing buffer is not preserved after compositing. That
 instrument called all thirty forms dead. The screenshot is the honest instrument — it is what the
 visitor sees — so brightness is measured from the captured PNG, never from the live canvas.
+
+**Amendment (2026-08-28):** eighty became a hundred. Twenty wilder forms in
+`app/static/app/forms-wild.js` — where the previous batch added breadth, these add instability:
+shear that curls into billows, a wake shedding vortices, two galaxies passing through each other,
+the photon ring around a shadow, a murmuration with something hunting it, heavy fluid fingering
+down through light, spots learning to be stripes, three bodies that never resolve, two solitons
+passing through each other unchanged, light bent around what is not there. All twenty photographed
+and measured; one (`slime`, 1.7% of frame lit) was retuned.
