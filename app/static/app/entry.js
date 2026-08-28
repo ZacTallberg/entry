@@ -2360,6 +2360,7 @@ let streamPending = null;
 const streamingPossible = typeof SharedArrayBuffer === 'function' && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
 let streamBase = '';
 const mirror = document.getElementById('dictation-mirror');
+let handChosen = false;
 const mirrorWords = [];
 let dust = null;
 
@@ -2392,6 +2393,15 @@ function paintMirror(full) {
   }
   // The textarea scrolls to keep the newest words in view; the mirror is what the visitor
   // actually reads, so it has to follow, and the dust reads its positions after it has moved.
+  // the first words decide which hand the rest of the utterance is written in
+  if (dust && !handChosen) {
+    const opening = full.trim().slice(0, 24);
+    if (opening) {
+      const forced = new URLSearchParams(window.location.search).get('hand');
+      dust.setHand(forced || fnv(opening));
+      handChosen = true;
+    }
+  }
   if (body.dataset.dictating === 'true') {
     text.scrollTop = text.scrollHeight;
     mirror.scrollTop = mirror.scrollHeight;
@@ -2542,6 +2552,7 @@ async function loadStreamingOnce() {
 }
 
 function enterDictation() {
+  handChosen = false;
   streamBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
   listening = true;
   speakInviteDone = true;

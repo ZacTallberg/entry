@@ -145,7 +145,32 @@ export function createWordDust(host) {
     };
   }
 
-  const CHAR_FADE = 380;
+  // The dark writes in more than one hand. Which one a phrase arrives in is decided by the
+  // phrase itself, so the same words always condense the same way.
+  const HANDS = {
+    vapour: {
+      fade: 380, blur: 7, lift: 2, shiver: 0, puffs: 3, puffAlpha: 0.34, puffR: 26, spread: 10,
+      ink: [246, 248, 255], glow: null,
+    },
+    ember: {
+      fade: 460, blur: 5, lift: -3, shiver: 0, puffs: 3, puffAlpha: 0.3, puffR: 22, spread: 8,
+      ink: [252, 244, 232], glow: [255, 176, 96],
+    },
+    frost: {
+      fade: 300, blur: 9, lift: 0, shiver: 0.5, puffs: 2, puffAlpha: 0.26, puffR: 30, spread: 13,
+      ink: [236, 246, 255], glow: [176, 220, 255],
+    },
+    ink: {
+      fade: 520, blur: 12, lift: 1, shiver: 0, puffs: 2, puffAlpha: 0.2, puffR: 34, spread: 6,
+      ink: [232, 236, 248], glow: null,
+    },
+    static: {
+      fade: 240, blur: 4, lift: 0, shiver: 1.6, puffs: 4, puffAlpha: 0.22, puffR: 16, spread: 16,
+      ink: [244, 248, 255], glow: null,
+    },
+  };
+  const HAND_NAMES = Object.keys(HANDS);
+  let hand = HANDS.vapour;
 
   function frame(now) {
     raf = 0;
@@ -197,18 +222,21 @@ export function createWordDust(host) {
       for (const c of word.chars) {
         const age = now - c.at;
         if (age < 0) { pending = true; continue; }
-        const a = Math.min(1, age / CHAR_FADE);
+        const a = Math.min(1, age / hand.fade);
         if (a < 1) pending = true;
-        const x = word.x + c.dx;
-        // the letter's own breath of vapour, thinning as it condenses
+        const shake = hand.shiver
+          ? Math.sin(c.seed * 9.1 + t * 26.0) * hand.shiver * (1 - a) * dpr
+          : 0;
+        const x = word.x + c.dx + shake;
+        // the letter's own breath, thinning as it condenses
         if (a < 1) {
-          // each letter arrives wrapped in its own vapour
           ctx.save();
           ctx.globalCompositeOperation = 'lighter';
-          for (let q = 0; q < 3; q += 1) {
-            const spread = (1 - a) * (10 + q * 9) * dpr;
-            const puffR = (18 + q * 12 + 26 * (1 - a)) * dpr;
-            ctx.globalAlpha = (0.34 - q * 0.08) * (1 - a * 0.85);
+          for (let q = 0; q < hand.puffs; q += 1) {
+            const spread = (1 - a) * (hand.spread + q * 9) * dpr;
+            const puffR = (18 + q * 12 + hand.puffR * (1 - a)) * dpr;
+            ctx.globalAlpha = (hand.puffAlpha - q * 0.08) * (1 - a * 0.85);
+            if (ctx.globalAlpha <= 0.004) continue;
             ctx.save();
             ctx.translate(
               x + word.h * 0.16 + Math.sin(c.seed + q * 2.1 + t * 0.6) * spread,
@@ -221,18 +249,25 @@ export function createWordDust(host) {
           ctx.restore();
         }
         ctx.font = word.font;
-        const blur = (1 - a) * 7 + leaving * 9;
+        const blur = (1 - a) * hand.blur + leaving * 9;
         const alpha = Math.min(1, a * 1.25) * (1 - leaving);
-        const lift = (1 - a) * 2 * dpr - leaving * 10 * dpr;
+        const lift = (1 - a) * hand.lift * dpr - leaving * 10 * dpr;
+        // a hand that arrives hot cools into the ink as the letter settles
+        const ink = hand.glow
+          ? [
+            Math.round(hand.glow[0] + (hand.ink[0] - hand.glow[0]) * a),
+            Math.round(hand.glow[1] + (hand.ink[1] - hand.glow[1]) * a),
+            Math.round(hand.glow[2] + (hand.ink[2] - hand.glow[2]) * a),
+          ]
+          : hand.ink;
+        ctx.fillStyle = `rgba(${ink[0]}, ${ink[1]}, ${ink[2]}, 0.97)`;
         if (blur > 0.05 || alpha < 1) {
           ctx.filter = blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : 'none';
           ctx.globalAlpha = Math.max(0, alpha);
-          ctx.fillStyle = 'rgba(246, 248, 255, 0.97)';
           ctx.fillText(c.ch, x, baseY + lift);
           ctx.filter = 'none';
           ctx.globalAlpha = 1;
         } else {
-          ctx.fillStyle = 'rgba(246, 248, 255, 0.97)';
           ctx.fillText(c.ch, x, baseY);
         }
       }
@@ -253,6 +288,16 @@ export function createWordDust(host) {
     resize,
     sync,
     breathe,
+    hands: HAND_NAMES,
+    // the phrase picks the hand, so a sentence always arrives written the same way
+    setHand(nameOrHash) {
+      if (typeof nameOrHash === 'number') {
+        hand = HANDS[HAND_NAMES[Math.abs(nameOrHash) % HAND_NAMES.length]];
+      } else if (HANDS[nameOrHash]) {
+        hand = HANDS[nameOrHash];
+      }
+      return hand;
+    },
     clear() {
       words = [];
       puffs = [];
