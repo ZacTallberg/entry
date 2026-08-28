@@ -771,9 +771,17 @@ class ParticleField {
     this.densityScene.add(this.densityPoints);
 
 
-    // ?form=<slug> opens on a named form — the only way to put eyes on one deliberately
+    // Every arrival opens on a different quiet form — the slow, ambient ones, so the dark is
+    // already somewhere before you say anything. ?form=<slug> overrides it, and is the only way
+    // to put eyes on a particular form deliberately.
+    const OPENERS = [
+      'nebula', 'darkflow', 'fog', 'breath', 'snowfall', 'mycelium',
+      'jellyfish', 'smoke', 'silk', 'tidepool', 'aurora', 'halo',
+    ];
     const wanted = new URLSearchParams(window.location.search).get('form');
-    const opening = (wanted && FORM_INDEX.get(wanted)) || FORM_INDEX.get('nebula');
+    const opening = (wanted && FORM_INDEX.get(wanted))
+      || FORM_INDEX.get(OPENERS[sessionSalt % OPENERS.length])
+      || FORM_INDEX.get('nebula');
     this.setForm(opening, '', { fromCenter: false, seedHash: sessionSalt });
 
     this.resize = this.resize.bind(this);
@@ -866,8 +874,8 @@ class ParticleField {
     return cached;
   }
 
-  prepare(formDef, utterance, seedHash) {
-    const key = `${formDef.slug}|${seedHash}|${utterance}`;
+  prepare(formDef, utterance, seedHash, primeScale = 0.45) {
+    const key = `${formDef.slug}|${seedHash}|${utterance}|${primeScale}`;
     if (this.preparedKey === key) return this.preparedPromise;
     const size = this.textureSize;
     let rngState = (seedHash >>> 0) || 1;
@@ -884,7 +892,7 @@ class ParticleField {
     const primePacked = new Uint16Array(values.length);
     for (let i = 0; i < values.length; i += 1) {
       packed[i] = half(values[i]);
-      primePacked[i] = i % 4 === 3 ? packed[i] : half(values[i] * 0.45 + (Math.random() - 0.5) * 0.08);
+      primePacked[i] = i % 4 === 3 ? packed[i] : half(values[i] * primeScale + (Math.random() - 0.5) * 0.08);
     }
     const texture = new THREE.DataTexture(packed, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
     texture.needsUpdate = true;
@@ -944,7 +952,7 @@ class ParticleField {
     }
   }
 
-  setForm(formDef, utterance, { fromCenter, seedHash }) {
+  setForm(formDef, utterance, { fromCenter, seedHash, primeScale }) {
     const swapT0 = performance.now();
     const size = this.textureSize;
     const key = `${formDef.slug}|${seedHash}|${utterance}`;
@@ -1065,7 +1073,10 @@ class ParticleField {
       if (fromCenter) {
         this.primeBuffer ||= new Float32Array(this.originValues.length);
         for (let i = 0; i < this.originValues.length; i += 1) {
-          this.primeBuffer[i] = i % 4 === 3 ? 1 : this.originValues[i] * 0.45 + (Math.random() - 0.5) * 0.08;
+          // 0.45 erupts outward from a compressed core; above 1 the form gathers inward
+          // from beyond the frame; at 1 it settles in place
+          const scale = primeScale || 0.45;
+          this.primeBuffer[i] = i % 4 === 3 ? 1 : this.originValues[i] * scale + (Math.random() - 0.5) * 0.08;
         }
         primeValues = this.primeBuffer;
       }
@@ -1648,7 +1659,11 @@ function beginRelease() {
   setState('releasing', '');
   if (listening) stopListening();
   if (reportMode) diag('report-release', { text: raw.slice(0, 300) });
-  const ready = field ? field.prepare(chosen.form, raw, chosen.hash) : Promise.resolve();
+  // the dark answers with a different gesture depending on what was said: it erupts from a
+  // compressed core, gathers inward from beyond the frame, or settles in place
+  const gestureRoll = (chosen.hash >>> 11) % 100;
+  const primeScale = gestureRoll < 55 ? 0.45 : (gestureRoll < 84 ? 1.85 : 1.02);
+  const ready = field ? field.prepare(chosen.form, raw, chosen.hash, primeScale) : Promise.resolve();
   field?.release(length, energy);
 
   const inhaleMs = field ? field.envelope.inhale * 1000 : 480;
@@ -1659,7 +1674,7 @@ function beginRelease() {
     Promise.resolve(ready).then(() => {
       if (body.dataset.state !== 'releasing') return;
       body.dataset.form = chosen.form.slug;
-      field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash });
+      field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash, primeScale });
       setState('releasing', revealLine);
       diag('release', {
         slug: chosen.form.slug,
