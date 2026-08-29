@@ -722,6 +722,8 @@ class ParticleField {
         uFringe: { value: 0.0016 },
         uLift: { value: 0.004 },
         uWash: { value: 0.03 },
+        bloomMap: { value: null },
+        uBloom: { value: 0.9 },
         uSat: { value: 1.14 },
         uShoulder: { value: 0.82 },
         uWashTint: { value: new THREE.Color(0.30, 0.34, 0.62) },
@@ -735,7 +737,8 @@ class ParticleField {
       fragmentShader: `
         precision highp float;
         uniform sampler2D map;
-        uniform float uGrainT, uGrain, uVignette, uFringe, uLift, uWash, uSat, uShoulder;
+        uniform sampler2D bloomMap;
+        uniform float uGrainT, uGrain, uVignette, uFringe, uLift, uWash, uSat, uShoulder, uBloom;
         uniform vec3 uWashTint;
         varying vec2 vUv;
         float hash(vec2 p) {
@@ -750,6 +753,7 @@ class ParticleField {
             texture2D(map, vUv + off).r,
             texture2D(map, vUv).g,
             texture2D(map, vUv - off).b);
+          col += texture2D(bloomMap, vUv).rgb * uBloom;
           float luma = dot(col, vec3(0.299, 0.587, 0.114));
           // the dark is a room, not a void: a slow low wash that only shows where nothing else is
           float w = sin(vUv.x * 2.3 + uGrainT * 0.05) * sin(vUv.y * 1.9 - uGrainT * 0.037)
@@ -775,6 +779,58 @@ class ParticleField {
     this.displayQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.displayMaterial);
     this.displayScene = new THREE.Scene();
     this.displayScene.add(this.displayQuad);
+    // bright-pass: what is above the threshold is what glows
+    this.brightMaterial = new THREE.ShaderMaterial({
+      uniforms: { map: { value: null }, uThreshold: { value: 0.42 } },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+      fragmentShader: `
+        precision highp float;
+        uniform sampler2D map;
+        uniform float uThreshold;
+        varying vec2 vUv;
+        void main() {
+          vec3 c = texture2D(map, vUv).rgb;
+          float l = dot(c, vec3(0.299, 0.587, 0.114));
+          float k = max(0.0, l - uThreshold) / max(l, 0.0001);
+          gl_FragColor = vec4(c * k, 1.0);
+        }`,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.brightMaterial.toneMapped = false;
+    // separable gaussian, nine taps, run once horizontally and once vertically
+    this.blurMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        map: { value: null },
+        uTexel: { value: new THREE.Vector2(1 / 256, 1 / 256) },
+        uDir: { value: new THREE.Vector2(1, 0) },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+      fragmentShader: `
+        precision highp float;
+        uniform sampler2D map;
+        uniform vec2 uTexel, uDir;
+        varying vec2 vUv;
+        void main() {
+          vec2 o = uTexel * uDir;
+          vec3 c = texture2D(map, vUv).rgb * 0.2270270270;
+          c += texture2D(map, vUv + o * 1.3846153846).rgb * 0.3162162162;
+          c += texture2D(map, vUv - o * 1.3846153846).rgb * 0.3162162162;
+          c += texture2D(map, vUv + o * 3.2307692308).rgb * 0.0702702703;
+          c += texture2D(map, vUv - o * 3.2307692308).rgb * 0.0702702703;
+          gl_FragColor = vec4(c, 1.0);
+        }`,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.blurMaterial.toneMapped = false;
+    this.postScene = new THREE.Scene();
+    this.postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.brightMaterial);
+    this.postScene.add(this.postQuad);
     this.allocTrailTargets();
 
     this.simScene = new THREE.Scene();
@@ -1110,6 +1166,7 @@ class ParticleField {
     this.displayMaterial.uniforms.uWashTint.value.setHSL(
       (0.62 + this.baseHueShift + 1.0) % 1.0, 0.46, 0.42);
     this.displayMaterial.uniforms.uWash.value = 0.024 + v2 * 0.022;
+    this.displayMaterial.uniforms.uBloom.value = 0.42 * (js.bloom ?? 1.2);
     ru2.uIgnite.value = fx.ignite ? (js.ignite ?? 1) : 0;
     this.baseTurb = fx.turb ? 0.22 + v3 * 0.2 : 0.1;
     ru2.uFxTurb.value = this.baseTurb;
@@ -1199,6 +1256,15 @@ class ParticleField {
     this.trailB?.dispose();
     this.trailA = new THREE.WebGLRenderTarget(w, h, options);
     this.trailB = new THREE.WebGLRenderTarget(w, h, options);
+    // Bloom lives at a quarter of the frame: bright-pass into one target, blurred across two
+    // separable passes. Every form has always authored a bloom value; nothing read it until now.
+    const bw = Math.max(2, Math.floor(w * 0.25));
+    const bh = Math.max(2, Math.floor(h * 0.25));
+    this.bloomA?.dispose();
+    this.bloomB?.dispose();
+    this.bloomA = new THREE.WebGLRenderTarget(bw, bh, options);
+    this.bloomB = new THREE.WebGLRenderTarget(bw, bh, options);
+    if (this.blurMaterial) this.blurMaterial.uniforms.uTexel.value.set(1 / bw, 1 / bh);
   }
 
   basePointSize() {
@@ -1489,6 +1555,24 @@ class ParticleField {
     this.renderer.render(this.scene, this.camera);
     this.renderer.autoClear = true;
     [this.trailA, this.trailB] = [this.trailB, this.trailA];
+    // bright-pass and blur what glows, at a quarter of the frame
+    const prevAuto = this.renderer.autoClear;
+    this.renderer.autoClear = true;
+    this.postQuad.material = this.brightMaterial;
+    this.brightMaterial.uniforms.map.value = this.trailA.texture;
+    this.renderer.setRenderTarget(this.bloomA);
+    this.renderer.render(this.postScene, this.trailCamera);
+    this.postQuad.material = this.blurMaterial;
+    this.blurMaterial.uniforms.map.value = this.bloomA.texture;
+    this.blurMaterial.uniforms.uDir.value.set(1, 0);
+    this.renderer.setRenderTarget(this.bloomB);
+    this.renderer.render(this.postScene, this.trailCamera);
+    this.blurMaterial.uniforms.map.value = this.bloomB.texture;
+    this.blurMaterial.uniforms.uDir.value.set(0, 1);
+    this.renderer.setRenderTarget(this.bloomA);
+    this.renderer.render(this.postScene, this.trailCamera);
+    this.renderer.autoClear = prevAuto;
+    this.displayMaterial.uniforms.bloomMap.value = this.bloomA.texture;
     this.displayMaterial.uniforms.map.value = this.trailA.texture;
     this.displayMaterial.uniforms.uGrainT.value = time;
     // the frame draws breath with the answer: the vignette tightens on the flash and relaxes
@@ -1518,6 +1602,10 @@ class ParticleField {
     this.warmTarget?.dispose();
     this.trailA?.dispose();
     this.trailB?.dispose();
+    this.bloomA?.dispose();
+    this.bloomB?.dispose();
+    this.brightMaterial?.dispose();
+    this.blurMaterial?.dispose();
     this.densityRT?.dispose();
     this.densityMaterial?.dispose();
     this.renderer?.dispose();
