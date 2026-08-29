@@ -639,10 +639,12 @@ body[data-dictating="true"] .composer::before {
 /* The canvas reaches well past the text box so vapour can drift out and thin, and its own
    edges are feathered — clipped square at the field, the smoke ended in a visible rectangle. */
 .dust-canvas {
-  --dust-fade: 68px;
+  /* The canvas must overhang the field far enough for vapour to drift, but never so far that
+     its feathered edge lands off-screen — on a phone that put the fade outside the viewport
+     and handed the hard edge straight back, cut by the screen instead of the text box. */
+  --dust-fade: clamp(40px, 9vw, 62px);
   position: absolute;
   z-index: 4;
-  inset: -74px -104px;
   pointer-events: none;
   -webkit-mask-image:
     linear-gradient(to right, transparent, #000 var(--dust-fade), #000 calc(100% - var(--dust-fade)), transparent),

@@ -46,14 +46,21 @@ export function createWordDust(host) {
   // box. Everything is drawn in canvas space, which is the host's space shifted by that margin.
   function resize() {
     const hostRect = host.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
     dpr = Math.min(2, window.devicePixelRatio || 1);
-    padX = hostRect.left - canvasRect.left;
-    padY = hostRect.top - canvasRect.top;
-    const w = Math.max(2, canvasRect.width);
-    const h = Math.max(2, canvasRect.height);
+    // A canvas is a replaced element: with width:auto it takes its intrinsic size — the
+    // device-pixel drawing buffer — and CSS insets never stretch it. So the element is sized
+    // here, explicitly, or it silently grows by the device pixel ratio and pushes its own
+    // feathered edge off the screen.
+    padX = Math.min(104, Math.max(18, window.innerWidth * 0.06));
+    padY = Math.min(74, Math.max(26, window.innerHeight * 0.08));
     hostW = hostRect.width;
     hostH = hostRect.height;
+    const w = Math.max(2, hostW + padX * 2);
+    const h = Math.max(2, hostH + padY * 2);
+    canvas.style.left = `${-padX}px`;
+    canvas.style.top = `${-padY}px`;
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
     canvas.width = Math.max(2, Math.floor(w * dpr));
     canvas.height = Math.max(2, Math.floor(h * dpr));
     scratch.width = canvas.width;
