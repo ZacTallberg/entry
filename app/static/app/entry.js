@@ -1827,6 +1827,11 @@ function onInput(event) {
   if (body.dataset.dictating === 'true' && event && event.isTrusted) paintMirror(text.value);
   const now = performance.now();
   if (lastInputAt) cadence = cadence * 0.72 + clamp(now - lastInputAt, 45, 1100) * 0.28;
+  // The face carries the hand: written quickly the letters gather weight and narrow,
+  // written slowly they open out and thin. The variable font was loaded and never varied.
+  const urgency = clamp((900 - cadence) / 820, 0, 1);
+  text.style.setProperty('--wght', Math.round(238 + urgency * 168));
+  text.style.setProperty('--wdth', Math.round(110 - urgency * 12));
   lastInputAt = now;
   if (event.inputType?.includes('delete')) deletions += 1;
   autoSize();

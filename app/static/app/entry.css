@@ -259,7 +259,7 @@ body[data-state="returned"] #entry-text::placeholder { opacity: 0; }
   color: rgba(245, 246, 252, .94);
   caret-color: rgba(220, 228, 255, .9);
   font-size: clamp(1.55rem, 1rem + 2vw, 3.15rem);
-  font-variation-settings: "wght" 280, "wdth" 104, "opsz" 52;
+  font-variation-settings: "wght" var(--wght, 280), "wdth" var(--wdth, 104), "opsz" 52;
   font-weight: 280;
   letter-spacing: -.022em;
   line-height: 1.32;
