@@ -703,7 +703,54 @@ class ParticleField {
     this.fadeMaterial.toneMapped = false;
     this.fadeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.fadeMaterial);
     this.trailScene.add(this.fadeQuad);
-    this.displayMaterial = new THREE.MeshBasicMaterial({ map: null });
+    // The last thing between the field and the eye. A straight blit left the big near-black
+    // areas banding and the frame edges as hard as the monitor; this grades them: a breath of
+    // grain that lives mostly in the darks, a vignette, and a whisper of colour separation that
+    // grows toward the corners the way a real lens does.
+    this.displayMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        map: { value: null },
+        uGrainT: { value: 0 },
+        uGrain: { value: 0.055 },
+        uVignette: { value: 0.34 },
+        uFringe: { value: 0.0016 },
+        uLift: { value: 0.004 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }`,
+      fragmentShader: `
+        precision highp float;
+        uniform sampler2D map;
+        uniform float uGrainT, uGrain, uVignette, uFringe, uLift;
+        varying vec2 vUv;
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+        void main() {
+          vec2 c = vUv - 0.5;
+          float r2 = dot(c, c);
+          // chromatic separation, none at the centre, most in the corners
+          vec2 off = c * r2 * uFringe;
+          vec3 col = vec3(
+            texture2D(map, vUv + off).r,
+            texture2D(map, vUv).g,
+            texture2D(map, vUv - off).b);
+          float luma = dot(col, vec3(0.299, 0.587, 0.114));
+          // grain sits in the shadows, where banding lives, and fades out of the highlights
+          float g = hash(vUv * vec2(1024.0, 683.0) + fract(uGrainT) * 91.7) - 0.5;
+          col += g * uGrain * (1.0 - smoothstep(0.0, 0.55, luma)) * (0.5 + 0.5 * r2 * 2.0);
+          col += uLift * (1.0 - smoothstep(0.0, 0.25, luma));
+          col *= 1.0 - uVignette * smoothstep(0.06, 0.72, r2);
+          gl_FragColor = vec4(max(col, 0.0), 1.0);
+        }`,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.displayMaterial.toneMapped = false;
     this.displayQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.displayMaterial);
     this.displayScene = new THREE.Scene();
     this.displayScene.add(this.displayQuad);
@@ -1410,7 +1457,8 @@ class ParticleField {
     this.renderer.render(this.scene, this.camera);
     this.renderer.autoClear = true;
     [this.trailA, this.trailB] = [this.trailB, this.trailA];
-    this.displayMaterial.map = this.trailA.texture;
+    this.displayMaterial.uniforms.map.value = this.trailA.texture;
+    this.displayMaterial.uniforms.uGrainT.value = time;
     this.renderer.setRenderTarget(null);
     this.renderer.render(this.displayScene, this.trailCamera);
     this.raf = requestAnimationFrame(this.frame);
