@@ -231,6 +231,7 @@ export function createWordDust(host) {
 
     // then the letters, each one condensing in its turn
     let pending = false;
+    const buckets = [];
     ctx.textBaseline = 'alphabetic';
     for (const word of words) {
       const baseY = word.y + word.baseline;
@@ -269,7 +270,6 @@ export function createWordDust(host) {
           }
           ctx.restore();
         }
-        ctx.font = word.font;
         const blur = (1 - a) * hand.blur + leaving * 9;
         const alpha = Math.min(1, a * 1.25) * (1 - leaving);
         const lift = (1 - a) * hand.lift * dpr - leaving * 10 * dpr;
@@ -288,18 +288,31 @@ export function createWordDust(host) {
             Math.round(ink[2] * (1 - 0.34) + ink[2] * tint[2] * 0.34),
           ]
           : ink;
-        ctx.fillStyle = `rgba(${shown[0]}, ${shown[1]}, ${shown[2]}, 0.97)`;
-        if (blur > 0.05 || alpha < 1) {
-          ctx.filter = blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : 'none';
-          ctx.globalAlpha = Math.max(0, alpha);
-          ctx.fillText(c.ch, x, baseY + lift);
-          ctx.filter = 'none';
-          ctx.globalAlpha = 1;
-        } else {
-          ctx.fillText(c.ch, x, baseY);
-        }
+        // Setting ctx.filter forces its own compositing pass, so doing it per glyph turned a
+        // line of text into thirty of them — measured as 337ms worst frames against 73ms with
+        // the blur off. The draws are collected here and flushed in blur order below, so the
+        // filter changes a handful of times per frame instead of once per character.
+        const level = blur > 0.05 ? Math.max(1, Math.round(blur)) : 0;
+        (buckets[level] || (buckets[level] = [])).push({
+          ch: c.ch, x, y: baseY + (level ? lift : 0), font: word.font,
+          alpha: Math.max(0, alpha), fill: `rgba(${shown[0]}, ${shown[1]}, ${shown[2]}, 0.97)`,
+        });
       }
     }
+
+    for (let level = 0; level < buckets.length; level += 1) {
+      const bucket = buckets[level];
+      if (!bucket || !bucket.length) continue;
+      ctx.filter = level ? `blur(${level}px)` : 'none';
+      for (const g of bucket) {
+        ctx.font = g.font;
+        ctx.globalAlpha = g.alpha;
+        ctx.fillStyle = g.fill;
+        ctx.fillText(g.ch, g.x, g.y);
+      }
+    }
+    ctx.filter = 'none';
+    ctx.globalAlpha = 1;
 
     if (puffs.length || pending) raf = requestAnimationFrame(frame);
     else running = false;
