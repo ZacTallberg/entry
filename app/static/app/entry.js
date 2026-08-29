@@ -658,7 +658,11 @@ class ParticleField {
     const lowConcurrency = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4;
     const lowPower = lowMemory || lowConcurrency;
     const narrow = Math.min(window.innerWidth, window.innerHeight) < 720;
-    this.textureSize = lowPower || narrow ? 256 : 448;
+    // `narrow` was standing in for `weak`, but lowPower already tests memory and cores: a
+    // current phone was getting a cheap tablet's budget. Capable narrow devices get a middle
+    // tier — 352^2 is 123,904 particles against 65,536. If a real device cannot hold it the
+    // fidelity governor drops render scale, which costs sharpness rather than the field.
+    this.textureSize = lowPower ? 256 : (narrow ? 352 : 448);
     this.target = target;
     this.narrow = narrow;
     this.active = true;
