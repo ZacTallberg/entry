@@ -715,6 +715,8 @@ class ParticleField {
         uVignette: { value: 0.34 },
         uFringe: { value: 0.0016 },
         uLift: { value: 0.004 },
+        uWash: { value: 0.03 },
+        uWashTint: { value: new THREE.Color(0.30, 0.34, 0.62) },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -725,7 +727,8 @@ class ParticleField {
       fragmentShader: `
         precision highp float;
         uniform sampler2D map;
-        uniform float uGrainT, uGrain, uVignette, uFringe, uLift;
+        uniform float uGrainT, uGrain, uVignette, uFringe, uLift, uWash;
+        uniform vec3 uWashTint;
         varying vec2 vUv;
         float hash(vec2 p) {
           return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -740,6 +743,11 @@ class ParticleField {
             texture2D(map, vUv).g,
             texture2D(map, vUv - off).b);
           float luma = dot(col, vec3(0.299, 0.587, 0.114));
+          // the dark is a room, not a void: a slow low wash that only shows where nothing else is
+          float w = sin(vUv.x * 2.3 + uGrainT * 0.05) * sin(vUv.y * 1.9 - uGrainT * 0.037)
+                  + 0.6 * sin((vUv.x + vUv.y) * 3.1 + uGrainT * 0.028);
+          w = w * 0.25 + 0.42;
+          col += uWashTint * uWash * w * (1.0 - smoothstep(0.0, 0.18, luma));
           // grain sits in the shadows, where banding lives, and fades out of the highlights
           float g = hash(vUv * vec2(1024.0, 683.0) + fract(uGrainT) * 91.7) - 0.5;
           col += g * uGrain * (1.0 - smoothstep(0.0, 0.55, luma)) * (0.5 + 0.5 * r2 * 2.0);
@@ -1083,6 +1091,10 @@ class ParticleField {
     this.baseHueShift = (v1 - 0.5) * 0.34;
     this.hueDriftRate = fx.hueDrift ? 0.04 + v2 * 0.05 : 0;
     ru2.uHueShift.value = this.baseHueShift;
+    // the room behind the field takes its colour from the same shift the form does
+    this.displayMaterial.uniforms.uWashTint.value.setHSL(
+      (0.62 + this.baseHueShift + 1.0) % 1.0, 0.46, 0.42);
+    this.displayMaterial.uniforms.uWash.value = 0.024 + v2 * 0.022;
     ru2.uIgnite.value = fx.ignite ? (js.ignite ?? 1) : 0;
     this.baseTurb = fx.turb ? 0.22 + v3 * 0.2 : 0.1;
     ru2.uFxTurb.value = this.baseTurb;
