@@ -1428,6 +1428,18 @@ class ParticleField {
     this.stirTarget.multiplyScalar(Math.pow(0.82, dt));
     this.pulse *= Math.pow(0.91, dt);
 
+    // Two states the field did not have. Left alone long enough it falls asleep: time slows,
+    // light drains, the lens opens wide. Any touch wakes it. And while the microphone is open it
+    // leans in — a shade brighter and drawn slightly toward the middle, the dark listening.
+    const quietFor = now - (this.lastWokeAt || now);
+    const wantDrowse = !interacting && !this.listening && quietFor > 45000 ? 1 : 0;
+    // slow to fall asleep, quick to wake — a touch should be answered at once
+    const drowseRate = wantDrowse ? 0.010 : 0.085;
+    this.drowse = (this.drowse || 0) + (wantDrowse - (this.drowse || 0)) * Math.min(1, dt * drowseRate);
+    const wantLean = this.listening ? 1 : 0;
+    this.lean = (this.lean || 0) + (wantLean - (this.lean || 0)) * Math.min(1, dt * 0.05);
+    if (interacting) this.lastWokeAt = now;
+
     if (!interacting && now - (this.lastBreath || 0) > 16000) {
       this.lastBreath = now;
       this.pulseType = 3;
@@ -1458,6 +1470,8 @@ class ParticleField {
     // the answer arrives with a flash that decays; the filmic shoulder catches it
     this.swapFlash = (this.swapFlash || 0) * Math.pow(0.90, dt);
     let exposure = 1.56 + this.exposurePop + this.swapFlash;
+    exposure *= 1 - this.drowse * 0.55;
+    exposure += this.lean * 0.16;
     if (this.voiceLevel > 0.012) {
       this.energyCurrent = Math.min(1.6, this.energyCurrent + this.voiceLevel * 2.4);
       exposure += Math.min(0.55, this.voiceLevel * 1.8);
@@ -1491,7 +1505,7 @@ class ParticleField {
     this.vfx.hue *= vDecay;
     const su = this.simMaterial.uniforms;
     su.uVoice.value = vLevel;
-    su.uDt.value = dt * (this.speedVariant || 1);
+    su.uDt.value = dt * (this.speedVariant || 1) * (1 - this.drowse * 0.72);
     su.uTime.value = time * (this.timeScale || 1);
     su.uEnergy.value = this.energyCurrent;
     su.uPointer.value.copy(this.pointer);
@@ -1558,7 +1572,8 @@ class ParticleField {
     ru.uHueShift.value = this.baseHueShift + this.vfx.hue + (this.hueDriftRate ? time * this.hueDriftRate : 0);
     if (this.beatTempo) exposure += 0.12 * Math.sin(time * this.beatTempo);
     // the plane of sharpness drifts, so the field is never uniformly resolved
-    ru.uFocus.value = Math.sin(time * 0.055) * 0.62;
+    ru.uFocus.value = Math.sin(time * 0.055) * 0.62 * (1 - this.lean * 0.7);
+    ru.uDof.value = 0.62 + this.drowse * 0.85 + this.lean * 0.3;
     ru.uExposure.value = exposure;
 
     const persist = Math.pow(this.trailPersist ?? 0.35, dt);
@@ -2502,6 +2517,7 @@ async function startCapture() {
 function stopListening() {
   const wasListening = listening;
   listening = false;
+  if (field) field.listening = false;
   speakButton.dataset.listening = 'false';
   holding = false;
   holdFrames.length = 0;
@@ -2757,6 +2773,7 @@ async function loadStreamingOnce() {
 
 function enterDictation() {
   handChosen = false;
+  if (field) field.listening = true;
   streamBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
   listening = true;
   speakInviteDone = true;
