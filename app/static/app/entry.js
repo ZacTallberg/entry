@@ -716,6 +716,8 @@ class ParticleField {
         uFringe: { value: 0.0016 },
         uLift: { value: 0.004 },
         uWash: { value: 0.03 },
+        uSat: { value: 1.14 },
+        uShoulder: { value: 0.82 },
         uWashTint: { value: new THREE.Color(0.30, 0.34, 0.62) },
       },
       vertexShader: `
@@ -727,7 +729,7 @@ class ParticleField {
       fragmentShader: `
         precision highp float;
         uniform sampler2D map;
-        uniform float uGrainT, uGrain, uVignette, uFringe, uLift, uWash;
+        uniform float uGrainT, uGrain, uVignette, uFringe, uLift, uWash, uSat, uShoulder;
         uniform vec3 uWashTint;
         varying vec2 vUv;
         float hash(vec2 p) {
@@ -752,6 +754,11 @@ class ParticleField {
           float g = hash(vUv * vec2(1024.0, 683.0) + fract(uGrainT) * 91.7) - 0.5;
           col += g * uGrain * (1.0 - smoothstep(0.0, 0.55, luma)) * (0.5 + 0.5 * r2 * 2.0);
           col += uLift * (1.0 - smoothstep(0.0, 0.25, luma));
+          // the palettes are quietly desaturated; give them a little of their colour back
+          float grey = dot(col, vec3(0.299, 0.587, 0.114));
+          col = mix(vec3(grey), col, uSat);
+          // and let the brightest particles keep their hue instead of clipping to white
+          col = col / (1.0 + max(vec3(0.0), col - uShoulder) * 0.85);
           col *= 1.0 - uVignette * smoothstep(0.06, 0.72, r2);
           gl_FragColor = vec4(max(col, 0.0), 1.0);
         }`,
