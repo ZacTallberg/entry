@@ -1,10 +1,6 @@
 import { FORMS, FORM_INDEX, FAMILIES } from 'forms';
 
 let THREE;
-let EffectComposer;
-let RenderPass;
-let UnrealBloomPass;
-let OutputPass;
 let graphicsModules;
 
 const body = document.body;
@@ -1597,20 +1593,12 @@ async function initializeField() {
   }
   body.dataset.graphics = 'fallback';
   try {
-    graphicsModules ||= Promise.all([
-      import('three'),
-      import('three/addons/postprocessing/EffectComposer.js'),
-      import('three/addons/postprocessing/RenderPass.js'),
-      import('three/addons/postprocessing/UnrealBloomPass.js'),
-      import('three/addons/postprocessing/OutputPass.js'),
-    ]);
-    const [threeModule, composerModule, renderPassModule, bloomModule, outputModule] = await graphicsModules;
+    // the postprocessing addons were imported and never instantiated — the real path is
+    // trail-fade -> particles -> the graded display quad (ADR 0010)
+    graphicsModules ||= import('three');
+    const threeModule = await graphicsModules;
     if (generation !== fieldGeneration || reducedMotion.matches) return;
     THREE = threeModule;
-    EffectComposer = composerModule.EffectComposer;
-    RenderPass = renderPassModule.RenderPass;
-    UnrealBloomPass = bloomModule.UnrealBloomPass;
-    OutputPass = outputModule.OutputPass;
     field = new ParticleField(canvas);
     body.dataset.graphics = 'webgl';
   } catch (error) {
