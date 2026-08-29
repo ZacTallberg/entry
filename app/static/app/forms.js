@@ -849,8 +849,9 @@ form({
 
 import { MORE } from './forms-more.js';
 import { WILD } from './forms-wild.js';
+import { ARC } from './forms-arc.js';
 
-const ALL = F.concat(MORE, WILD);
+const ALL = F.concat(MORE, WILD, ARC);
 
 export const FORMS = ALL;
 export const FORM_INDEX = new Map(ALL.map((f) => [f.slug, f]));

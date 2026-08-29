@@ -70,3 +70,16 @@ the photon ring around a shadow, a murmuration with something hunting it, heavy 
 down through light, spots learning to be stripes, three bodies that never resolve, two solitons
 passing through each other unchanged, light bent around what is not there. All twenty photographed
 and measured; one (`slime`, 1.7% of frame lit) was retuned.
+
+**Amendment (2026-08-28, second):** a hundred became a hundred and twelve, and the twelve are a
+different kind. Every other form holds one idea; these are staged on `uRelease` — the breath that
+is loud when the words are let go and decays as the field settles — so the form arrives as one
+thing and resolves into another: something folded opening out, a shell giving way, vapour learning
+to be rain, one spark taking the whole field, chaos cooling into order, a wandering that suddenly
+decides. Only three of the previous hundred referenced `uRelease` at all; it was the largest
+untouched axis in the contract.
+
+Also: `orientOrigins` now stretches, shears and twists the cloud with depth in addition to
+rotating and mirroring it, all keyed to the utterance — so no form occupies the frame the same way
+twice. A `glyph` origin is exempt from everything but its whisper of rotation: it is made of the
+visitor's own words and has to stay readable.
