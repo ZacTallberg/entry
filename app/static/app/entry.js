@@ -654,6 +654,18 @@ class ParticleField {
       throw new Error('WebGL2 unavailable');
     }
 
+    // The dark is not the same dark at four in the morning as it is at dusk. The hour tilts
+    // the hue of the room and how much light it holds, so the piece is never quite the same
+    // thing twice in a day.
+    const hour = new Date().getHours();
+    const HOURS = [
+      [0, -0.06, 0.86], [5, -0.02, 0.94], [8, 0.02, 1.0], [12, 0.0, 1.04],
+      [17, 0.07, 1.02], [20, 0.12, 0.94], [22, -0.04, 0.88],
+    ];
+    let band = HOURS[0];
+    for (const row of HOURS) if (hour >= row[0]) band = row;
+    this.hourHue = band[1];
+    this.hourLight = band[2];
     const lowMemory = navigator.deviceMemory && navigator.deviceMemory <= 4;
     const lowConcurrency = navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4;
     const lowPower = lowMemory || lowConcurrency;
@@ -1168,9 +1180,12 @@ class ParticleField {
     ru2.uHueShift.value = this.baseHueShift;
     // the room behind the field takes its colour from the same shift the form does
     this.displayMaterial.uniforms.uWashTint.value.setHSL(
-      (0.62 + this.baseHueShift + 1.0) % 1.0, 0.46, 0.42);
-    this.displayMaterial.uniforms.uWash.value = 0.024 + v2 * 0.022;
-    this.displayMaterial.uniforms.uBloom.value = 0.42 * (js.bloom ?? 1.2);
+      (0.62 + this.baseHueShift + (this.hourHue || 0) + 1.0) % 1.0, 0.46, 0.42);
+    // one utterance in twenty-three is a wildcard; let it burn brighter and fill more of the room
+    const rare = (seedHash % 23) === 0;
+    this.rareRelease = rare;
+    this.displayMaterial.uniforms.uWash.value = (0.024 + v2 * 0.022) * (rare ? 2.1 : 1);
+    this.displayMaterial.uniforms.uBloom.value = 0.42 * (js.bloom ?? 1.2) * (rare ? 1.85 : 1);
     ru2.uIgnite.value = fx.ignite ? (js.ignite ?? 1) : 0;
     this.baseTurb = fx.turb ? 0.22 + v3 * 0.2 : 0.1;
     ru2.uFxTurb.value = this.baseTurb;
@@ -1470,7 +1485,7 @@ class ParticleField {
     // the answer arrives with a flash that decays; the filmic shoulder catches it
     this.swapFlash = (this.swapFlash || 0) * Math.pow(0.90, dt);
     let exposure = 1.56 + this.exposurePop + this.swapFlash;
-    exposure *= 1 - this.drowse * 0.55;
+    exposure *= (1 - this.drowse * 0.55) * (this.hourLight || 1);
     exposure += this.lean * 0.16;
     if (this.voiceLevel > 0.012) {
       this.energyCurrent = Math.min(1.6, this.energyCurrent + this.voiceLevel * 2.4);
