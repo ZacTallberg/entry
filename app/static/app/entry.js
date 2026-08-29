@@ -1161,6 +1161,7 @@ class ParticleField {
       prime = new THREE.DataTexture(primeValues, size, size, THREE.RGBAFormat, THREE.FloatType);
       prime.needsUpdate = true;
     }
+    if (fromCenter) this.swapFlash = 0.5;
     this.simMaterial.uniforms.tPositions.value = prime;
     this.simQuad.material = this.simMaterial;
     this.renderer.setRenderTarget(this.targetA);
@@ -1365,7 +1366,9 @@ class ParticleField {
 
     this.energyCurrent = (this.energyCurrent ?? 0.5) + ((this.energyTarget ?? 0.5) - (this.energyCurrent ?? 0.5)) * 0.06;
     this.exposurePop = (this.exposurePop || 0) * Math.pow(0.86, dt);
-    let exposure = 1.56 + this.exposurePop;
+    // the answer arrives with a flash that decays; the filmic shoulder catches it
+    this.swapFlash = (this.swapFlash || 0) * Math.pow(0.90, dt);
+    let exposure = 1.56 + this.exposurePop + this.swapFlash;
     if (this.voiceLevel > 0.012) {
       this.energyCurrent = Math.min(1.6, this.energyCurrent + this.voiceLevel * 2.4);
       exposure += Math.min(0.55, this.voiceLevel * 1.8);
@@ -1478,6 +1481,8 @@ class ParticleField {
     [this.trailA, this.trailB] = [this.trailB, this.trailA];
     this.displayMaterial.uniforms.map.value = this.trailA.texture;
     this.displayMaterial.uniforms.uGrainT.value = time;
+    // the frame draws breath with the answer: the vignette tightens on the flash and relaxes
+    this.displayMaterial.uniforms.uVignette.value = 0.34 + (this.swapFlash || 0) * 0.5;
     this.renderer.setRenderTarget(null);
     this.renderer.render(this.displayScene, this.trailCamera);
     this.raf = requestAnimationFrame(this.frame);
