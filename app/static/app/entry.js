@@ -229,17 +229,29 @@ const buildRenderFragment = () => `
   }
 `;
 
+// The same form never occupies the frame the same way twice: beyond the rotation and mirror, the
+// cloud is stretched along one axis, sheared, and twisted with depth — all decided by the
+// utterance. A glyph origin is spared everything but a whisper of rotation; it is your words,
+// and it has to stay readable.
 function orientOrigins(values, seedHash, originKind) {
   const glyph = originKind === 'glyph';
-  const a = ((((seedHash >>> 5) % 1000) / 1000) - 0.5) * (glyph ? 0.24 : Math.PI * 2);
+  const q = (shift) => (((seedHash >>> shift) % 1000) / 1000);
+  const a = (q(5) - 0.5) * (glyph ? 0.24 : Math.PI * 2);
   const mirror = !glyph && ((seedHash >>> 16) & 1) === 1 ? -1 : 1;
-  const ca = Math.cos(a);
-  const sa = Math.sin(a);
+  const stretch = glyph ? 1 : 0.74 + q(9) * 0.62;
+  const squash = glyph ? 1 : 1 / Math.sqrt(stretch);
+  const shear = glyph ? 0 : (q(13) - 0.5) * 0.5;
+  const twist = glyph ? 0 : (q(21) - 0.5) * 0.55;
   for (let i = 0; i < values.length; i += 4) {
-    const x = values[i] * mirror;
-    const y = values[i + 1];
-    values[i] = x * ca - y * sa;
-    values[i + 1] = x * sa + y * ca;
+    let x = values[i] * mirror * stretch;
+    let y = values[i + 1] * squash;
+    const z = values[i + 2];
+    x += y * shear;
+    const tw = twist * z;
+    const ct = Math.cos(a + tw);
+    const st = Math.sin(a + tw);
+    values[i] = x * ct - y * st;
+    values[i + 1] = x * st + y * ct;
   }
 }
 
