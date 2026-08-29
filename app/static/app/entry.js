@@ -180,12 +180,15 @@ const buildRenderVertex = (formDef) => `
   uniform float uFxShimmer;
   uniform float uFxSizeWave;
   uniform float uFxFog;
+  uniform float uFocus;
+  uniform float uDof;
   uniform float uVoice;
   uniform float uFxBands;
   uniform float uFxZones;
   uniform vec2 uZoneDir;
   uniform float uZoneHue;
   varying float vDepthA;
+  varying float vSoftK;
   void main() {
     vec3 p = texture2D(tPositions, position.xy).xyz;
     vec3 prev = texture2D(tPrev, position.xy).xyz;
@@ -204,8 +207,14 @@ const buildRenderVertex = (formDef) => `
     float ignite = smoothstep(0.02, 0.12, speed) * uIgnite;
     vColor = mix(base, vec3(1.0, 0.97, 0.9) * (1.0 + ignite * 1.6), ignite * 0.7);
     vDepthA = 1.0 - uFxFog * smoothstep(0.2, 1.6, abs(p.z));
+    // a lens has a plane it is sharp on; everything else swells and softens, and dims as it
+    // spreads, so the field reads as depth rather than as a flat sheet of dots
+    float defocus = clamp(abs(p.z - uFocus) * uDof, 0.0, 1.7);
+    vSoftK = 1.0 / (1.0 + defocus * 1.7);
+    vDepthA *= 1.0 / (1.0 + defocus * 1.15);
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
     float size = uPointSize * FORM_SIZE / max(0.48, -mvPosition.z);
+    size *= 1.0 + defocus * 0.95;
     size *= 1.0 + uFxSizeWave * 0.4 * sin(uTime * 1.9 + id * TAU);
     size *= 1.0 + uForm * 0.45 + uVoice * 0.3;
     gl_PointSize = size;
@@ -219,11 +228,12 @@ const buildRenderFragment = () => `
   uniform float uAlpha;
   varying vec3 vColor;
   varying float vDepthA;
+  varying float vSoftK;
   void main() {
     vec2 point = gl_PointCoord - 0.5;
     float radius = length(point);
     if (radius > 0.5) discard;
-    float core = pow(1.0 - radius * 2.0, uSoft);
+    float core = pow(1.0 - radius * 2.0, max(0.35, uSoft * vSoftK));
     float skirt = exp(-radius * radius * 9.0) * 0.12;
     gl_FragColor = vec4(vColor * uExposure, (core + skirt) * uAlpha * vDepthA);
   }
@@ -929,6 +939,8 @@ class ParticleField {
         uFxShimmer: { value: 0 },
         uFxSizeWave: { value: 0 },
         uFxFog: { value: 0 },
+        uFocus: { value: 0 },
+        uDof: { value: 0.62 },
         uVoice: { value: 0 },
         uFxBands: { value: 0 },
         uFxZones: { value: 0 },
@@ -1468,6 +1480,8 @@ class ParticleField {
     }
     ru.uHueShift.value = this.baseHueShift + this.vfx.hue + (this.hueDriftRate ? time * this.hueDriftRate : 0);
     if (this.beatTempo) exposure += 0.12 * Math.sin(time * this.beatTempo);
+    // the plane of sharpness drifts, so the field is never uniformly resolved
+    ru.uFocus.value = Math.sin(time * 0.055) * 0.62;
     ru.uExposure.value = exposure;
 
     const persist = Math.pow(this.trailPersist ?? 0.35, dt);
