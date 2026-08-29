@@ -43,3 +43,21 @@ with a map, which is exactly where a grade belongs and nothing was using it.
   shoulder has little to do without something bright to roll off.
 - Anything that wants to affect the whole image now has one place to live. The unused postprocessing
   imports remain as dead weight and should be removed when someone is next in that file.
+
+**Amendment (2026-08-28):** the piece had no bloom at all, and every form had been asking for one.
+All 112 carry a `bloom` value between 1.0 and 1.9 in their js config; nothing read it. The
+`UnrealBloomPass` that would have consumed it was among the imports that were never instantiated,
+so the light family — candle, wisps, meteors, lighthouse, photonring, filaments, ignition — was
+authored to glow and never did.
+
+There is one now, in the pass this ADR created: a bright-pass into a quarter-resolution target, two
+separable gaussian passes, added back in the display shader at a strength each form chooses. Cost
+measured settled at 120fps / 22ms worst frame on both 1920x1080 and 412x915 at dpr 2.6 — three
+extra quarter-res passes are free at this scale.
+
+Also: `textureSize` used `narrow` (any viewport dimension under 720px) as a stand-in for a weak
+device, so a current phone rendered 65,536 particles against a desktop's 200,704 — while `lowPower`
+already tested the things that actually matter, memory and core count. Capable narrow devices now
+get 352^2, or 123,904. Emulating a phone viewport on a desktop GPU cannot prove a handset holds it;
+the fidelity governor is the safety net, and its lever is render scale, so a device that struggles
+loses sharpness rather than the field.
