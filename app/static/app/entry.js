@@ -2673,7 +2673,13 @@ function enterDictation() {
   speakButton.dataset.listening = 'true';
   clearMirror();
   body.dataset.dictating = 'true';
-  ensureDust().then(() => { if (dust) dust.resize(); });
+  ensureDust().then(() => {
+    if (!dust) return;
+    dust.resize();
+    // the words are written in the colour of the dark that is listening
+    const cast = field && field.displayMaterial && field.displayMaterial.uniforms.uWashTint.value;
+    if (cast && dust.setTint) dust.setTint(0.55 + cast.r * 0.9, 0.55 + cast.g * 0.9, 0.55 + cast.b * 0.9);
+  });
   paintMirror(text.value);
   for (const n of mirror ? mirror.childNodes : []) n.classList.add('settled');
 }

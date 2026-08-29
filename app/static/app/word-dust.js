@@ -183,6 +183,8 @@ export function createWordDust(host) {
   };
   const HAND_NAMES = Object.keys(HANDS);
   let hand = HANDS.vapour;
+  // the words take a little of the colour of whatever the dark currently is
+  let tint = null;
 
   function frame(now) {
     raf = 0;
@@ -272,7 +274,14 @@ export function createWordDust(host) {
             Math.round(hand.glow[2] + (hand.ink[2] - hand.glow[2]) * a),
           ]
           : hand.ink;
-        ctx.fillStyle = `rgba(${ink[0]}, ${ink[1]}, ${ink[2]}, 0.97)`;
+        const shown = tint
+          ? [
+            Math.round(ink[0] * (1 - 0.34) + ink[0] * tint[0] * 0.34),
+            Math.round(ink[1] * (1 - 0.34) + ink[1] * tint[1] * 0.34),
+            Math.round(ink[2] * (1 - 0.34) + ink[2] * tint[2] * 0.34),
+          ]
+          : ink;
+        ctx.fillStyle = `rgba(${shown[0]}, ${shown[1]}, ${shown[2]}, 0.97)`;
         if (blur > 0.05 || alpha < 1) {
           ctx.filter = blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : 'none';
           ctx.globalAlpha = Math.max(0, alpha);
@@ -301,6 +310,12 @@ export function createWordDust(host) {
     sync,
     breathe,
     hands: HAND_NAMES,
+    // r/g/b in 0..1; normalised so the brightest channel stays full and the words keep
+    // their luminance while picking up the field's cast
+    setTint(r, g, b) {
+      const peak = Math.max(r, g, b, 0.0001);
+      tint = [r / peak, g / peak, b / peak];
+    },
     // the phrase picks the hand, so a sentence always arrives written the same way
     setHand(nameOrHash) {
       if (typeof nameOrHash === 'number') {
