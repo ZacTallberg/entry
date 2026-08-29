@@ -1413,7 +1413,14 @@ class ParticleField {
     this.prevFrameAt = now;
     this.lastFrame = now;
     const dt = clamp(frameGap / 16.7, 0.5, 2.5);
-    this.frameEma = this.frameEma ? this.frameEma * 0.92 + frameGap * 0.08 : frameGap;
+    // A shader compile costs one 300ms frame. Fed raw into the average that drives the
+    // fidelity governor, that single frame injects ~24ms, crosses the downscale threshold,
+    // and the field drops resolution for the rest of the session — a transient hitch paying
+    // out as permanent softness. Sustained slowness still registers, because sustained means
+    // many consecutive frames, each of which still counts up to the clamp.
+    const steady = Math.min(frameGap, 50);
+    this.frameEma = this.frameEma ? this.frameEma * 0.92 + steady * 0.08 : steady;
+    this.frameWorst = Math.max(this.frameWorst || 0, frameGap) * 0.995;
     this.governFidelity(now, interacting);
     const time = this.clock.getElapsedTime();
     this.pointer.lerp(this.pointerTarget, 0.055);
@@ -1864,7 +1871,7 @@ function beginRelease() {
         swapMs: field ? Math.round(field.lastSwapMs || 0) : -1,
       });
       window.setTimeout(() => {
-        if (field) diag('perf', { frameMs: Math.round(field.frameEma || 0), scale: Math.round((field.renderScale || 1) * 100) / 100 });
+        if (field) diag('perf', { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Math.round((field.renderScale || 1) * 100) / 100 });
       }, 3000);
     });
   }, swapAt);
@@ -3064,6 +3071,6 @@ window.entryExperience = Object.freeze({
   lastForm: () => lastForm,
   lastRelease: () => lastRelease,
   lastEffects: () => field?.effects || null,
-  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0) } : null,
+  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0) } : null,
   force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
 });
