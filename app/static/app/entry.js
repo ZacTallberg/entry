@@ -1427,7 +1427,14 @@ class ParticleField {
     this.raf = 0;
     if (this.disposed || !this.active) return;
     const interacting = this.pulse > 0.03 || this.releaseStarted > 0 || now < this.animatedUntil;
-    const interval = this.decodeBusy ? 1000 / 30 : (interacting ? 1000 / 50 : 1000 / 30);
+    // The piece was capping itself at 50fps while touched and 30 otherwise, which is what the
+    // frame telemetry had been reporting all along — 33ms was the ceiling, not the machine.
+    // Let it run as fast as the display will take: the fidelity governor is the safety net,
+    // and it drops resolution long before frames do. Transcription still gets its CPU back,
+    // and a sleeping field has nothing worth drawing quickly.
+    const interval = this.decodeBusy
+      ? 1000 / 30
+      : (this.drowse > 0.5 ? 1000 / 24 : (interacting ? 0 : 1000 / 60));
     if (now - this.lastFrame < interval) {
       this.raf = requestAnimationFrame(this.frame);
       return;
