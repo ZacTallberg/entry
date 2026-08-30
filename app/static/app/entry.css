@@ -361,11 +361,15 @@ body[data-has-text="true"] #release {
   content: "";
 }
 
+/* closest-side, or the band is measured to the corner and sits at the wrong radius — the same
+   default that clipped the speak dial's fill into a square. */
 .release-ring {
-  background: conic-gradient(from -90deg, rgba(174, 194, 255, .72) var(--release-progress), rgba(214, 222, 255, .09) 0);
-  -webkit-mask: radial-gradient(circle, transparent 60%, #000 61% 64%, transparent 65%);
-  mask: radial-gradient(circle, transparent 60%, #000 61% 64%, transparent 65%);
-  filter: drop-shadow(0 0 10px rgba(130, 156, 255, .22));
+  background: conic-gradient(from -90deg,
+    rgba(196, 212, 255, .86) var(--release-progress),
+    rgba(214, 222, 255, .08) 0);
+  -webkit-mask: radial-gradient(circle closest-side, transparent 74%, #000 78% 92%, transparent 97%);
+  mask: radial-gradient(circle closest-side, transparent 74%, #000 78% 92%, transparent 97%);
+  filter: drop-shadow(0 0 10px rgba(130, 156, 255, .3));
 }
 
 .release-ring::after {
