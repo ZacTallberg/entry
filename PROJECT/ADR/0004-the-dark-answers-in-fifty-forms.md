@@ -83,3 +83,14 @@ Also: `orientOrigins` now stretches, shears and twists the cloud with depth in a
 rotating and mirroring it, all keyed to the utterance — so no form occupies the frame the same way
 twice. A `glyph` origin is exempt from everything but its whisper of rotation: it is made of the
 visitor's own words and has to stay readable.
+
+**Amendment (2026-08-29):** a hundred and twelve became a hundred and twenty-eight. The earlier
+batches chased motion — flow, then instability, then staging on the release breath. These sixteen
+were chosen for the picture they make, a shape you could describe to someone who never saw it: a
+window in a dark church, iron standing up in spikes, a rule deciding what lives, sand finding the
+silent places, ink dropped into still water, a web with the dew still on it, something celebrated
+far away, a city seen from very high up, a wing opening once, pillars where stars are made, light
+coming through in bars, something enormous going down, a shape that turns all at once, a plain that
+cracked as it dried, a shoal turning through a shaft of light, and lines drawn by something already
+gone. All sixteen photographed and measured; one (`crepuscular`, 1.0% of frame lit) was retuned to
+42.4%.
