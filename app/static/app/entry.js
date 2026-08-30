@@ -738,10 +738,10 @@ class ParticleField {
       uniforms: {
         map: { value: null },
         uGrainT: { value: 0 },
-        uGrain: { value: 0.055 },
-        uVignette: { value: 0.34 },
+        uGrain: { value: 0.05 },
+        uVignette: { value: 0.28 },
         uFringe: { value: 0.0016 },
-        uLift: { value: 0.004 },
+        uLift: { value: 0.006 },
         uWash: { value: 0.03 },
         bloomMap: { value: null },
         uBloom: { value: 0.9 },
@@ -749,8 +749,8 @@ class ParticleField {
         streakMap: { value: null },
         uStreak: { value: 0 },
         uStreakTint: { value: new THREE.Color(0.45, 0.62, 1.0) },
-        uSat: { value: 1.14 },
-        uShoulder: { value: 0.82 },
+        uSat: { value: 1.5 },
+        uShoulder: { value: 0.9 },
         uWashTint: { value: new THREE.Color(0.30, 0.34, 0.62) },
       },
       vertexShader: `
@@ -944,9 +944,10 @@ class ParticleField {
     // Every arrival opens on a different quiet form — the slow, ambient ones, so the dark is
     // already somewhere before you say anything. ?form=<slug> overrides it, and is the only way
     // to put eyes on a particular form deliberately.
+    // arrival is the first impression: open on the forms that show the piece at its best
     const OPENERS = [
-      'nebula', 'darkflow', 'fog', 'breath', 'snowfall', 'mycelium',
-      'jellyfish', 'smoke', 'silk', 'tidepool', 'aurora', 'halo',
+      'aurora', 'galaxy', 'silk', 'magma', 'bioluminescence', 'prism',
+      'accretion', 'photonring', 'fireflies', 'supernova', 'smoke', 'tidepool',
     ];
     const wanted = new URLSearchParams(window.location.search).get('form');
     const opening = (wanted && FORM_INDEX.get(wanted))
@@ -1204,8 +1205,8 @@ class ParticleField {
     // one utterance in twenty-three is a wildcard; let it burn brighter and fill more of the room
     const rare = (seedHash % 23) === 0;
     this.rareRelease = rare;
-    this.displayMaterial.uniforms.uWash.value = (0.024 + v2 * 0.022) * (rare ? 2.1 : 1);
-    this.displayMaterial.uniforms.uBloom.value = 0.42 * (js.bloom ?? 1.2) * (rare ? 1.85 : 1);
+    this.displayMaterial.uniforms.uWash.value = (0.038 + v2 * 0.03) * (rare ? 2.1 : 1);
+    this.displayMaterial.uniforms.uBloom.value = 0.55 * (js.bloom ?? 1.2) * (rare ? 1.85 : 1);
     // only forms that burn get the anamorphic smear — it is a property of bright light
     const hot = Math.max(0, (js.bloom ?? 1.2) - 1.25);
     this.displayMaterial.uniforms.uStreak.value = hot * 0.5 * (rare ? 2.0 : 1.0);
@@ -1216,7 +1217,8 @@ class ParticleField {
     ru2.uFxSizeWave.value = fx.sizeWave ? 0.35 + v2 * 0.35 : 0;
     ru2.uFxFog.value = fx.fog ? 0.35 + v1 * 0.3 : 0;
     this.beatTempo = fx.beat ? 0.6 + v3 * 0.8 : 0;
-    ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.88 + v2 * 0.28);
+    ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.95 + v2 * 0.28);
+    ru2.uAlpha.value = Math.min(0.9, (js.alpha ?? 0.62) * 1.1);
     this.speedVariant = 0.7 + v3 * 0.2;
     this.timeScale = 0.55 + (((seedHash >>> 11) % 1000) / 1000) * 0.3;
     const nOff = new THREE.Vector3(v1 * 16, v2 * 16, v3 * 16);
@@ -1538,7 +1540,7 @@ class ParticleField {
     this.exposurePop = (this.exposurePop || 0) * Math.pow(0.86, dt);
     // the answer arrives with a flash that decays; the filmic shoulder catches it
     this.swapFlash = (this.swapFlash || 0) * Math.pow(0.90, dt);
-    let exposure = 1.56 + this.exposurePop + this.swapFlash;
+    let exposure = 1.74 + this.exposurePop + this.swapFlash;
     exposure *= (1 - this.drowse * 0.55) * (this.hourLight || 1);
     exposure += this.lean * 0.16;
     if (this.voiceLevel > 0.012) {
@@ -1693,7 +1695,7 @@ class ParticleField {
     this.displayMaterial.uniforms.map.value = this.trailA.texture;
     this.displayMaterial.uniforms.uGrainT.value = time;
     // the frame draws breath with the answer: the vignette tightens on the flash and relaxes
-    this.displayMaterial.uniforms.uVignette.value = 0.34 + (this.swapFlash || 0) * 0.5;
+    this.displayMaterial.uniforms.uVignette.value = 0.28 + (this.swapFlash || 0) * 0.5;
     // the lantern dims when the hand rests, and is out entirely while the field sleeps
     const lamp = this.displayMaterial.uniforms.uLantern.value;
     lamp.z = Math.max(0, lamp.z - dt * 0.012) * (1 - this.drowse);
