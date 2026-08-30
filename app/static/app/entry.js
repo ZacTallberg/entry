@@ -50,6 +50,8 @@ const GLSL_PRELUDE = `
   uniform float uPulseType;
   uniform float uForm;
   uniform vec2 uPointer;
+  uniform float uGather;
+  uniform vec2 uGatherPoint;
   uniform vec2 uPulseCenter;
   uniform vec2 uStir;
 
@@ -126,6 +128,13 @@ const buildSimFragment = (formDef) => `
     float pointerDistance = max(length(pointerDelta), 0.12);
     vec3 pointerDirection = normalize(vec3(pointerDelta, pos.z * 0.2));
     velocity += pointerDirection * (0.0018 * FORM_POINTER / pointerDistance);
+    // press and hold: the dark gathers to the hand, with a slow swirl so it coils rather
+    // than clumps; let go and the ordinary forces spill it back
+    vec2 gatherDelta = pos.xy - uGatherPoint;
+    float gatherDistance = max(length(gatherDelta), 0.15);
+    vec3 gatherDirection = normalize(vec3(gatherDelta, pos.z * 0.3));
+    velocity -= gatherDirection * (uGather * 0.055 / (gatherDistance + 0.3));
+    velocity.xy += vec2(-gatherDirection.y, gatherDirection.x) * (uGather * 0.02 / (gatherDistance + 0.5));
     velocity.xy += uStir * (0.16 * FORM_POINTER / (pointerDistance * pointerDistance + 0.4));
 
     vec2 pulseDelta = pos.xy - uPulseCenter;
@@ -636,9 +645,54 @@ function chooseFamily(features, hash) {
   return pool[(hash >>> 8) % pool.length];
 }
 
+// If the words name a thing the dark can be, it becomes that thing. Longest match wins so
+// "firefly" is not swallowed by "fire". The hash still seeds everything else, so the same
+// word arrives differently dressed each time.
+const SUMMONS = [
+  ['starling', 'murmuration'], ['murmur', 'murmuration'], ['flock', 'murmuration'],
+  ['firefl', 'fireflies'], ['firework', 'fireworks'], ['fire', 'ignition'], ['flame', 'candle'],
+  ['candle', 'candle'], ['ember', 'embers'], ['spark', 'ignition'], ['burn', 'ignition'],
+  ['rainbow', 'prism'], ['rain', 'rainfall'], ['river', 'river'], ['ocean', 'undertow'],
+  ['sea', 'tide'], ['wave', 'standingwaves'], ['tide', 'tide'], ['whirlpool', 'whirlpool'],
+  ['vortex', 'twinvortex'], ['ripple', 'ripples'], ['fog', 'fog'], ['mist', 'fog'],
+  ['smoke', 'smoke'], ['breath', 'breath'], ['wind', 'windfield'], ['storm', 'sandstorm'],
+  ['lightning', 'lightning'], ['thunder', 'lightning'], ['snow', 'snowfall'],
+  ['frost', 'frost'], ['ice', 'frost'], ['crystal', 'crystallize'],
+  ['aurora', 'aurora'], ['galax', 'galaxy'], ['starlight', 'constellation'],
+  ['constellation', 'constellation'], ['star', 'supernova'], ['nova', 'supernova'],
+  ['comet', 'comets'], ['meteor', 'meteors'], ['nebula', 'nebula'], ['moon', 'tidal'],
+  ['halo', 'halo'], ['eclipse', 'eventhorizon'], ['pulsar', 'pulsar'],
+  ['jellyfish', 'jellyfish'], ['whale', 'whalefall'], ['fish', 'shoal'], ['shoal', 'shoal'],
+  ['coral', 'coral'], ['moth', 'moths'], ['bird', 'migration'], ['wing', 'plumage'],
+  ['feather', 'plumage'], ['spider', 'web'], ['web', 'web'], ['dandelion', 'dandelion'],
+  ['root', 'roots'], ['mushroom', 'mycelium'], ['swarm', 'swarm'], ['butterfl', 'lorenz'],
+  ['ink', 'inkwater'], ['silk', 'silk'], ['thread', 'loom'], ['weav', 'loom'],
+  ['glass', 'stainedglass'], ['church', 'stainedglass'], ['window', 'fog'],
+  ['city', 'circuit'], ['maze', 'slime'], ['pendulum', 'doublependulum'],
+  ['spiral', 'phyllotaxis'], ['sunflower', 'phyllotaxis'], ['mandala', 'mandala'],
+  ['lighthouse', 'lighthouse'], ['prism', 'prism'], ['lens', 'lensing'],
+  ['sand', 'cymatics'], ['salt', 'saltflat'], ['desert', 'sandstorm'],
+  ['volcano', 'magma'], ['magma', 'magma'], ['lava', 'magma'],
+  ['pillar', 'pillars'], ['dust', 'darkflow'], ['ghost', 'wisps'], ['wisp', 'wisps'],
+  ['lantern', 'moths'], ['bell', 'resonance'], ['echo', 'resonance'],
+];
+
+function summonForm(text) {
+  const lower = text.toLowerCase();
+  let best = null;
+  for (const [word, slug] of SUMMONS) {
+    if (lower.includes(word) && FORM_INDEX.has(slug)) {
+      if (!best || word.length > best[0].length) best = [word, slug];
+    }
+  }
+  return best ? FORM_INDEX.get(best[1]) : null;
+}
+
 function chooseForm(raw, typingCadence) {
   const features = analyzeUtterance(raw, typingCadence);
   const hash = fnv(features.text || 'the dark');
+  const summoned = summonForm(features.text || '');
+  if (summoned) return { form: summoned, hash };
   let family = chooseFamily(features, hash);
   if ((Math.imul(hash ^ 0x51ed270b, 2654435761) >>> 0) % 100 < 35) {
     family = FAMILIES[(Math.imul(hash ^ 0x9c406bb5, 2654435761) >>> 0) % FAMILIES.length];
@@ -980,6 +1034,8 @@ class ParticleField {
         tOrigin: { value: null },
         uTime: { value: 0 },
         uPointer: { value: new THREE.Vector2(0, 0) },
+        uGather: { value: 0 },
+        uGatherPoint: { value: new THREE.Vector2(0, 0) },
         uPulse: { value: 0 },
         uPulseType: { value: 0 },
         uRelease: { value: 0 },
@@ -1362,6 +1418,8 @@ class ParticleField {
   }
 
   setPointer(x, y) {
+    if (this.gatherPoint) this.gatherPoint.set(x * 9.0, y * 4.6);
+    else this.gatherPoint = new THREE.Vector2(x * 9.0, y * 4.6);
     const lamp = this.displayMaterial && this.displayMaterial.uniforms.uLantern;
     if (lamp) { lamp.value.x = x + 0.5; lamp.value.y = y + 0.5; lamp.value.z = 1; }
     const nx = x * 2.2;
@@ -1582,6 +1640,10 @@ class ParticleField {
     this.vfx.hue *= vDecay;
     const su = this.simMaterial.uniforms;
     su.uVoice.value = vLevel;
+    this.gather = (this.gather || 0) + ((this.gatherTarget || 0) - (this.gather || 0)) * Math.min(1, dt * 0.12);
+    if (this.gather > 0.02) this.animatedUntil = Math.max(this.animatedUntil, now + 400);
+    su.uGather.value = this.gather;
+    if (this.gatherPoint) su.uGatherPoint.value.copy(this.gatherPoint);
     su.uDt.value = dt * (this.speedVariant || 1) * (1 - this.drowse * 0.72);
     su.uTime.value = time * (this.timeScale || 1);
     su.uEnergy.value = this.energyCurrent;
@@ -3149,7 +3211,14 @@ document.addEventListener('pointerdown', (event) => {
   const x = (event.clientX / window.innerWidth) - .5;
   const y = .5 - (event.clientY / window.innerHeight);
   field?.ripple(x, y, event.pointerType === 'touch' ? 1.7 : 1.4);
+  // held, the dark gathers to the hand
+  if (field) { field.setPointer(x, y); field.gatherTarget = 1; }
 }, { passive: true });
+
+const releaseGather = () => { if (field) field.gatherTarget = 0; };
+document.addEventListener('pointerup', releaseGather, { passive: true });
+document.addEventListener('pointercancel', releaseGather, { passive: true });
+window.addEventListener('blur', releaseGather, { passive: true });
 
 if (window.DeviceOrientationEvent && !finePointer.matches && typeof DeviceOrientationEvent.requestPermission !== 'function') {
   window.addEventListener('deviceorientation', (event) => {

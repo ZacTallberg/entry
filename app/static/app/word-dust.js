@@ -355,24 +355,40 @@ export function createWordDust(host) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     },
     // the dark takes the words: they blur, lift, and leave vapour behind
-    disperse() {
+    // The dark takes the words: their vapour does not drift away, it streams down and inward
+    // toward the field's heart — the release visibly feeds the form that answers it.
+    disperse(towardX, towardY) {
       const at = performance.now();
-      for (const h of puffs) { h.vy -= 0.3 * dpr; h.grow += 0.35; }
+      const cx = towardX !== undefined ? towardX * dpr : canvas.width * 0.5;
+      const cy = towardY !== undefined ? towardY * dpr : canvas.height * 1.4;
+      for (const h of puffs) {
+        const dx = cx - h.x;
+        const dy = cy - h.y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        h.vx += (dx / d) * 0.9 * dpr;
+        h.vy += (dy / d) * 0.9 * dpr;
+        h.grow += 0.2;
+      }
       for (const word of words) {
         word.dissolveAt = at + Math.random() * 160;
-        for (let ci = 0; ci < word.chars.length; ci += 3) {
+        for (let ci = 0; ci < word.chars.length; ci += 2) {
           const c = word.chars[ci];
-          const puffR = (18 + Math.random() * 20) * dpr;
+          const puffR = (16 + Math.random() * 18) * dpr;
+          const px = word.x + c.dx;
+          const py = word.y + word.baseline - word.h * 0.3;
+          const dx = cx - px;
+          const dy = cy - py;
+          const d = Math.max(1, Math.hypot(dx, dy));
           puffs.push({
-            x: word.x + c.dx,
-            y: word.y + word.baseline - word.h * 0.3,
-            vx: (Math.random() - 0.5) * 0.5 * dpr,
-            vy: -(0.1 + Math.random() * 0.3) * dpr,
+            x: px,
+            y: py,
+            vx: (dx / d) * (0.9 + Math.random() * 0.9) * dpr + (Math.random() - 0.5) * 0.3 * dpr,
+            vy: (dy / d) * (0.9 + Math.random() * 0.9) * dpr,
             rot: Math.random() * Math.PI * 2,
             spin: (Math.random() - 0.5) * 0.01,
             r0: puffR,
-            grow: (0.3 + Math.random() * 0.4) * dpr,
-            span: 130 + Math.random() * 110,
+            grow: (0.16 + Math.random() * 0.2) * dpr,
+            span: 120 + Math.random() * 90,
             life: 0,
           });
         }
