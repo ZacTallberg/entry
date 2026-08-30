@@ -261,6 +261,11 @@ function orientOrigins(values, seedHash, originKind) {
   }
 }
 
+// While it sleeps the dark dreams: every so often it becomes another of its quiet selves,
+// with no flash and no announcement, so a tab left open is somewhere else when you return.
+const DREAM_FORMS = ['nebula', 'darkflow', 'fog', 'breath', 'smoke', 'silk', 'tidepool',
+  'jellyfish', 'mycelium', 'snowfall', 'halo', 'whalefall', 'inkwater', 'pillars'];
+
 // ─────────────────────────────────────── origin layouts ────────────────────────────────────────
 const ORIGIN_GENERATORS = {
   nebula(values, rng) {
@@ -1480,14 +1485,29 @@ class ParticleField {
     // Two states the field did not have. Left alone long enough it falls asleep: time slows,
     // light drains, the lens opens wide. Any touch wakes it. And while the microphone is open it
     // leans in — a shade brighter and drawn slightly toward the middle, the dark listening.
+    // `interacting` includes the field's own idle breath, which fires every sixteen seconds —
+    // counted as touch, it reset the sleep timer forever and the field could never fall asleep.
+    // Only outside events wake it: pointer, release, voice — the things that extend animatedUntil.
+    const outsideTouch = now < this.animatedUntil || this.releaseStarted > 0;
+    if (outsideTouch) this.lastWokeAt = now;
     const quietFor = now - (this.lastWokeAt || now);
-    const wantDrowse = !interacting && !this.listening && quietFor > 45000 ? 1 : 0;
+    const wantDrowse = !outsideTouch && !this.listening && quietFor > 45000 ? 1 : 0;
     // slow to fall asleep, quick to wake — a touch should be answered at once
     const drowseRate = wantDrowse ? 0.010 : 0.085;
     this.drowse = (this.drowse || 0) + (wantDrowse - (this.drowse || 0)) * Math.min(1, dt * drowseRate);
     const wantLean = this.listening ? 1 : 0;
     this.lean = (this.lean || 0) + (wantLean - (this.lean || 0)) * Math.min(1, dt * 0.05);
-    if (interacting) this.lastWokeAt = now;
+    if (this.drowse > 0.9 && !this.listening && now - (this.lastDreamAt || now) > 42000) {
+      this.lastDreamAt = now;
+      const pick = DREAM_FORMS[Math.floor(Math.random() * DREAM_FORMS.length)];
+      const def = FORM_INDEX.get(pick);
+      if (def && def !== this.formDef) {
+        this.setForm(def, '', { fromCenter: false, seedHash: (Math.random() * 0xffffffff) >>> 0 });
+        // a dream must not wake it: setForm marks the field animated, which reads as touch
+        this.animatedUntil = 0;
+      }
+    }
+    if (this.drowse <= 0.9) this.lastDreamAt = now;
 
     if (!interacting && now - (this.lastBreath || 0) > 16000) {
       this.lastBreath = now;
@@ -3166,6 +3186,7 @@ window.entryExperience = Object.freeze({
     return { slug: form.slug, family: form.family, wildcard: hash % 23 === 0 };
   },
   lastForm: () => lastForm,
+  currentForm: () => (field && field.formDef && field.formDef.slug) || null,
   lastRelease: () => lastRelease,
   lastEffects: () => field?.effects || null,
   perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0) } : null,

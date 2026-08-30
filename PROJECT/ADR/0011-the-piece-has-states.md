@@ -49,3 +49,18 @@ did it thirty times a frame.
 - Sleep is a timer, so a visitor who leaves a tab open returns to a piece that has visibly rested.
   That is intended; it also means any future automated visual check must either interact first or
   account for a dimmed field.
+
+**Amendment (2026-08-29):** two corrections and a new state.
+
+The sleep state shipped in this ADR could never trigger. The field's own idle breath fires every
+sixteen seconds, the breath raises the pulse, the pulse counted as interaction, and interaction
+reset the sleep timer — so the quiet clock could never reach forty-five seconds. The screenshot
+that "verified" sleep was a dim moment, not the state. Waking is now defined by outside events
+only — pointer, release, voice, the things that extend `animatedUntil` — and the breath goes on
+stirring the field in its sleep without waking it. Verified by probe this time, not by
+screenshot: the form slug changed while untouched, which is only possible in deep sleep.
+
+And the dark dreams. Deep asleep, every forty-two seconds or so it becomes another of its quiet
+selves — no flash, no announcement, chosen from the calm forms — so a tab left open is somewhere
+else when the visitor returns. A dream must not wake the dreamer: `setForm` marks the field
+animated, which reads as touch, so the dream clears that mark immediately after.
