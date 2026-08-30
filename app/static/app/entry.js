@@ -740,6 +740,7 @@ class ParticleField {
         uWash: { value: 0.03 },
         bloomMap: { value: null },
         uBloom: { value: 0.9 },
+        uLantern: { value: new THREE.Vector3(0.5, 0.5, 0) },
         uSat: { value: 1.14 },
         uShoulder: { value: 0.82 },
         uWashTint: { value: new THREE.Color(0.30, 0.34, 0.62) },
@@ -755,6 +756,7 @@ class ParticleField {
         uniform sampler2D map;
         uniform sampler2D bloomMap;
         uniform float uGrainT, uGrain, uVignette, uFringe, uLift, uWash, uSat, uShoulder, uBloom;
+        uniform vec3 uLantern;
         uniform vec3 uWashTint;
         varying vec2 vUv;
         float hash(vec2 p) {
@@ -776,6 +778,10 @@ class ParticleField {
                   + 0.6 * sin((vUv.x + vUv.y) * 3.1 + uGrainT * 0.028);
           w = w * 0.25 + 0.42;
           col += uWashTint * uWash * w * (1.0 - smoothstep(0.0, 0.18, luma));
+          // a small light carried through the dark: it shows where the field is empty and
+          // is swallowed wherever there is already something to see
+          float lamp = exp(-dot(vUv - uLantern.xy, vUv - uLantern.xy) * 34.0) * uLantern.z;
+          col += uWashTint * lamp * 0.5 * (1.0 - smoothstep(0.0, 0.3, luma));
           // grain sits in the shadows, where banding lives, and fades out of the highlights
           float g = hash(vUv * vec2(1024.0, 683.0) + fract(uGrainT) * 91.7) - 0.5;
           col += g * uGrain * (1.0 - smoothstep(0.0, 0.55, luma)) * (0.5 + 0.5 * r2 * 2.0);
@@ -1324,6 +1330,8 @@ class ParticleField {
   }
 
   setPointer(x, y) {
+    const lamp = this.displayMaterial && this.displayMaterial.uniforms.uLantern;
+    if (lamp) { lamp.value.x = x + 0.5; lamp.value.y = y + 0.5; lamp.value.z = 1; }
     const nx = x * 2.2;
     const ny = y * 1.45;
     const now = performance.now();
@@ -1622,6 +1630,9 @@ class ParticleField {
     this.displayMaterial.uniforms.uGrainT.value = time;
     // the frame draws breath with the answer: the vignette tightens on the flash and relaxes
     this.displayMaterial.uniforms.uVignette.value = 0.34 + (this.swapFlash || 0) * 0.5;
+    // the lantern dims when the hand rests, and is out entirely while the field sleeps
+    const lamp = this.displayMaterial.uniforms.uLantern.value;
+    lamp.z = Math.max(0, lamp.z - dt * 0.012) * (1 - this.drowse);
     this.renderer.setRenderTarget(null);
     this.renderer.render(this.displayScene, this.trailCamera);
     this.raf = requestAnimationFrame(this.frame);
