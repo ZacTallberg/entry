@@ -1115,7 +1115,9 @@ class ParticleField {
   setForm(formDef, utterance, { fromCenter, seedHash, primeScale }) {
     const swapT0 = performance.now();
     const size = this.textureSize;
-    const key = `${formDef.slug}|${seedHash}|${utterance}`;
+    // must build the key the same way prepare() does — with the gesture — or the prepared
+    // textures never match and every swap regenerates its origins synchronously
+    const key = `${formDef.slug}|${seedHash}|${utterance}|${primeScale || 0.45}`;
     let preparedPrime = null;
     if (this.preparedKey === key && this.prepared) {
       this.origin?.dispose();
@@ -1803,7 +1805,10 @@ function scheduleWarm() {
       ? { form: FORM_INDEX.get(forcedForm), hash: fnv(raw.trim() || 'the dark') }
       : chooseForm(raw, cadence);
     if (!chosen.form) return;
-    field.prepare(chosen.form, raw, chosen.hash);
+    // the gesture is deterministic from the hash, so the warm can prepare the exact prime
+    // the release will ask for instead of one it will throw away
+    const warmRoll = (chosen.hash >>> 11) % 100;
+    field.prepare(chosen.form, raw, chosen.hash, warmRoll < 55 ? 0.45 : (warmRoll < 84 ? 1.85 : 1.02));
   }, 550);
 }
 
