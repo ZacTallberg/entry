@@ -741,6 +741,9 @@ class ParticleField {
         bloomMap: { value: null },
         uBloom: { value: 0.9 },
         uLantern: { value: new THREE.Vector3(0.5, 0.5, 0) },
+        streakMap: { value: null },
+        uStreak: { value: 0 },
+        uStreakTint: { value: new THREE.Color(0.45, 0.62, 1.0) },
         uSat: { value: 1.14 },
         uShoulder: { value: 0.82 },
         uWashTint: { value: new THREE.Color(0.30, 0.34, 0.62) },
@@ -757,6 +760,9 @@ class ParticleField {
         uniform sampler2D bloomMap;
         uniform float uGrainT, uGrain, uVignette, uFringe, uLift, uWash, uSat, uShoulder, uBloom;
         uniform vec3 uLantern;
+        uniform sampler2D streakMap;
+        uniform float uStreak;
+        uniform vec3 uStreakTint;
         uniform vec3 uWashTint;
         varying vec2 vUv;
         float hash(vec2 p) {
@@ -772,6 +778,7 @@ class ParticleField {
             texture2D(map, vUv).g,
             texture2D(map, vUv - off).b);
           col += texture2D(bloomMap, vUv).rgb * uBloom;
+          col += texture2D(streakMap, vUv).rgb * uStreakTint * uStreak;
           float luma = dot(col, vec3(0.299, 0.587, 0.114));
           // the dark is a room, not a void: a slow low wash that only shows where nothing else is
           float w = sin(vUv.x * 2.3 + uGrainT * 0.05) * sin(vUv.y * 1.9 - uGrainT * 0.037)
@@ -1194,6 +1201,9 @@ class ParticleField {
     this.rareRelease = rare;
     this.displayMaterial.uniforms.uWash.value = (0.024 + v2 * 0.022) * (rare ? 2.1 : 1);
     this.displayMaterial.uniforms.uBloom.value = 0.42 * (js.bloom ?? 1.2) * (rare ? 1.85 : 1);
+    // only forms that burn get the anamorphic smear — it is a property of bright light
+    const hot = Math.max(0, (js.bloom ?? 1.2) - 1.25);
+    this.displayMaterial.uniforms.uStreak.value = hot * 0.5 * (rare ? 2.0 : 1.0);
     ru2.uIgnite.value = fx.ignite ? (js.ignite ?? 1) : 0;
     this.baseTurb = fx.turb ? 0.22 + v3 * 0.2 : 0.1;
     ru2.uFxTurb.value = this.baseTurb;
@@ -1295,7 +1305,14 @@ class ParticleField {
     this.bloomB?.dispose();
     this.bloomA = new THREE.WebGLRenderTarget(bw, bh, options);
     this.bloomB = new THREE.WebGLRenderTarget(bw, bh, options);
+    // the streak shares the bright pass: the same light, smeared horizontally in widening
+    // strides — an anamorphic lens drawn out sideways
+    this.streakA?.dispose();
+    this.streakB?.dispose();
+    this.streakA = new THREE.WebGLRenderTarget(bw, Math.max(2, Math.floor(bh * 0.5)), options);
+    this.streakB = new THREE.WebGLRenderTarget(bw, Math.max(2, Math.floor(bh * 0.5)), options);
     if (this.blurMaterial) this.blurMaterial.uniforms.uTexel.value.set(1 / bw, 1 / bh);
+    if (this.displayMaterial) this.displayMaterial.uniforms.streakMap.value = this.streakA.texture;
   }
 
   basePointSize() {
@@ -1624,6 +1641,24 @@ class ParticleField {
     this.brightMaterial.uniforms.map.value = this.trailA.texture;
     this.renderer.setRenderTarget(this.bloomA);
     this.renderer.render(this.postScene, this.trailCamera);
+    // streaks first, while bloomA still holds the raw bright pass: three horizontal smears
+    // in widening strides; uDir carries the stride since the offset is uTexel * uDir
+    if (this.displayMaterial.uniforms.uStreak.value > 0.004) {
+      this.postQuad.material = this.blurMaterial;
+      this.blurMaterial.uniforms.map.value = this.bloomA.texture;
+      this.blurMaterial.uniforms.uDir.value.set(3, 0);
+      this.renderer.setRenderTarget(this.streakA);
+      this.renderer.render(this.postScene, this.trailCamera);
+      this.blurMaterial.uniforms.map.value = this.streakA.texture;
+      this.blurMaterial.uniforms.uDir.value.set(7, 0);
+      this.renderer.setRenderTarget(this.streakB);
+      this.renderer.render(this.postScene, this.trailCamera);
+      this.blurMaterial.uniforms.map.value = this.streakB.texture;
+      this.blurMaterial.uniforms.uDir.value.set(15, 0);
+      this.renderer.setRenderTarget(this.streakA);
+      this.renderer.render(this.postScene, this.trailCamera);
+      this.displayMaterial.uniforms.streakMap.value = this.streakA.texture;
+    }
     this.postQuad.material = this.blurMaterial;
     this.blurMaterial.uniforms.map.value = this.bloomA.texture;
     this.blurMaterial.uniforms.uDir.value.set(1, 0);
@@ -1669,6 +1704,8 @@ class ParticleField {
     this.trailB?.dispose();
     this.bloomA?.dispose();
     this.bloomB?.dispose();
+    this.streakA?.dispose();
+    this.streakB?.dispose();
     this.brightMaterial?.dispose();
     this.blurMaterial?.dispose();
     this.densityRT?.dispose();

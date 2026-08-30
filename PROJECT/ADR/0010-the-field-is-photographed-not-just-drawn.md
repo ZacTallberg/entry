@@ -61,3 +61,15 @@ already tested the things that actually matter, memory and core count. Capable n
 get 352^2, or 123,904. Emulating a phone viewport on a desktop GPU cannot prove a handset holds it;
 the fidelity governor is the safety net, and its lever is render scale, so a device that struggles
 loses sharpness rather than the field.
+
+**Amendment (2026-08-29, anamorphic streak):** the grade gains a lens artefact reserved for bright
+light. The streak is the same bright pass the bloom uses, smeared horizontally three times in
+widening strides (the blur offset is `uTexel * uDir`, so the direction vector carries the stride:
+3, then 7, then 15), half-height at bloom resolution, tinted cool, and added in the composite.
+Technique per the standard screen-space anamorphic approach: bright pass → horizontal-only
+iterated blur → tint → add.
+
+Only forms that burn get it — strength is `max(0, bloom - 1.25) * 0.5`, doubled on a rare release —
+so a candle stays a candle and the fireworks throw a blue-white line across the frame the way a
+cinema lens would. Measured at phone viewport, settled, hot form against quiet: 120fps / 13ms worst
+on both. The streak targets are bound at allocation so the sampler is never null.
