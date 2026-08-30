@@ -801,8 +801,14 @@ class ParticleField {
           // the palettes are quietly desaturated; give them a little of their colour back
           float grey = dot(col, vec3(0.299, 0.587, 0.114));
           col = mix(vec3(grey), col, uSat);
-          // and let the brightest particles keep their hue instead of clipping to white
-          col = col / (1.0 + max(vec3(0.0), col - uShoulder) * 0.85);
+          // the shoulder compresses LUMINANCE and keeps the colour ratios, so a dense stack of
+          // ribbons reads as intense colour rather than clipping through white — per-channel
+          // compression desaturates exactly where the image is most alive
+          float lum2 = dot(col, vec3(0.299, 0.587, 0.114));
+          if (lum2 > uShoulder) {
+            float compressed = uShoulder + (lum2 - uShoulder) / (1.0 + (lum2 - uShoulder) * 1.35);
+            col *= compressed / max(lum2, 0.0001);
+          }
           col *= 1.0 - uVignette * smoothstep(0.06, 0.72, r2);
           gl_FragColor = vec4(max(col, 0.0), 1.0);
         }`,
