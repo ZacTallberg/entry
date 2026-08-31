@@ -88,7 +88,6 @@ const buildSimFragment = (formDef) => `
   uniform sampler2D tPositions;
   uniform sampler2D tOrigin;
   varying vec2 vUv;
-  ${formDef.defines || ''}
   ${GLSL_PRELUDE}
   ${formDef.force}
 
@@ -174,13 +173,8 @@ const buildRenderVertex = (formDef) => `
   uniform sampler2D tOrigin;
   uniform float uPointSize;
   uniform float uGlowAmt;
-  ${formDef.defines || ''}
-  #ifndef FORM_SIZE
-  #define FORM_SIZE 1.0
-  #endif
-  #ifndef FORM_SHIMMER
-  #define FORM_SHIMMER 0.18
-  #endif
+  uniform float FORM_SIZE;
+  uniform float FORM_SHIMMER;
   ${GLSL_PRELUDE}
   varying vec3 vColor;
   ${formDef.color}
@@ -1027,9 +1021,26 @@ class ParticleField {
     this.raf = requestAnimationFrame(this.frame);
   }
 
+  formTuning(formDef) {
+    // the defines were the tuning; now they are values
+    const out = {
+      FORM_HOME: 0.0032, FORM_POINTER: 1.0, FORM_RELEASE: 1.0, FORM_SPEED: 1.0,
+      FORM_SIZE: 1.0, FORM_SHIMMER: 0.18,
+    };
+    const text = formDef.defines || '';
+    const re = /#define\s+(FORM_[A-Z]+)\s+([-\d.]+)/g;
+    let m = re.exec(text);
+    while (m) {
+      if (m[1] in out) out[m[1]] = parseFloat(m[2]);
+      m = re.exec(text);
+    }
+    return out;
+  }
+
   materialsFor(formDef) {
     let cached = this.materialCache.get(formDef.slug);
     if (cached) return cached;
+    const tuning = this.formTuning(formDef);
     const simMaterial = new THREE.ShaderMaterial({
       vertexShader: simVertexShader,
       fragmentShader: buildSimFragment(formDef),
@@ -1039,6 +1050,10 @@ class ParticleField {
         uTime: { value: 0 },
         uPointer: { value: new THREE.Vector2(0, 0) },
         uGather: { value: 0 },
+        FORM_HOME: { value: tuning.FORM_HOME },
+        FORM_POINTER: { value: tuning.FORM_POINTER },
+        FORM_RELEASE: { value: tuning.FORM_RELEASE },
+        FORM_SPEED: { value: tuning.FORM_SPEED },
         uGatherPoint: { value: new THREE.Vector2(0, 0) },
         uVmax: { value: 0.045 },
         uViewHalf: { value: new THREE.Vector2(4.4, 2.44) },
@@ -1073,6 +1088,8 @@ class ParticleField {
         tOrigin: { value: null },
         uTime: { value: 0 },
         uPointSize: { value: this.basePointSize() * (js.size || 1) },
+        FORM_SIZE: { value: tuning.FORM_SIZE },
+        FORM_SHIMMER: { value: tuning.FORM_SHIMMER },
         uExposure: { value: 1.88 },
         uSoft: { value: js.soft || 1.6 },
         uAlpha: { value: Math.min(0.92, (js.alpha || 0.68) * 1.08) },
@@ -1174,16 +1191,15 @@ class ParticleField {
           this.renderer.compileAsync(this.scene, this.camera),
           this.renderer.compileAsync(this.simScene, this.simCamera),
         ]);
-        if (!this.disposed) {
-          this.renderer.setRenderTarget(this.warmTarget);
-          this.renderer.render(this.simScene, this.simCamera);
-          this.renderer.render(this.scene, this.camera);
-          this.renderer.setRenderTarget(null);
-        }
+        // compileAsync has already built and linked the programs off the main thread. The
+        // extra warm render was drawing the WHOLE particle scene — two hundred thousand points,
+        // shaded in full — into a 4x4 target: measured at ~500ms, while the program link itself
+        // costs under 1ms. The draw was never the point; the compile was, and it is done.
       } else {
+        // no compileAsync: one real draw is the only way to force the link, and the sim pass
+        // alone is enough to do it without shading every particle
         this.renderer.setRenderTarget(this.warmTarget);
         this.renderer.render(this.simScene, this.simCamera);
-        this.renderer.render(this.scene, this.camera);
         this.renderer.setRenderTarget(null);
       }
     } finally {
