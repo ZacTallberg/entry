@@ -2606,12 +2606,12 @@ function onVoiceFrame(frame) {
   // while the engine loads the audio is held, not chunked — the legacy path must not
   // transcribe the same words underneath it
   if (streamSession || holding) {
-    if (!voicedLen && rms <= gate) {
-      idleSilence += frame.length;
-      if (idleSilence > rate * 9) stopListening();
-    } else if (rms > gate) {
-      idleSilence = 0;
-    }
+    // idleSilence is the TRAILING quiet: any voice resets it. The old guard required no voice
+    // to have happened at all, so once a word was spoken the microphone could never time out.
+    if (rms <= gate) idleSilence += frame.length;
+    else idleSilence = 0;
+    const quietLimit = voicedLen ? rate * 5.5 : rate * 9;
+    if (idleSilence > quietLimit) stopListening();
     return;
   }
   if (!voicedLen) {
@@ -2687,6 +2687,7 @@ async function startCapture() {
 function stopListening() {
   const wasListening = listening;
   listening = false;
+  body.dataset.voiceOn = 'false';
   if (field) field.listening = false;
   speakButton.dataset.listening = 'false';
   holding = false;
@@ -2943,6 +2944,7 @@ async function loadStreamingOnce() {
 
 function enterDictation() {
   handChosen = false;
+  body.dataset.voiceOn = 'true';
   if (field) field.listening = true;
   streamBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
   listening = true;
@@ -3039,6 +3041,7 @@ let nativeRecognizer = null;
 
 function startNative() {
   listening = true;
+  body.dataset.voiceOn = 'true';
   speakInviteDone = true;
   nativeHeard = false;
   nativeEmptyRuns = 0;
@@ -3186,6 +3189,7 @@ if (speakButton && (SRNative || workerPathOk)) {
     if (!workerPathOk || (sttFailed && !serverSttOk)) return;
     diag('rung-start', { rung: 'C' });
     listening = true;
+    body.dataset.voiceOn = 'true';
     speakInviteDone = true;
     setSpeakHint('');
     speakButton.dataset.listening = 'true';
