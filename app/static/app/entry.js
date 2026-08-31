@@ -52,6 +52,7 @@ const GLSL_PRELUDE = `
   uniform vec2 uPointer;
   uniform float uGather;
   uniform vec2 uGatherPoint;
+  uniform float uVmax;
   uniform vec2 uViewHalf;
   uniform vec2 uPulseCenter;
   uniform vec2 uStir;
@@ -157,6 +158,11 @@ const buildSimFragment = (formDef) => `
     float centerDistance = max(length(pos), 0.12);
     velocity += normalize(pos) * uRelease * (0.036 * FORM_RELEASE / centerDistance);
     velocity += (origin - pos) * (FORM_HOME + uForm * 0.055);
+    // the one dial the clocks cannot reach: bursts, respawn teleports and chase forces all
+    // produce huge instantaneous velocities however slow time runs. A hard speed limit turns
+    // every jump into a glide — nothing in the dark moves faster than a drift.
+    float vmag = length(velocity);
+    if (vmag > uVmax) velocity *= uVmax / vmag;
     pos += velocity * FORM_SPEED * uDt;
     if (length(pos) > 6.5) pos = mix(pos, origin, 0.5);
     gl_FragColor = vec4(pos, 1.0);
@@ -1034,6 +1040,7 @@ class ParticleField {
         uPointer: { value: new THREE.Vector2(0, 0) },
         uGather: { value: 0 },
         uGatherPoint: { value: new THREE.Vector2(0, 0) },
+        uVmax: { value: 0.045 },
         uViewHalf: { value: new THREE.Vector2(4.4, 2.44) },
         uPulse: { value: 0 },
         uPulseType: { value: 0 },
@@ -1656,6 +1663,7 @@ class ParticleField {
     su.uGather.value = this.gather;
     if (this.gatherPoint) su.uGatherPoint.value.copy(this.gatherPoint);
     su.uViewHalf.value.set(this.viewHalfW, this.viewHalfH);
+    su.uVmax.value = 0.045 * (1 - this.drowse * 0.5);
     su.uDt.value = dt * (this.speedVariant || 1) * (1 - this.drowse * 0.72);
     su.uTime.value = time * (this.timeScale || 1);
     su.uEnergy.value = this.energyCurrent;
