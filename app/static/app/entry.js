@@ -157,12 +157,6 @@ const buildSimFragment = (formDef) => `
     float centerDistance = max(length(pos), 0.12);
     velocity += normalize(pos) * uRelease * (0.036 * FORM_RELEASE / centerDistance);
     velocity += (origin - pos) * (FORM_HOME + uForm * 0.055);
-    // any particle drifting past the visible frame is bent gently home, however its form's own
-    // forces are tuned — travel bounds written for a wide desktop otherwise walk straight off a
-    // portrait phone and keep animating where nobody can see them
-    vec2 frameQ = pos.xy / (uViewHalf * 1.25);
-    float outside = dot(frameQ, frameQ);
-    if (outside > 1.0) velocity += (origin - pos) * min(0.06, 0.02 * (outside - 1.0));
     pos += velocity * FORM_SPEED * uDt;
     if (length(pos) > 6.5) pos = mix(pos, origin, 0.5);
     gl_FragColor = vec4(pos, 1.0);
@@ -194,6 +188,7 @@ const buildRenderVertex = (formDef) => `
   uniform float uFxFog;
   uniform float uFocus;
   uniform float uDof;
+  uniform float uFrameFit;
   uniform float uVoice;
   uniform float uFxBands;
   uniform float uFxZones;
@@ -224,8 +219,14 @@ const buildRenderVertex = (formDef) => `
     float defocus = clamp(abs(p.z - uFocus) * uDof, 0.0, 1.7);
     vSoftK = 1.0 / (1.0 + defocus * 1.7);
     vDepthA *= 1.0 / (1.0 + defocus * 1.15);
-    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+    // The forms are authored for a stage about ±3.6 wide and ±2.6 tall. The camera may be
+    // looking through a much narrower window — a portrait phone sees barely ±1.1 — so the whole
+    // stage is compressed here, at the very last step, to fit the frame that is watching.
+    // Palettes, forces, anchors and travel all stay in the authored space above.
+    vec3 staged = vec3(p.xy * uFrameFit, p.z);
+    vec4 mvPosition = modelViewMatrix * vec4(staged, 1.0);
     float size = uPointSize * FORM_SIZE / max(0.48, -mvPosition.z);
+    size *= 0.7 + uFrameFit * 0.3;
     size *= 1.0 + defocus * 0.95;
     size *= 1.0 + uFxSizeWave * 0.4 * sin(uTime * 1.9 + id * TAU);
     size *= 1.0 + uForm * 0.45 + uVoice * 0.3;
@@ -274,32 +275,6 @@ function orientOrigins(values, seedHash, originKind) {
     const st = Math.sin(a + tw);
     values[i] = x * ct - y * st;
     values[i + 1] = x * st + y * ct;
-  }
-}
-
-// Whatever the layout, the stretch, the shear or the rotation produced, the cloud must land
-// inside the frame that will actually show it. The camera sees ±2.44 world units vertically and
-// ±2.44·aspect horizontally — on a portrait phone barely ±1.1 — while layouts span ±3 or more,
-// so an unlucky rotation could put most of a form off the screen. Centre it, then scale it down
-// until it fits, leaving a breath of margin. Never scale up.
-function fitOriginsToFrame(values, halfW, halfH) {
-  let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
-  for (let i = 0; i < values.length; i += 4) {
-    const x = values[i]; const y = values[i + 1];
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-  }
-  if (!Number.isFinite(minX)) return;
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-  const spanX = Math.max(0.001, (maxX - minX) / 2);
-  const spanY = Math.max(0.001, (maxY - minY) / 2);
-  const scale = Math.min(1, (halfW * 0.94) / spanX, (halfH * 0.9) / spanY);
-  for (let i = 0; i < values.length; i += 4) {
-    values[i] = (values[i] - cx) * scale;
-    values[i + 1] = (values[i + 1] - cy) * scale;
   }
 }
 
@@ -779,6 +754,7 @@ class ParticleField {
     this.camera.position.z = 4.4;
     this.viewHalfH = Math.tan((58 / 2) * (Math.PI / 180)) * 4.4;
     this.viewHalfW = this.viewHalfH * this.camera.aspect;
+    this.frameFit = Math.min(1, this.viewHalfW / 3.6, this.viewHalfH / 2.6);
     this.renderer = new THREE.WebGLRenderer({
       canvas: target,
       antialias: false,
@@ -1113,6 +1089,7 @@ class ParticleField {
         uFxFog: { value: 0 },
         uFocus: { value: 0 },
         uDof: { value: 0.62 },
+        uFrameFit: { value: 1 },
         uVoice: { value: 0 },
         uFxBands: { value: 0 },
         uFxZones: { value: 0 },
@@ -1145,7 +1122,6 @@ class ParticleField {
     const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
     generator(values, rng, utterance);
     orientOrigins(values, seedHash, formDef.origin);
-    fitOriginsToFrame(values, this.viewHalfW, this.viewHalfH);
     const half = THREE.DataUtils.toHalfFloat;
     const packed = new Uint16Array(values.length);
     const primePacked = new Uint16Array(values.length);
@@ -1234,7 +1210,6 @@ class ParticleField {
       const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
       generator(this.originValues, rng, utterance);
       orientOrigins(this.originValues, seedHash, formDef.origin);
-      fitOriginsToFrame(this.originValues, this.viewHalfW, this.viewHalfH);
       this.origin?.dispose();
       this.origin = new THREE.DataTexture(this.originValues, size, size, THREE.RGBAFormat, THREE.FloatType);
       this.origin.needsUpdate = true;
@@ -1449,8 +1424,11 @@ class ParticleField {
   }
 
   setPointer(x, y) {
-    if (this.gatherPoint) this.gatherPoint.set(x * 9.0, y * 4.6);
-    else this.gatherPoint = new THREE.Vector2(x * 9.0, y * 4.6);
+    const fit = this.frameFit || 1;
+    const gx = x * 2 * this.viewHalfW / fit;
+    const gy = y * 2 * this.viewHalfH / fit;
+    if (this.gatherPoint) this.gatherPoint.set(gx, gy);
+    else this.gatherPoint = new THREE.Vector2(gx, gy);
     const lamp = this.displayMaterial && this.displayMaterial.uniforms.uLantern;
     if (lamp) { lamp.value.x = x + 0.5; lamp.value.y = y + 0.5; lamp.value.z = 1; }
     const nx = x * 2.2;
@@ -1538,6 +1516,7 @@ class ParticleField {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.viewHalfW = this.viewHalfH * this.camera.aspect;
+    this.frameFit = Math.min(1, this.viewHalfW / 3.6, this.viewHalfH / 2.6);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.allocTrailTargets();
     if (this.renderMaterial) {
@@ -1744,6 +1723,7 @@ class ParticleField {
     ru.uHueShift.value = this.baseHueShift + this.vfx.hue + (this.hueDriftRate ? time * this.hueDriftRate : 0);
     if (this.beatTempo) exposure += 0.12 * Math.sin(time * this.beatTempo);
     // the plane of sharpness drifts, so the field is never uniformly resolved
+    ru.uFrameFit.value = this.frameFit || 1;
     ru.uFocus.value = Math.sin(time * 0.055) * 0.62 * (1 - this.lean * 0.7);
     ru.uDof.value = 0.62 + this.drowse * 0.85 + this.lean * 0.3;
     ru.uExposure.value = exposure;
