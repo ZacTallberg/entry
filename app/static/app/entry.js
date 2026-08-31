@@ -52,6 +52,7 @@ const GLSL_PRELUDE = `
   uniform vec2 uPointer;
   uniform float uGather;
   uniform vec2 uGatherPoint;
+  uniform vec2 uViewHalf;
   uniform vec2 uPulseCenter;
   uniform vec2 uStir;
 
@@ -156,6 +157,12 @@ const buildSimFragment = (formDef) => `
     float centerDistance = max(length(pos), 0.12);
     velocity += normalize(pos) * uRelease * (0.036 * FORM_RELEASE / centerDistance);
     velocity += (origin - pos) * (FORM_HOME + uForm * 0.055);
+    // any particle drifting past the visible frame is bent gently home, however its form's own
+    // forces are tuned — travel bounds written for a wide desktop otherwise walk straight off a
+    // portrait phone and keep animating where nobody can see them
+    vec2 frameQ = pos.xy / (uViewHalf * 1.25);
+    float outside = dot(frameQ, frameQ);
+    if (outside > 1.0) velocity += (origin - pos) * min(0.06, 0.02 * (outside - 1.0));
     pos += velocity * FORM_SPEED * uDt;
     if (length(pos) > 6.5) pos = mix(pos, origin, 0.5);
     gl_FragColor = vec4(pos, 1.0);
@@ -267,6 +274,32 @@ function orientOrigins(values, seedHash, originKind) {
     const st = Math.sin(a + tw);
     values[i] = x * ct - y * st;
     values[i + 1] = x * st + y * ct;
+  }
+}
+
+// Whatever the layout, the stretch, the shear or the rotation produced, the cloud must land
+// inside the frame that will actually show it. The camera sees ±2.44 world units vertically and
+// ±2.44·aspect horizontally — on a portrait phone barely ±1.1 — while layouts span ±3 or more,
+// so an unlucky rotation could put most of a form off the screen. Centre it, then scale it down
+// until it fits, leaving a breath of margin. Never scale up.
+function fitOriginsToFrame(values, halfW, halfH) {
+  let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity;
+  for (let i = 0; i < values.length; i += 4) {
+    const x = values[i]; const y = values[i + 1];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  if (!Number.isFinite(minX)) return;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const spanX = Math.max(0.001, (maxX - minX) / 2);
+  const spanY = Math.max(0.001, (maxY - minY) / 2);
+  const scale = Math.min(1, (halfW * 0.94) / spanX, (halfH * 0.9) / spanY);
+  for (let i = 0; i < values.length; i += 4) {
+    values[i] = (values[i] - cx) * scale;
+    values[i + 1] = (values[i + 1] - cy) * scale;
   }
 }
 
@@ -603,48 +636,12 @@ const rememberForm = (slug) => {
 const EMOJI_RE = /\p{Extended_Pictographic}/u;
 const NON_LATIN_RE = /[぀-ヿ㐀-鿿가-힯Ѐ-ӿ֐-׿؀-ۿ]/;
 
-function analyzeUtterance(raw, typingCadence) {
-  const trimmed = raw.trim();
-  const letters = trimmed.replace(/\s/g, '');
-  const upper = (trimmed.match(/[A-Z]/g) || []).length;
-  const alpha = (trimmed.match(/[a-zA-Z]/g) || []).length;
-  return {
-    text: trimmed,
-    length: trimmed.length,
-    words: trimmed.split(/\s+/).filter(Boolean).length,
-    lines: trimmed.split(/\r\n?|\n/).length,
-    question: /\?/.test(trimmed),
-    exclaim: /!/.test(trimmed),
-    ellipsis: /(\.\.\.|…)$/.test(trimmed) || /…/.test(trimmed),
-    digits: (trimmed.match(/\d/g) || []).length,
-    upperRatio: alpha ? upper / alpha : 0,
-    emoji: EMOJI_RE.test(trimmed),
-    nonLatin: NON_LATIN_RE.test(trimmed),
-    cadence: typingCadence,
-    letters: letters.length,
-  };
-}
-
-function chooseFamily(features, hash) {
-  if (hash % 23 === 0) {
-    const all = ['flow', 'cosmic', 'organic', 'elemental', 'geometric', 'textual', 'attractor', 'water', 'gravity', 'light'];
-    return all[(hash >>> 4) % all.length];
-  }
-  if (features.emoji) return 'light';
-  if (features.question) return 'attractor';
-  if (features.exclaim) return features.length < 60 ? 'elemental' : 'cosmic';
-  if (features.ellipsis) return 'water';
-  if (features.lines > 1) return 'textual';
-  if (features.digits >= 2) return 'geometric';
-  if (features.upperRatio > 0.6 && features.letters >= 4) return 'elemental';
-  if (features.nonLatin) return 'textual';
-  if (features.length <= 14) return 'organic';
-  if (features.length >= 140) return 'flow';
-  if (features.words >= 18) return 'textual';
-  const pool = ['flow', 'cosmic', 'organic', 'gravity', 'light', 'water', 'geometric'];
-  return pool[(hash >>> 8) % pool.length];
-}
-
+// The structural listener that once read questions into attractors and CAPS into
+// the elemental family is retired by operator decree (2026-08-31): the message's
+// syntax and vocabulary must not prompt the answer. Selection now draws from a
+// real random well in chooseForm; only an explicit summons (naming a form) and
+// the words-take-shape glyph layout still touch the text, because both ARE the
+// text on purpose.
 // If the words name a thing the dark can be, it becomes that thing. Longest match wins so
 // "firefly" is not swallowed by "fire". The hash still seeds everything else, so the same
 // word arrives differently dressed each time.
@@ -688,15 +685,25 @@ function summonForm(text) {
   return best ? FORM_INDEX.get(best[1]) : null;
 }
 
-function chooseForm(raw, typingCadence) {
-  const features = analyzeUtterance(raw, typingCadence);
-  const hash = fnv(features.text || 'the dark');
-  const summoned = summonForm(features.text || '');
-  if (summoned) return { form: summoned, hash };
-  let family = chooseFamily(features, hash);
-  if ((Math.imul(hash ^ 0x51ed270b, 2654435761) >>> 0) % 100 < 35) {
-    family = FAMILIES[(Math.imul(hash ^ 0x9c406bb5, 2654435761) >>> 0) % FAMILIES.length];
+// The words and the answer are strangers now, by decree: what is said must never
+// steer which form the dark becomes or how it behaves. The one exception is naming a
+// form outright — a deliberate summons is a request, not a tell. Everything else
+// draws from the well: a real random seed, a uniformly chosen family, the no-repeat
+// ring, nothing read from syntax, punctuation, length, case or cadence.
+function drawSeed() {
+  if (window.crypto && crypto.getRandomValues) {
+    const b = new Uint32Array(1);
+    crypto.getRandomValues(b);
+    return b[0] >>> 0;
   }
+  return (Math.random() * 0xffffffff) >>> 0;
+}
+
+function chooseForm(raw) {
+  const summoned = summonForm((raw || '').trim());
+  const hash = drawSeed();
+  if (summoned) return { form: summoned, hash };
+  const family = FAMILIES[(Math.imul(hash ^ 0x9c406bb5, 2654435761) >>> 0) % FAMILIES.length];
   const candidates = FORMS.filter((f) => f.family === family);
   let index = (hash >>> 12) % candidates.length;
   for (let hop = 0; hop < candidates.length; hop += 1) {
@@ -704,6 +711,19 @@ function chooseForm(raw, typingCadence) {
     if (!recentForms.includes(candidate.slug)) return { form: candidate, hash };
   }
   return { form: candidates[index], hash };
+}
+
+// One draw per composition. The warm-up prepares the exact prime the release will
+// use, so the choice must hold still between them — random, but drawn once.
+let pendingChoice = null;
+function currentChoice(raw) {
+  if (forcedForm && FORM_INDEX.get(forcedForm)) {
+    return { form: FORM_INDEX.get(forcedForm), hash: drawSeed() };
+  }
+  const summoned = summonForm((raw || '').trim());
+  if (summoned) return { form: summoned, hash: pendingChoice ? pendingChoice.hash : drawSeed() };
+  if (!pendingChoice) pendingChoice = chooseForm(raw);
+  return pendingChoice;
 }
 
 // ───────────────────────────────────────── the field ───────────────────────────────────────────
@@ -742,7 +762,7 @@ class ParticleField {
     this.pulseType = 0;
     this.releaseStarted = 0;
     this.releaseEnergy = 0;
-    this.envelope = { inhale: 0.48, exhale: 2.35, peak: 2.35 };
+    this.envelope = { inhale: 0.62, exhale: 3.4, peak: 3.4 };
     this.pointerTarget = new THREE.Vector2(0, 0);
     this.pointer = new THREE.Vector2(0, 0);
     this.stir = new THREE.Vector2(0, 0);
@@ -757,6 +777,8 @@ class ParticleField {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 100);
     this.camera.position.z = 4.4;
+    this.viewHalfH = Math.tan((58 / 2) * (Math.PI / 180)) * 4.4;
+    this.viewHalfW = this.viewHalfH * this.camera.aspect;
     this.renderer = new THREE.WebGLRenderer({
       canvas: target,
       antialias: false,
@@ -1036,6 +1058,7 @@ class ParticleField {
         uPointer: { value: new THREE.Vector2(0, 0) },
         uGather: { value: 0 },
         uGatherPoint: { value: new THREE.Vector2(0, 0) },
+        uViewHalf: { value: new THREE.Vector2(4.4, 2.44) },
         uPulse: { value: 0 },
         uPulseType: { value: 0 },
         uRelease: { value: 0 },
@@ -1067,7 +1090,7 @@ class ParticleField {
         tOrigin: { value: null },
         uTime: { value: 0 },
         uPointSize: { value: this.basePointSize() * (js.size || 1) },
-        uExposure: { value: 1.7 },
+        uExposure: { value: 1.88 },
         uSoft: { value: js.soft || 1.6 },
         uAlpha: { value: Math.min(0.92, (js.alpha || 0.68) * 1.08) },
         uPointer: { value: new THREE.Vector2(0, 0) },
@@ -1122,6 +1145,7 @@ class ParticleField {
     const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
     generator(values, rng, utterance);
     orientOrigins(values, seedHash, formDef.origin);
+    fitOriginsToFrame(values, this.viewHalfW, this.viewHalfH);
     const half = THREE.DataUtils.toHalfFloat;
     const packed = new Uint16Array(values.length);
     const primePacked = new Uint16Array(values.length);
@@ -1210,6 +1234,7 @@ class ParticleField {
       const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
       generator(this.originValues, rng, utterance);
       orientOrigins(this.originValues, seedHash, formDef.origin);
+      fitOriginsToFrame(this.originValues, this.viewHalfW, this.viewHalfH);
       this.origin?.dispose();
       this.origin = new THREE.DataTexture(this.originValues, size, size, THREE.RGBAFormat, THREE.FloatType);
       this.origin.needsUpdate = true;
@@ -1281,8 +1306,14 @@ class ParticleField {
     this.beatTempo = fx.beat ? 0.6 + v3 * 0.8 : 0;
     ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.95 + v2 * 0.28);
     ru2.uAlpha.value = Math.min(0.9, (js.alpha ?? 0.62) * 1.1);
-    this.speedVariant = 0.7 + v3 * 0.2;
-    this.timeScale = 0.55 + (((seedHash >>> 11) % 1000) / 1000) * 0.3;
+    // Lackadaisical by decree (2026-08-31, the third and final calming): the
+    // field's clock runs at roughly six-tenths of the previous pass, which was
+    // itself a halving. Everything driven by uTime and uDt — forces, waves,
+    // spins, shimmer — inherits the drift with no per-effect retuning. The
+    // brightness this steals is repaid at the exposure line below, because
+    // slower particles ignite less and clump less.
+    this.speedVariant = 0.44 + v3 * 0.14;
+    this.timeScale = 0.34 + (((seedHash >>> 11) % 1000) / 1000) * 0.18;
     const nOff = new THREE.Vector3(v1 * 16, v2 * 16, v3 * 16);
     this.simMaterial.uniforms.uNoiseOff.value.copy(nOff);
     this.renderMaterial.uniforms.uNoiseOff.value.copy(nOff);
@@ -1506,6 +1537,7 @@ class ParticleField {
     if (this.disposed) return;
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
+    this.viewHalfW = this.viewHalfH * this.camera.aspect;
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.allocTrailTargets();
     if (this.renderMaterial) {
@@ -1604,7 +1636,7 @@ class ParticleField {
     this.exposurePop = (this.exposurePop || 0) * Math.pow(0.86, dt);
     // the answer arrives with a flash that decays; the filmic shoulder catches it
     this.swapFlash = (this.swapFlash || 0) * Math.pow(0.90, dt);
-    let exposure = 1.74 + this.exposurePop + this.swapFlash;
+    let exposure = 1.92 + this.exposurePop + this.swapFlash;
     exposure *= (1 - this.drowse * 0.55) * (this.hourLight || 1);
     exposure += this.lean * 0.16;
     if (this.voiceLevel > 0.012) {
@@ -1644,6 +1676,7 @@ class ParticleField {
     if (this.gather > 0.02) this.animatedUntil = Math.max(this.animatedUntil, now + 400);
     su.uGather.value = this.gather;
     if (this.gatherPoint) su.uGatherPoint.value.copy(this.gatherPoint);
+    su.uViewHalf.value.set(this.viewHalfW, this.viewHalfH);
     su.uDt.value = dt * (this.speedVariant || 1) * (1 - this.drowse * 0.72);
     su.uTime.value = time * (this.timeScale || 1);
     su.uEnergy.value = this.energyCurrent;
@@ -1928,9 +1961,7 @@ function scheduleWarm() {
     const raw = text.value;
     if (!raw.trim() || !field) return;
     if (field.frameEma && field.frameEma > 45) return;
-    const chosen = forcedForm
-      ? { form: FORM_INDEX.get(forcedForm), hash: fnv(raw.trim() || 'the dark') }
-      : chooseForm(raw, cadence);
+    const chosen = currentChoice(raw);
     if (!chosen.form) return;
     // the gesture is deterministic from the hash, so the warm can prepare the exact prime
     // the release will ask for instead of one it will throw away
@@ -1990,6 +2021,7 @@ function onInput(event) {
   releaseButton.disabled = !hasText;
   if (!hasText) {
     cancelReleaseSchedule();
+    pendingChoice = null;
     setState('empty', '');
     return;
   }
@@ -2017,10 +2049,9 @@ function beginRelease() {
   cancelReleaseSchedule();
   const raw = text.value;
   const length = raw.length;
-  const chosen = forcedForm && FORM_INDEX.get(forcedForm)
-    ? { form: FORM_INDEX.get(forcedForm), hash: fnv(raw.trim() || 'the dark') }
-    : chooseForm(raw, cadence);
+  const chosen = currentChoice(raw);
   forcedForm = null;
+  pendingChoice = null;
   lastForm = chosen.form.slug;
   lastRelease = { slug: chosen.form.slug, family: chosen.form.family, len: raw.length, lines: raw.split(/\r\n?|\n/).length };
   rememberForm(chosen.form.slug);
@@ -2181,6 +2212,14 @@ let chunkLen = 0;
 let voicedLen = 0;
 let silenceLen = 0;
 let pendingChunks = 0;
+// The three finishing clocks. speechPeak remembers how loud the speaker actually is, so
+// "quiet" is judged against THEM and not against a noise floor the gain control keeps
+// inflating; streamTextAt is the last moment the transcript changed; listenStartAt caps
+// the whole sitting.
+let speechPeak = 0;
+let speechAt = 0;
+let streamTextAt = 0;
+let listenStartAt = 0;
 let noiseFloor = 0.004;
 let statSamples = 0;
 let statPeak = 0;
@@ -2586,11 +2625,19 @@ function onVoiceFrame(frame) {
   const gate = Math.min(0.012, Math.max(0.0035, noiseFloor * 2.5 + 0.002));
   chunkBuf.push(frame);
   chunkLen += frame.length;
-  if (rms > gate) {
+  // Judged against the speaker, not only the floor: with auto gain control the room
+  // itself creeps up toward the gate after speech ends, and a gate-only test can sit
+  // just above "quiet" forever — the session that never finishes. A frame counts as
+  // voice only if it also clears a fifth of the speaker's own recent peak.
+  const voiceBar = Math.max(gate, speechPeak * 0.2);
+  if (rms > voiceBar) {
     voicedLen += frame.length;
     silenceLen = 0;
+    speechPeak = Math.max(speechPeak * 0.995, rms);
+    speechAt = performance.now();
   } else {
     silenceLen += frame.length;
+    speechPeak *= 0.9995;
   }
   statSamples += frame.length;
   statPeak = Math.max(statPeak, rms);
@@ -2608,10 +2655,27 @@ function onVoiceFrame(frame) {
   if (streamSession || holding) {
     // idleSilence is the TRAILING quiet: any voice resets it. The old guard required no voice
     // to have happened at all, so once a word was spoken the microphone could never time out.
-    if (rms <= gate) idleSilence += frame.length;
+    if (rms <= voiceBar) idleSilence += frame.length;
     else idleSilence = 0;
-    const quietLimit = voicedLen ? rate * 5.5 : rate * 9;
-    if (idleSilence > quietLimit) stopListening();
+    const quietLimit = voicedLen ? rate * 4.2 : rate * 9;
+    if (idleSilence > quietLimit) { stopListening(); return; }
+    // Second clock: the transcript itself. If words were spoken but the engine has
+    // written nothing new for a while, the utterance is over no matter what the
+    // microphone thinks it hears — this is the clock that cannot be fooled by a
+    // noisy room.
+    const lastProgress = Math.max(streamTextAt, speechAt);
+    if (voicedLen && streamSession && lastProgress
+        && performance.now() - lastProgress > 6500) {
+      diag('finish-text-idle');
+      stopListening();
+      return;
+    }
+    // Third clock: no sitting lasts forever.
+    if (listenStartAt && performance.now() - listenStartAt > 90000) {
+      diag('finish-cap');
+      stopListening();
+      return;
+    }
     return;
   }
   if (!voicedLen) {
@@ -2664,6 +2728,10 @@ async function startCapture() {
     return;
   }
   noiseFloor = 0.004;
+  speechPeak = 0;
+  speechAt = 0;
+  streamTextAt = 0;
+  listenStartAt = performance.now();
   statSamples = 0;
   statPeak = 0;
   winMin = 1;
@@ -2784,12 +2852,12 @@ function paintMirror(full) {
   }
   // The textarea scrolls to keep the newest words in view; the mirror is what the visitor
   // actually reads, so it has to follow, and the dust reads its positions after it has moved.
-  // the first words decide which hand the rest of the utterance is written in
+  // the hand is drawn from the well, never from the words — what is said and how
+  // it appears are strangers by decree
   if (dust && !handChosen) {
-    const opening = full.trim().slice(0, 24);
-    if (opening) {
+    if (full.trim()) {
       const forced = new URLSearchParams(window.location.search).get('hand');
-      dust.setHand(forced || fnv(opening));
+      dust.setHand(forced || drawSeed());
       handChosen = true;
     }
   }
@@ -2978,6 +3046,7 @@ function openStreamSession() {
       body.dataset.voicePartial = partial ? 'true' : 'false';
       if (text.value !== joined) {
         text.value = joined;
+        streamTextAt = performance.now();
         paintMirror(joined);
         onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' }));
       }

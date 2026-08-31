@@ -2,7 +2,7 @@
 // are revealed through it, left to right — the smoke eats the edges of the glyphs until
 // the phrase settles. Never beads, never a hard paste-in.
 
-const MAX_PUFFS = 150;
+const MAX_PUFFS = 260;
 
 export function createWordDust(host) {
   const canvas = document.createElement('canvas');
@@ -69,26 +69,29 @@ export function createWordDust(host) {
 
   function curl(x, y, t) {
     const s = 0.0030;
+    // the field breathes at a fraction of its old rate: vapour should wander,
+    // never hurry
     return [
-      Math.sin(y * s + t * 0.19) + 0.5 * Math.sin(y * s * 2.1 - t * 0.11),
-      Math.cos(x * s * 1.1 - t * 0.15) + 0.5 * Math.cos(x * s * 2.6 + t * 0.09),
+      Math.sin(y * s + t * 0.06) + 0.5 * Math.sin(y * s * 2.1 - t * 0.035),
+      Math.cos(x * s * 1.1 - t * 0.05) + 0.5 * Math.cos(x * s * 2.6 + t * 0.03),
     ];
   }
 
   // Voice heard: vapour gathers along the line the words will occupy.
   function breathe(level) {
-    const want = Math.min(MAX_PUFFS, Math.round(26 + level * 90));
+    const want = Math.min(MAX_PUFFS, Math.round(40 + level * 150));
     if (puffs.length >= want) return;
     puffs.push({
       x: (padX + hostW * (0.14 + Math.random() * 0.72)) * dpr,
       y: (padY + hostH * (0.34 + Math.random() * 0.42)) * dpr,
-      vx: (Math.random() - 0.5) * 0.16 * dpr,
-      vy: -(0.02 + Math.random() * 0.08) * dpr,
+      // barely moving: smoke that hangs, not smoke that flees
+      vx: (Math.random() - 0.5) * 0.07 * dpr,
+      vy: -(0.012 + Math.random() * 0.04) * dpr,
       rot: Math.random() * Math.PI * 2,
-      spin: (Math.random() - 0.5) * 0.008,
-      r0: (26 + Math.random() * 46) * dpr,
-      grow: (0.08 + Math.random() * 0.16) * dpr,
-      span: 260 + Math.random() * 240,
+      spin: (Math.random() - 0.5) * 0.0045,
+      r0: (34 + Math.random() * 72) * dpr,
+      grow: (0.05 + Math.random() * 0.11) * dpr,
+      span: 620 + Math.random() * 620,
       life: 0,
     });
     start();
@@ -116,7 +119,39 @@ export function createWordDust(host) {
         continue;
       }
       const built = build(span, r, hostRect);
-      if (built) next.push(built);
+      if (!built) continue;
+      // The engine revises constantly, and a revision used to re-write the whole
+      // word from its first letter — the line stuttered every ~400ms. A revised
+      // word keeps every letter it shares with what was already written: only
+      // the changed tail condenses anew, under a small breath of fresh vapour
+      // at the point of change.
+      if (prev && prev.label !== label) {
+        const shared = (() => {
+          const a = prev.chars, b = built.chars;
+          let k = 0;
+          while (k < a.length && k < b.length && a[k].ch === b[k].ch) k += 1;
+          return k;
+        })();
+        for (let k = 0; k < shared; k += 1) built.chars[k].at = Math.min(prev.chars[k].at, built.chars[k].at);
+        if (shared < built.chars.length && puffs.length < MAX_PUFFS - 3) {
+          const cAt = built.chars[shared] || built.chars[built.chars.length - 1];
+          for (let pj = 0; pj < 3; pj += 1) {
+            puffs.push({
+              x: built.x + (cAt ? cAt.dx : 0) + (Math.random() - 0.5) * 14 * dpr,
+              y: built.y + built.h * (0.3 + Math.random() * 0.4),
+              vx: (Math.random() - 0.5) * 0.05 * dpr,
+              vy: -(0.01 + Math.random() * 0.03) * dpr,
+              rot: Math.random() * Math.PI * 2,
+              spin: (Math.random() - 0.5) * 0.004,
+              r0: (22 + Math.random() * 34) * dpr,
+              grow: (0.05 + Math.random() * 0.08) * dpr,
+              span: 420 + Math.random() * 380,
+              life: 0,
+            });
+          }
+        }
+      }
+      next.push(built);
     }
     words = next;
     if (words.length) start();
@@ -126,11 +161,11 @@ export function createWordDust(host) {
     const label = span.textContent || '';
     const cs = window.getComputedStyle(span);
     const nowMs = performance.now();
-    let perLetter = 78;
+    let perLetter = 100;
     const backlog = Math.max(0, writeHeadAt - nowMs);
-    if (backlog > 900) perLetter = 34;
-    else if (backlog > 420) perLetter = 54;
-    const duration = Math.max(200, label.trim().length * perLetter);
+    if (backlog > 900) perLetter = 40;
+    else if (backlog > 420) perLetter = 64;
+    const duration = Math.max(260, label.trim().length * perLetter);
     const startAt = Math.max(nowMs, writeHeadAt);
     writeHeadAt = startAt + duration + 40;
     const font = `${cs.fontStyle} ${cs.fontWeight} ${parseFloat(cs.fontSize) * dpr}px ${cs.fontFamily}`;
@@ -166,25 +201,27 @@ export function createWordDust(host) {
 
   // The dark writes in more than one hand. Which one a phrase arrives in is decided by the
   // phrase itself, so the same words always condense the same way.
+  // Fades run past three quarters of a second: a letter condenses out of the
+  // vapour the way breath condenses on glass, not the way a cursor types.
   const HANDS = {
     vapour: {
-      fade: 380, blur: 7, lift: 2, shiver: 0, puffs: 3, puffAlpha: 0.34, puffR: 26, spread: 10,
+      fade: 860, blur: 8, lift: 2, shiver: 0, puffs: 4, puffAlpha: 0.4, puffR: 34, spread: 14,
       ink: [246, 248, 255], glow: null,
     },
     ember: {
-      fade: 460, blur: 5, lift: -3, shiver: 0, puffs: 3, puffAlpha: 0.3, puffR: 22, spread: 8,
+      fade: 1040, blur: 6, lift: -3, shiver: 0, puffs: 4, puffAlpha: 0.36, puffR: 30, spread: 12,
       ink: [252, 244, 232], glow: [255, 176, 96],
     },
     frost: {
-      fade: 300, blur: 9, lift: 0, shiver: 0.5, puffs: 2, puffAlpha: 0.26, puffR: 30, spread: 13,
+      fade: 700, blur: 10, lift: 0, shiver: 0.3, puffs: 3, puffAlpha: 0.32, puffR: 38, spread: 17,
       ink: [236, 246, 255], glow: [176, 220, 255],
     },
     ink: {
-      fade: 520, blur: 12, lift: 1, shiver: 0, puffs: 2, puffAlpha: 0.2, puffR: 34, spread: 6,
+      fade: 1180, blur: 13, lift: 1, shiver: 0, puffs: 3, puffAlpha: 0.26, puffR: 42, spread: 10,
       ink: [232, 236, 248], glow: null,
     },
     static: {
-      fade: 240, blur: 4, lift: 0, shiver: 1.6, puffs: 4, puffAlpha: 0.22, puffR: 16, spread: 16,
+      fade: 520, blur: 5, lift: 0, shiver: 0.9, puffs: 5, puffAlpha: 0.28, puffR: 22, spread: 20,
       ink: [244, 248, 255], glow: null,
     },
   };
@@ -208,17 +245,17 @@ export function createWordDust(host) {
       const aged = h.life / h.span;
       if (aged >= 1) { puffs.splice(i, 1); continue; }
       const [cx, cy] = curl(h.x, h.y, t);
-      h.vx += cx * 0.016 * dpr * dt;
-      h.vy += (cy * 0.012 - 0.004) * dpr * dt;
+      h.vx += cx * 0.009 * dpr * dt;
+      h.vy += (cy * 0.007 - 0.0025) * dpr * dt;
       // vapour is allowed to come to rest
-      const calm = Math.pow(0.968, dt);
+      const calm = Math.pow(0.982, dt);
       h.vx *= calm;
       h.vy *= calm;
       h.x += h.vx * dt;
       h.y += h.vy * dt;
       h.rot += h.spin * dt;
       const radius = h.r0 + h.life * h.grow;
-      const alpha = 0.085 * Math.min(1, aged * 6) * Math.pow(1 - aged, 1.3);
+      const alpha = 0.13 * Math.min(1, aged * 3.5) * Math.pow(1 - aged, 1.35);
       if (alpha <= 0.002) continue;
       ctx.save();
       ctx.globalAlpha = alpha;
@@ -261,8 +298,8 @@ export function createWordDust(host) {
             if (ctx.globalAlpha <= 0.004) continue;
             ctx.save();
             ctx.translate(
-              x + word.h * 0.16 + Math.sin(c.seed + q * 2.1 + t * 0.6) * spread,
-              baseY - word.h * 0.3 + Math.cos(c.seed * 1.4 + q + t * 0.5) * spread * 0.6,
+              x + word.h * 0.16 + Math.sin(c.seed + q * 2.1 + t * 0.22) * spread,
+              baseY - word.h * 0.3 + Math.cos(c.seed * 1.4 + q + t * 0.18) * spread * 0.6,
             );
             ctx.rotate(c.seed + q);
             ctx.drawImage(puff, -puffR, -puffR * 0.78, puffR * 2, puffR * 1.56);
@@ -365,9 +402,9 @@ export function createWordDust(host) {
         const dx = cx - h.x;
         const dy = cy - h.y;
         const d = Math.max(1, Math.hypot(dx, dy));
-        h.vx += (dx / d) * 0.9 * dpr;
-        h.vy += (dy / d) * 0.9 * dpr;
-        h.grow += 0.2;
+        h.vx += (dx / d) * 0.5 * dpr;
+        h.vy += (dy / d) * 0.5 * dpr;
+        h.grow += 0.14;
       }
       for (const word of words) {
         word.dissolveAt = at + Math.random() * 160;
@@ -382,13 +419,13 @@ export function createWordDust(host) {
           puffs.push({
             x: px,
             y: py,
-            vx: (dx / d) * (0.9 + Math.random() * 0.9) * dpr + (Math.random() - 0.5) * 0.3 * dpr,
-            vy: (dy / d) * (0.9 + Math.random() * 0.9) * dpr,
+            vx: (dx / d) * (0.5 + Math.random() * 0.5) * dpr + (Math.random() - 0.5) * 0.18 * dpr,
+            vy: (dy / d) * (0.5 + Math.random() * 0.5) * dpr,
             rot: Math.random() * Math.PI * 2,
-            spin: (Math.random() - 0.5) * 0.01,
+            spin: (Math.random() - 0.5) * 0.006,
             r0: puffR,
-            grow: (0.16 + Math.random() * 0.2) * dpr,
-            span: 120 + Math.random() * 90,
+            grow: (0.11 + Math.random() * 0.14) * dpr,
+            span: 260 + Math.random() * 220,
             life: 0,
           });
         }
@@ -398,7 +435,7 @@ export function createWordDust(host) {
         words = [];
         puffs = [];
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }, 1500);
+      }, 2600);
     },
   };
 }
