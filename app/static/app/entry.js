@@ -1940,6 +1940,9 @@ function scheduleWarm() {
     warmHandle = 0;
     const raw = text.value;
     if (!raw.trim() || !field) return;
+    // never compile shaders while the microphone is open — a link stall lands in the middle of
+    // someone speaking; try again once the mic has closed
+    if (listening || body.dataset.voiceOn === 'true') { scheduleWarm(); return; }
     if (field.frameEma && field.frameEma > 45) return;
     const chosen = currentChoice(raw);
     if (!chosen.form) return;
@@ -2736,6 +2739,7 @@ function stopListening() {
   const wasListening = listening;
   listening = false;
   body.dataset.voiceOn = 'false';
+  if (text.value.trim()) scheduleWarm();
   if (field) field.listening = false;
   speakButton.dataset.listening = 'false';
   holding = false;
