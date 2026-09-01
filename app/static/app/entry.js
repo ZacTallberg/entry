@@ -1362,15 +1362,21 @@ class ParticleField {
       prime.needsUpdate = true;
     }
     if (fromCenter) this.swapFlash = 0.5;
+    // Two full-resolution sim passes over every particle, then a dispose — and the dispose is
+    // the expensive part: freeing a texture the GPU is still reading forces the driver to finish
+    // everything queued, converting work that would have overlapped the next frames into a
+    // blocking wait. Measured: everything above this point costs 1.6ms, this tail cost 224ms.
+    // One prime pass is enough to seat the particles; the second only advanced them a frame,
+    // which the very next frame does anyway. The prime texture is released on the following
+    // frame instead, by which time the GPU is done with it.
     this.simMaterial.uniforms.tPositions.value = prime;
     this.simQuad.material = this.simMaterial;
     this.renderer.setRenderTarget(this.targetA);
     this.renderer.render(this.simScene, this.simCamera);
-    this.simMaterial.uniforms.tPositions.value = this.targetA.texture;
-    this.renderer.setRenderTarget(this.targetB);
-    this.renderer.render(this.simScene, this.simCamera);
     this.renderer.setRenderTarget(null);
-    prime.dispose();
+    this.simMaterial.uniforms.tPositions.value = this.targetA.texture;
+    const stale = prime;
+    requestAnimationFrame(() => { try { stale.dispose(); } catch (_e) {} });
     this.lastSwapMs = performance.now() - swapT0;
     this.formStartedAt = performance.now();
     this.animatedUntil = performance.now() + 4200;
