@@ -96,3 +96,11 @@ destination — proportional to distance, so it vanishes on arrival — with a d
 drawn per release (`uSwirl`, ±0.6–1.5). Every arrival curves in. The first coefficient (0.045,
 capped at 1.6 units) was too subtle at distance; 0.075 × distance gives about a fifty-degree turn.
 Photographed at +1.75s: the gather sweeps in as a rotating disc, the bloom weaves.
+
+**Amendment (2026-09-01, the arrival breathes):** the release envelope (`formPhase`, 1 → 0) ran
+1.4s, which is short for a piece this languid — the choreography and the swirl were over before the
+eye had them. It runs 2.2s now, and the exposure lift that rides it keeps the transit from going
+thin. The halo's annulus gained more radial depth (0.55–1.5 of its radius) and the curtain's band
+became six units deep, so neither arrives as a white wall: the halo is a wide star-field ring pouring
+inward, the curtain a wave of dust rolling in with wind-blown streaks. The bloom at mid-flight is now
+the loud gesture of the set — a luminous cloud with comet-heads around its rim — by design.

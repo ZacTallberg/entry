@@ -319,7 +319,7 @@ const ARRIVALS = [
   }],
   ['rain',    (x, y, z, h) => [x, y + 4.2 + h * 2.2, z]],
   ['rise',    (x, y, z, h) => [x, y - 4.2 - h * 2.2, z]],
-  ['curtain', (x, y, z, h, phi, sgn) => [x + sgn * (4.6 + 0.35 * y + h * 3.6), y, z]],
+  ['curtain', (x, y, z, h, phi, sgn) => [x + sgn * (4.2 + 0.35 * y + h * 6.0), y, z]],
   ['offaxis', (x, y, z, h, phi) => {
     const px = 2.4 * Math.cos(phi); const py = 1.4 * Math.sin(phi);
     return [px + (x - px) * 0.4, py + (y - py) * 0.4, z * 0.3];
@@ -329,7 +329,7 @@ const ARRIVALS = [
     return [x + Math.cos(a) * m, y + Math.sin(a) * m * 0.7, z + Math.sin(b) * m * 0.5];
   }],
   ['halo',    (x, y, z, h) => {
-    const a = Math.atan2(y, x); const d = 0.78 + h * 0.5;
+    const a = Math.atan2(y, x); const d = 0.55 + h * 0.95;
     return [3.3 * d * Math.cos(a), 2.15 * d * Math.sin(a), z * 0.3];
   }],
   ['horizon', (x, y, z, h) => [x * 1.05, (h - 0.5) * 0.25, z]],
@@ -1822,7 +1822,7 @@ class ParticleField {
     ru.uTime.value = time * (this.timeScale || 1);
     ru.uPointer.value.copy(this.pointer);
     ru.uRelease.value = releaseForce;
-    const formPhase = this.formStartedAt ? Math.max(0, 1 - (now - this.formStartedAt) / 1400) : 0;
+    const formPhase = this.formStartedAt ? Math.max(0, 1 - (now - this.formStartedAt) / 2200) : 0;
     su.uForm.value = formPhase;
     ru.uForm.value = formPhase;
     exposure += formPhase * 0.3;
