@@ -160,8 +160,20 @@ const buildSimFragment = (formDef) => `
     // the one dial the clocks cannot reach: bursts, respawn teleports and chase forces all
     // produce huge instantaneous velocities however slow time runs. A hard speed limit turns
     // every jump into a glide — nothing in the dark moves faster than a drift.
+    // A hard clamp made every particle above the limit move at exactly the same speed — with
+    // trails, identical rods all aimed at the centre. The ceiling now varies per particle and
+    // the approach to it is a soft knee, so faster still reads faster and nothing is uniform.
+    float capJ = uVmax * (0.72 + 0.56 * fract(sin(dot(vUv, vec2(127.1, 311.7))) * 43758.5453));
+    float knee = capJ * 0.55;
     float vmag = length(velocity);
-    if (vmag > uVmax) velocity *= uVmax / vmag;
+    // A velocity many times the limit is not motion, it is a form resetting a particle — the
+    // embers sending a spent spark back to the fire, the meteors reseeding a fallen one. Capped,
+    // those crawl through dark regions and pile up unseen. Six times the limit passes untouched.
+    if (vmag > knee && vmag < capJ * 6.0) {
+      float lim = capJ - knee;
+      float excess = vmag - knee;
+      velocity *= (knee + lim * excess / (lim + excess)) / vmag;
+    }
     pos += velocity * FORM_SPEED * uDt;
     if (length(pos) > 6.5) pos = mix(pos, origin, 0.5);
     gl_FragColor = vec4(pos, 1.0);
@@ -276,6 +288,66 @@ function orientOrigins(values, seedHash, originKind) {
     values[i] = x * ct - y * st;
     values[i + 1] = x * st + y * ct;
   }
+}
+
+// How the answer arrives. The prime is where every particle starts before it travels to its
+// place in the form; it used to be one geometry — a radial scale of the destination — in three
+// sizes, so every release was rays through the centre at three speeds. These are thirteen
+// journeys. Each maps a destination (x, y, z) to a starting point; h is a per-particle hash so
+// no two particles begin exactly alike, phi and sgn are per-release.
+const ARRIVALS = [
+  ['bloom',   (x, y, z, h) => [x * 0.45, y * 0.45, z * 0.45]],
+  ['gather',  (x, y, z, h) => [x * 1.85, y * 1.85, z * 1.85]],
+  ['settle',  (x, y, z, h) => [x * 1.02 + (h - 0.5) * 0.36, y * 1.02 + ((h * 7.1) % 1 - 0.5) * 0.36, z]],
+  ['spiral',  (x, y, z, h, phi, sgn) => {
+    const r = Math.hypot(x, y); const th = sgn * (1.3 * r + 0.8);
+    const c = Math.cos(th); const sn = Math.sin(th);
+    return [(x * c - y * sn) * 1.15, (x * sn + y * c) * 1.15, z];
+  }],
+  ['fold',    (x, y, z, h, phi) => {
+    const c = Math.cos(phi); const sn = Math.sin(phi);
+    const u = x * c + y * sn; const v = -x * sn + y * c;
+    return [(-u * c - v * sn) * 0.9, (-u * sn + v * c) * 0.9, -z];
+  }],
+  ['rain',    (x, y, z, h) => [x, y + 4.2 + h * 2.2, z]],
+  ['rise',    (x, y, z, h) => [x, y - 4.2 - h * 2.2, z]],
+  ['curtain', (x, y, z, h, phi, sgn) => [x + sgn * (4.6 + 0.35 * y + h * 3.6), y, z]],
+  ['offaxis', (x, y, z, h, phi) => {
+    const px = 2.4 * Math.cos(phi); const py = 1.4 * Math.sin(phi);
+    return [px + (x - px) * 0.4, py + (y - py) * 0.4, z * 0.3];
+  }],
+  ['fog',     (x, y, z, h) => {
+    const a = h * 6.2831853; const b = ((h * 13.7) % 1) * 6.2831853; const m = 0.6 + ((h * 5.3) % 1) * 1.4;
+    return [x + Math.cos(a) * m, y + Math.sin(a) * m * 0.7, z + Math.sin(b) * m * 0.5];
+  }],
+  ['halo',    (x, y, z, h) => {
+    const a = Math.atan2(y, x); const d = 0.78 + h * 0.5;
+    return [3.3 * d * Math.cos(a), 2.15 * d * Math.sin(a), z * 0.3];
+  }],
+  ['horizon', (x, y, z, h) => [x * 1.05, (h - 0.5) * 0.25, z]],
+  ['deep',    (x, y, z, h) => [x * 0.55, y * 0.55, z - 5.5]],
+];
+
+// weighted so the classic gestures still lead, but a third of releases arrive some other way
+const ARRIVAL_TABLE = [
+  [15, 0], [27, 1], [35, 2], [44, 3], [51, 4], [59, 5], [65, 6], [72, 7], [78, 8], [87, 9], [93, 10], [97, 11], [100, 12],
+];
+let forcedArrival = -1;
+function arrivalFor(hash) {
+  if (forcedArrival >= 0) return forcedArrival;
+  const roll = (hash >>> 11) % 100;
+  for (const [limit, idx] of ARRIVAL_TABLE) if (roll < limit) return idx;
+  return 0;
+}
+function primeInto(out, values, i, seedHash, arrival) {
+  const [, fn] = ARRIVALS[arrival] || ARRIVALS[0];
+  const phi = (((seedHash >>> 3) % 1000) / 1000) * Math.PI * 2;
+  const sgn = ((seedHash >>> 9) & 1) ? 1 : -1;
+  const h = (Math.imul((i >> 2) ^ (seedHash | 0), 2654435761) >>> 0) / 4294967296;
+  const r = fn(values[i], values[i + 1], values[i + 2], h, phi, sgn);
+  out[0] = r[0] + (h - 0.5) * 0.06;
+  out[1] = r[1] + (((h * 3.3) % 1) - 0.5) * 0.06;
+  out[2] = r[2];
 }
 
 // While it sleeps the dark dreams: every so often it becomes another of its quiet selves,
@@ -1133,8 +1205,8 @@ class ParticleField {
     return cached;
   }
 
-  prepare(formDef, utterance, seedHash, primeScale = 0.45) {
-    const key = `${formDef.slug}|${seedHash}|${utterance}|${primeScale}`;
+  prepare(formDef, utterance, seedHash, arrival = 0) {
+    const key = `${formDef.slug}|${seedHash}|${utterance}|${arrival}`;
     if (this.preparedKey === key) return this.preparedPromise;
     const size = this.textureSize;
     let rngState = (seedHash >>> 0) || 1;
@@ -1149,9 +1221,13 @@ class ParticleField {
     const half = THREE.DataUtils.toHalfFloat;
     const packed = new Uint16Array(values.length);
     const primePacked = new Uint16Array(values.length);
-    for (let i = 0; i < values.length; i += 1) {
-      packed[i] = half(values[i]);
-      primePacked[i] = i % 4 === 3 ? packed[i] : half(values[i] * primeScale + (Math.random() - 0.5) * 0.08);
+    const pt = [0, 0, 0];
+    for (let i = 0; i < values.length; i += 4) {
+      primeInto(pt, values, i, seedHash, arrival);
+      packed[i] = half(values[i]); packed[i + 1] = half(values[i + 1]);
+      packed[i + 2] = half(values[i + 2]); packed[i + 3] = half(values[i + 3]);
+      primePacked[i] = half(pt[0]); primePacked[i + 1] = half(pt[1]);
+      primePacked[i + 2] = half(pt[2]); primePacked[i + 3] = packed[i + 3];
     }
     const texture = new THREE.DataTexture(packed, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
     texture.needsUpdate = true;
@@ -1210,12 +1286,12 @@ class ParticleField {
     }
   }
 
-  setForm(formDef, utterance, { fromCenter, seedHash, primeScale }) {
+  setForm(formDef, utterance, { fromCenter, seedHash, arrival }) {
     const swapT0 = performance.now();
     const size = this.textureSize;
     // must build the key the same way prepare() does — with the gesture — or the prepared
     // textures never match and every swap regenerates its origins synchronously
-    const key = `${formDef.slug}|${seedHash}|${utterance}|${primeScale || 0.45}`;
+    const key = `${formDef.slug}|${seedHash}|${utterance}|${arrival || 0}`;
     let preparedPrime = null;
     if (this.preparedKey === key && this.prepared) {
       this.origin?.dispose();
@@ -1350,11 +1426,11 @@ class ParticleField {
       let primeValues = this.originValues;
       if (fromCenter) {
         this.primeBuffer ||= new Float32Array(this.originValues.length);
-        for (let i = 0; i < this.originValues.length; i += 1) {
-          // 0.45 erupts outward from a compressed core; above 1 the form gathers inward
-          // from beyond the frame; at 1 it settles in place
-          const scale = primeScale || 0.45;
-          this.primeBuffer[i] = i % 4 === 3 ? 1 : this.originValues[i] * scale + (Math.random() - 0.5) * 0.08;
+        const pt = [0, 0, 0];
+        for (let i = 0; i < this.originValues.length; i += 4) {
+          primeInto(pt, this.originValues, i, seedHash || 0, arrival || 0);
+          this.primeBuffer[i] = pt[0]; this.primeBuffer[i + 1] = pt[1];
+          this.primeBuffer[i + 2] = pt[2]; this.primeBuffer[i + 3] = 1;
         }
         primeValues = this.primeBuffer;
       }
@@ -1978,8 +2054,7 @@ function scheduleWarm() {
     if (!chosen.form) return;
     // the gesture is deterministic from the hash, so the warm can prepare the exact prime
     // the release will ask for instead of one it will throw away
-    const warmRoll = (chosen.hash >>> 11) % 100;
-    field.prepare(chosen.form, raw, chosen.hash, warmRoll < 55 ? 0.45 : (warmRoll < 84 ? 1.85 : 1.02));
+    field.prepare(chosen.form, raw, chosen.hash, arrivalFor(chosen.hash));
   }, 550);
 }
 
@@ -2079,9 +2154,8 @@ function beginRelease() {
   if (reportMode) diag('report-release', { text: raw.slice(0, 300) });
   // the dark answers with a different gesture depending on what was said: it erupts from a
   // compressed core, gathers inward from beyond the frame, or settles in place
-  const gestureRoll = (chosen.hash >>> 11) % 100;
-  const primeScale = gestureRoll < 55 ? 0.45 : (gestureRoll < 84 ? 1.85 : 1.02);
-  const ready = field ? field.prepare(chosen.form, raw, chosen.hash, primeScale) : Promise.resolve();
+  const arrival = arrivalFor(chosen.hash);
+  const ready = field ? field.prepare(chosen.form, raw, chosen.hash, arrival) : Promise.resolve();
   field?.release(length, energy);
 
   const inhaleMs = field ? field.envelope.inhale * 1000 : 480;
@@ -2092,10 +2166,11 @@ function beginRelease() {
     Promise.resolve(ready).then(() => {
       if (body.dataset.state !== 'releasing') return;
       body.dataset.form = chosen.form.slug;
-      field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash, primeScale });
+      field?.setForm(chosen.form, raw, { fromCenter: true, seedHash: chosen.hash, arrival });
       setState('releasing', revealLine);
       diag('release', {
         slug: chosen.form.slug,
+        arrival: (ARRIVALS[arrival] || ARRIVALS[0])[0],
         fx: field ? Object.keys(field.effects || {}).filter((k) => field.effects[k]).join(',') : '',
         swapMs: field ? Math.round(field.lastSwapMs || 0) : -1,
       });
@@ -3347,7 +3422,7 @@ window.entryExperience = Object.freeze({
   preview: (raw) => {
     const cleaned = String(raw ?? '');
     const { form, hash } = chooseForm(cleaned, cadence);
-    return { slug: form.slug, family: form.family, wildcard: hash % 23 === 0 };
+    return { slug: form.slug, family: form.family, wildcard: hash % 23 === 0, arrival: (ARRIVALS[arrivalFor(hash)] || ARRIVALS[0])[0] };
   },
   lastForm: () => lastForm,
   currentForm: () => (field && field.formDef && field.formDef.slug) || null,
@@ -3355,4 +3430,6 @@ window.entryExperience = Object.freeze({
   lastEffects: () => field?.effects || null,
   perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0) } : null,
   force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
+  arrival: (name) => { const i = ARRIVALS.findIndex((r) => r[0] === name); forcedArrival = i; return i >= 0 ? name : null; },
+  arrivals: () => ARRIVALS.map((r) => r[0]),
 });

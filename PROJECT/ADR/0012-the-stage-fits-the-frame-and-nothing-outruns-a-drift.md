@@ -57,3 +57,33 @@ pixels, worse than before.
 - A general lesson worth keeping: a tiny render target does not make a draw cheap — cost scales
   with geometry, not viewport. And a form's speed has two dials, clock and cap; the clock alone
   cannot make a teleport languid.
+
+**Amendment (2026-09-01, arrivals):** the operator noticed that many releases had become "rods
+pointed at a central location." Mechanism: the prime — where every particle starts before it
+travels to its place — was a pure radial scale of the destination in three sizes, so every particle
+travelled a straight ray through the centre; the hard velocity cap then made all of them move at
+the identical speed, and with trails every ray became a same-length rod. Distance-proportional
+speeds had hidden the geometry before the cap.
+
+Three changes. **Thirteen arrivals** replace the three radial ones: bloom, gather, settle, spiral
+(rotate by an angle proportional to radius, so the form unwinds), fold (reflect across a random
+axis, so it passes through itself), rain and rise (fall or lift into place), curtain (sweep in from
+a side), off-axis (burst from a point away from centre), fog (condense from a per-particle scatter),
+halo (unroll from an ellipse the shape of the stage), horizon (rise out of a line) and deep
+(approach from far away). Weighted so the classics lead; a third of releases arrive some other way.
+The hash is drawn at random per release, so the arrival is random too, and `entryExperience.
+arrival(name)` pins one for verification. **The cap gets a soft knee and a per-particle ceiling**
+(0.72–1.28× the limit), so faster still reads faster and nothing is uniform. **A velocity six times
+the limit passes untouched** — it is not motion but a form resetting a particle (the embers sending a
+spent spark back to the fire, the meteors reseeding a fallen one); capped, those crawled through dark
+regions and piled up unseen. Embers measured 1.0% of frame lit under the hard cap and 4.3% after.
+
+Photographed with the same form forced through each arrival: the spiral unwinds a galaxy, the rain
+lowers it like a cloud, the fog condenses it, the fold filigrees it, the deep grows it toward the
+viewer, the horizon raises a full nebula. The halo and curtain first arrived as thin bands that
+burned white; both gained depth (the halo an elliptical annulus with radial thickness, the curtain
+a band four units deep).
+
+Also found by a full 128-form sweep under the new cap, stage-fit and grade: 128 render, zero errors,
+no blowouts, nothing grey; median lit 9.8%. Two "dim" forms are glyph forms measured without any
+words, which is the instrument, not the form.
