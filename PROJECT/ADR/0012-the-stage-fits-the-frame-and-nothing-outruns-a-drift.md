@@ -87,3 +87,12 @@ a band four units deep).
 Also found by a full 128-form sweep under the new cap, stage-fit and grade: 128 render, zero errors,
 no blowouts, nothing grey; median lit 9.8%. Two "dim" forms are glyph forms measured without any
 words, which is the instrument, not the form.
+
+**Amendment (2026-09-01, the approach turns):** photographing the arrivals a second later showed
+the rods were not only the prime: by mid-flight the far particles were homing in straight lines
+whichever choreography started them, because homing alone is a straight line. While the release
+envelope is up, the homing force now carries a tangential component around each particle's own
+destination — proportional to distance, so it vanishes on arrival — with a direction and strength
+drawn per release (`uSwirl`, ±0.6–1.5). Every arrival curves in. The first coefficient (0.045,
+capped at 1.6 units) was too subtle at distance; 0.075 × distance gives about a fifty-degree turn.
+Photographed at +1.75s: the gather sweeps in as a rotating disc, the bloom weaves.

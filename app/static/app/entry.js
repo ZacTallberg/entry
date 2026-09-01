@@ -53,6 +53,7 @@ const GLSL_PRELUDE = `
   uniform float uGather;
   uniform vec2 uGatherPoint;
   uniform float uVmax;
+  uniform float uSwirl;
   uniform vec2 uViewHalf;
   uniform vec2 uPulseCenter;
   uniform vec2 uStir;
@@ -157,6 +158,13 @@ const buildSimFragment = (formDef) => `
     float centerDistance = max(length(pos), 0.12);
     velocity += normalize(pos) * uRelease * (0.036 * FORM_RELEASE / centerDistance);
     velocity += (origin - pos) * (FORM_HOME + uForm * 0.055);
+    // Homing alone is a straight line, and a hundred thousand straight lines aimed at their
+    // destinations read as rods. While the release envelope is up, the approach also turns:
+    // a tangential push around the particle's own destination, fading as it arrives, so every
+    // arrival curves in — a slow swirl with a direction of its own each time.
+    vec2 toHome = origin.xy - pos.xy;
+    float homeDist = length(toHome) + 0.05;
+    velocity.xy += vec2(-toHome.y, toHome.x) / homeDist * (uForm * uSwirl * homeDist * 0.075);
     // the one dial the clocks cannot reach: bursts, respawn teleports and chase forces all
     // produce huge instantaneous velocities however slow time runs. A hard speed limit turns
     // every jump into a glide — nothing in the dark moves faster than a drift.
@@ -1128,6 +1136,7 @@ class ParticleField {
         FORM_SPEED: { value: tuning.FORM_SPEED },
         uGatherPoint: { value: new THREE.Vector2(0, 0) },
         uVmax: { value: 0.045 },
+        uSwirl: { value: 1.0 },
         uViewHalf: { value: new THREE.Vector2(4.4, 2.44) },
         uPulse: { value: 0 },
         uPulseType: { value: 0 },
@@ -1323,6 +1332,8 @@ class ParticleField {
     this.simMaterial.uniforms.tOrigin.value = this.origin;
     this.renderMaterial.uniforms.tOrigin.value = this.origin;
     this.simMaterial.uniforms.uSeed.value = ((seedHash >>> 0) % 997) * 0.37;
+    // which way, and how much, this answer turns as it arrives
+    this.simMaterial.uniforms.uSwirl.value = (((seedHash >>> 21) & 1) ? 1 : -1) * (0.6 + (((seedHash >>> 22) % 100) / 100) * 0.9);
     this.renderMaterial.uniforms.uSeed.value = this.simMaterial.uniforms.uSeed.value;
     this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * (js.size || 1);
     const v1 = ((seedHash >>> 8) % 1000) / 1000;
