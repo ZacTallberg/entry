@@ -185,3 +185,12 @@ Two other things banked from this pass. The striped uploader's patch sliced out
 took the synchronous path — caught because the phase instrument reports `prepared: false`, not by
 any error. And a `ru`-before-declaration reference in an earlier pass threw every frame; the
 page-error hook, not the pictures, caught it.
+
+**Correction (2026-09-02, same day):** the claim above that the bake "no longer produces a frame of
+that length" rested on one run (worst frame 85 ms) and does not hold up: on prod, across four
+releases, the swap is 0–2 ms every time but the bake's wall time inside the warm is still
+229–280 ms, and worst-frame figures swing 118–849 ms between identical runs with this machine's
+load. What the scatter path removed is the lazy-commit *mechanism* — the swap is now genuinely a
+pointer exchange — not the bake's cost, which now sits in the scatter draws and the sim step. A
+suspiciously small measurement (a `bakeMs` of 3 in one run) was a stale reading from a prebake
+that had early-returned; it is not evidence.
