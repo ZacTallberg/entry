@@ -64,3 +64,23 @@ And the dark dreams. Deep asleep, every forty-two seconds or so it becomes anoth
 selves — no flash, no announcement, chosen from the calm forms — so a tab left open is somewhere
 else when the visitor returns. A dream must not wake the dreamer: `setForm` marks the field
 animated, which reads as touch, so the dream clears that mark immediately after.
+
+**Amendment (2026-09-02, the wait begins when the words do):** operator observation — the wait
+before the dark answers was starting only once transcription had finished, so a speaker served two
+waits back to back. Measured: 9.7 s between the last word appearing and the release, of which 6.1 s
+was the microphone confirming silence and 3.6 s a countdown that only then began.
+
+The countdown is now anchored to the moment the spoken words last changed, and runs *through* the
+microphone's silence window instead of after it. Three things were needed to make that true, each
+found by instrument rather than by reading: the streaming path writes the composer directly and
+never went through `feedVoice`, so the anchor was never set on the live path; `feedVoice` calls
+`onInput` synchronously, and the guard clearing the anchor on typing fired on those synthetic events
+too; and a final decode or a server refinement landing after the microphone closed would push the
+anchor forward and restart the wait, so only speech moves it now, with the moment of the microphone
+closing standing in when the words have not arrived yet. The silence window came down from 4.2 s to
+3.4 s and the text-idle clock from 6.5 s to 5 s, which the overlap now affords.
+
+Measured after: 2.1–2.9 s from the microphone closing to the release (was 3.3–3.6), and roughly
+5.5–7 s from the last spoken word (was 8.6–9.7). A typed release is unchanged at 3.1 s, because a
+hand at the keyboard clears the anchor and serves the full wait. `entryExperience.releaseInfo()`
+reports the anchor, the delay and the time remaining.

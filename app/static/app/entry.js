@@ -2310,6 +2310,13 @@ let field = null;
 let composing = false;
 let locked = false;
 let lastInputAt = 0;
+// The moment the spoken words last changed. The wait before the dark answers is counted from
+// HERE, not from whenever the microphone finally closes: a speaker who stops talking has
+// already begun waiting, and the mic's own silence timer runs through the same seconds. The
+// two used to stack — measured at 9.7s between the last word and the release, of which 6.1s
+// was the mic timing out and 3.6s a countdown that only then started.
+let spokenTextAt = 0;
+let voiceWriting = false;
 let cadence = 420;
 let deletions = 0;
 let releaseDeadline = 0;
@@ -2416,8 +2423,13 @@ function scheduleRelease() {
   if (listening || pendingChunks > 0) return;
   const readingTime = Math.min(3400, length * 16);
   const rhythm = clamp(cadence * 1.8, 500, 1700);
-  releaseDelay = clamp(1900 + readingTime + rhythm, 2600, 6600);
-  releaseDeadline = performance.now() + releaseDelay;
+  const full = clamp(1900 + readingTime + rhythm, 2600, 6600);
+  const now = performance.now();
+  // spoken words: the clock started when they stopped changing, so only the remainder is left,
+  // with a beat at the end so the last words are never snatched away as they land
+  const from = spokenTextAt || now;
+  releaseDelay = Math.max(1100, (from + full) - now);
+  releaseDeadline = now + releaseDelay;
   releaseTimer = window.setTimeout(beginRelease, releaseDelay);
   holdingTimer = window.setTimeout(() => {
     if (!locked && text.value.trim()) setState('holding', '');
@@ -2440,6 +2452,7 @@ function onInput(event) {
   if (locked) return;
   if (body.dataset.dictating === 'true' && event && event.isTrusted) paintMirror(text.value);
   const now = performance.now();
+  if (!voiceWriting) spokenTextAt = 0;
   if (lastInputAt) cadence = cadence * 0.72 + clamp(now - lastInputAt, 45, 1100) * 0.28;
   // The face carries the hand: written quickly the letters gather weight and narrow,
   // written slowly they open out and thin. The variable font was loaded and never varied.
@@ -2975,7 +2988,9 @@ function maybeRefine(id, refined, src, ms) {
   voiceBase = text.value.endsWith(' ') ? text.value : text.value + ' ';
   st.finalText = refined;
   st.snapshot = text.value;
-  onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' }));
+  voiceWriting = true;
+  try { onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' })); }
+  finally { voiceWriting = false; }
 }
 
 async function refineViaServer(id, samples, isPrimary) {
@@ -3090,7 +3105,9 @@ function onVoiceFrame(frame) {
     // to have happened at all, so once a word was spoken the microphone could never time out.
     if (rms <= voiceBar) idleSilence += frame.length;
     else idleSilence = 0;
-    const quietLimit = voicedLen ? rate * 4.2 : rate * 9;
+    // the release countdown now runs THROUGH this silence rather than after it, so the mic
+    // can afford to confirm a little sooner without the two waits stacking
+    const quietLimit = voicedLen ? rate * 3.4 : rate * 9;
     if (idleSilence > quietLimit) { stopListening(); return; }
     // Second clock: the transcript itself. If words were spoken but the engine has
     // written nothing new for a while, the utterance is over no matter what the
@@ -3098,7 +3115,7 @@ function onVoiceFrame(frame) {
     // noisy room.
     const lastProgress = Math.max(streamTextAt, speechAt);
     if (voicedLen && streamSession && lastProgress
-        && performance.now() - lastProgress > 6500) {
+        && performance.now() - lastProgress > 5000) {
       diag('finish-text-idle');
       stopListening();
       return;
@@ -3187,6 +3204,10 @@ async function startCapture() {
 
 function stopListening() {
   const wasListening = listening;
+  // if the words have not arrived yet — the decode is still running — the moment the
+  // microphone gave up is the best estimate of when the speaker stopped, and the wait
+  // is counted from there rather than from whenever the text finally appears
+  if (wasListening && !spokenTextAt) spokenTextAt = performance.now();
   listening = false;
   body.dataset.voiceOn = 'false';
   if (text.value.trim()) scheduleWarm();
@@ -3234,9 +3255,15 @@ function stopListening() {
 function feedVoice(transcript, isFinal) {
   const joined = (voiceBase + transcript).slice(0, 360);
   if (text.value === joined) return;
+  // only speech moves the anchor. A final decode or a server refinement landing after the
+  // microphone closed is the words SETTLING, not the person still talking — it must not
+  // restart the wait they have already been serving.
+  if (listening) spokenTextAt = performance.now();
   text.value = joined;
   const tail = transcript.trim().slice(-1) || ' ';
-  onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: tail }));
+  voiceWriting = true;
+  try { onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: tail })); }
+  finally { voiceWriting = false; }
   if (isFinal) voiceBase = joined.endsWith(' ') ? joined : joined + ' ';
 }
 
@@ -3446,6 +3473,7 @@ async function loadStreamingOnce() {
 
 function enterDictation() {
   handChosen = false;
+  spokenTextAt = 0;
   body.dataset.voiceOn = 'true';
   if (field) field.listening = true;
   streamBase = text.value ? (text.value.endsWith(' ') ? text.value : text.value + ' ') : '';
@@ -3481,8 +3509,11 @@ function openStreamSession() {
       if (text.value !== joined) {
         text.value = joined;
         streamTextAt = performance.now();
+        spokenTextAt = streamTextAt;
         paintMirror(joined);
-        onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' }));
+        voiceWriting = true;
+        try { onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' })); }
+        finally { voiceWriting = false; }
       }
       if (committed) voiceBase = (streamBase + committed).endsWith(' ') ? streamBase + committed : streamBase + committed + ' ';
       field?.setVoiceLevel(0.1);
@@ -3772,6 +3803,7 @@ window.entryExperience = Object.freeze({
   lastForm: () => lastForm,
   currentForm: () => (field && field.formDef && field.formDef.slug) || null,
   lastPrime: () => (field && field.lastPrime) || null,
+  releaseInfo: () => ({ spokenAgo: spokenTextAt ? Math.round(performance.now() - spokenTextAt) : null, delay: Math.round(releaseDelay || 0), toGo: releaseDeadline ? Math.round(releaseDeadline - performance.now()) : null, pending: pendingChunks, listening, cadence: Math.round(cadence) }),
   holdInfo: () => field ? {
     holdUntil: field.holdUntil || 0, now: performance.now(), sinceSwap: field.formStartedAt ? Math.round(performance.now() - field.formStartedAt) : null,
     uHold: field.simMaterial && field.simMaterial.uniforms.uHold ? field.simMaterial.uniforms.uHold.value : 'absent',
