@@ -1085,6 +1085,47 @@ class ParticleField {
     // first — measured at 150-290ms on the first priming pass, the second pass costing nothing
     this.spareA = new THREE.WebGLRenderTarget(size, size, options);
     this.spareB = new THREE.WebGLRenderTarget(size, size, options);
+    // Positions never travel to the GPU as a texture upload. Every route through texImage2D —
+    // half or float, new object or pooled, whole or in strips — paid 230-290ms on the first draw
+    // that sampled it (the driver commits uploaded data per commit event, not per byte). So the
+    // arrays go up as a VERTEX BUFFER, a plain memcpy, and one draw scatters each particle's
+    // value into its own texel of a render target. Three origin targets (live, next, spare) and
+    // two word targets (one may still be held while the next is prepared).
+    this.originRT = [
+      new THREE.WebGLRenderTarget(size, size, options),
+      new THREE.WebGLRenderTarget(size, size, options),
+      new THREE.WebGLRenderTarget(size, size, options),
+    ];
+    this.wordRT = [new THREE.WebGLRenderTarget(size, size, options), new THREE.WebGLRenderTarget(size, size, options)];
+    this.poolLive = 0;
+    this.poolNext = 1;
+    this.wordIdx = 0;
+    const scatterPos = new Float32Array(size * size * 3);
+    for (let k = 0; k < size * size; k += 1) {
+      scatterPos[k * 3] = ((k % size) + 0.5) / size;
+      scatterPos[k * 3 + 1] = (Math.floor(k / size) + 0.5) / size;
+      scatterPos[k * 3 + 2] = 0;
+    }
+    this.scatterData = new THREE.BufferAttribute(new Float32Array(size * size * 4), 4);
+    this.scatterData.setUsage(THREE.DynamicDrawUsage);
+    this.scatterGeometry = new THREE.BufferGeometry();
+    this.scatterGeometry.setAttribute('position', new THREE.BufferAttribute(scatterPos, 3));
+    this.scatterGeometry.setAttribute('aData', this.scatterData);
+    this.scatterMaterial = new THREE.ShaderMaterial({
+      vertexShader: 'attribute vec4 aData; varying vec4 vData; void main() { vData = aData; gl_Position = vec4(position.xy * 2.0 - 1.0, 0.0, 1.0); gl_PointSize = 1.0; }',
+      fragmentShader: 'varying vec4 vData; void main() { gl_FragColor = vData; }',
+      depthTest: false, depthWrite: false, blending: THREE.NoBlending,
+    });
+    this.scatterPoints = new THREE.Points(this.scatterGeometry, this.scatterMaterial);
+    this.scatterPoints.frustumCulled = false;
+    this.scatterScene = new THREE.Scene();
+    this.scatterScene.add(this.scatterPoints);
+    // allocate every pooled target now, behind the arrival, rather than on first use
+    for (const rt of [...this.originRT, ...this.wordRT, this.spareA, this.spareB]) {
+      this.renderer.setRenderTarget(rt);
+      this.renderer.clear(true, false, false);
+    }
+    this.renderer.setRenderTarget(null);
     this.warmTarget = new THREE.WebGLRenderTarget(4, 4, options);
     this.originValues = new Float32Array(size * size * 4);
     this.origin = null;
@@ -1237,17 +1278,27 @@ class ParticleField {
     this.lineGeometry.setDrawRange(0, Math.floor(li / 3));
   }
 
+  scatterInto(rt, array) {
+    this.scatterData.array = array;
+    this.scatterData.needsUpdate = true;
+    this.renderer.setRenderTarget(rt);
+    this.renderer.render(this.scatterScene, this.simCamera);
+    this.renderer.setRenderTarget(null);
+  }
+
+  // The bake, during the warm: origins and words scattered into their targets, the prime into
+  // spareA, and one sim step into spareB — so the swap only exchanges references.
   prebake(record) {
     if (this.disposed || !record || this.prepared !== record || record.baked) return;
     const t0 = performance.now();
+    this.scatterInto(this.originRT[record.slot], record.values);
+    if (record.wordIdx >= 0) this.scatterInto(this.wordRT[record.wordIdx], record.wordSrc);
+    this.scatterInto(this.spareA, record.primeVals);
     const { simMaterial } = this.materialsFor(record.formDef);
     const held = { quad: this.simQuad.material, origin: simMaterial.uniforms.tOrigin.value, pos: simMaterial.uniforms.tPositions.value };
     simMaterial.uniforms.tOrigin.value = record.texture;
-    simMaterial.uniforms.tPositions.value = record.primeTexture;
-    this.simQuad.material = simMaterial;
-    this.renderer.setRenderTarget(this.spareA);
-    this.renderer.render(this.simScene, this.simCamera);
     simMaterial.uniforms.tPositions.value = this.spareA.texture;
+    this.simQuad.material = simMaterial;
     this.renderer.setRenderTarget(this.spareB);
     this.renderer.render(this.simScene, this.simCamera);
     this.renderer.setRenderTarget(null);
@@ -1369,9 +1420,9 @@ class ParticleField {
     const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
     generator(values, rng, utterance);
     orientOrigins(values, seedHash, formDef.origin);
-    const half = THREE.DataUtils.toHalfFloat;
-    const packed = new Uint16Array(values.length);
-    const primePacked = new Uint16Array(values.length);
+    // Float32, not half: the half-float pack cost a full pass over 800k values on the main
+    // thread, and the driver's first sample of a half-float texture was the expensive path.
+    const primeVals = new Float32Array(values.length);
     const pt = [0, 0, 0];
     const spoken = (utterance || '').trim();
     const wordSrc = (arrival === WORDS_ARRIVAL && spoken.length >= 3) ? wordPrime(values.length, spoken, seedHash) : null;
@@ -1379,30 +1430,18 @@ class ParticleField {
     for (let i = 0; i < values.length; i += 4) {
       if (wordSrc) { pt[0] = wordSrc[i] + (Math.random() - 0.5) * 0.05; pt[1] = wordSrc[i + 1] + (Math.random() - 0.5) * 0.05; pt[2] = wordSrc[i + 2]; }
       else primeInto(pt, values, i, seedHash, primeArrival);
-      packed[i] = half(values[i]); packed[i + 1] = half(values[i + 1]);
-      packed[i + 2] = half(values[i + 2]); packed[i + 3] = half(values[i + 3]);
-      primePacked[i] = half(pt[0]); primePacked[i + 1] = half(pt[1]);
-      primePacked[i + 2] = half(pt[2]); primePacked[i + 3] = packed[i + 3];
+      primeVals[i] = pt[0]; primeVals[i + 1] = pt[1]; primeVals[i + 2] = pt[2]; primeVals[i + 3] = values[i + 3];
     }
-    const texture = new THREE.DataTexture(packed, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
-    texture.needsUpdate = true;
-    const primeTexture = new THREE.DataTexture(primePacked, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
-    primeTexture.needsUpdate = true;
-    let wordTexture = null;
-    if (wordSrc) {
-      wordTexture = new THREE.DataTexture(wordSrc, size, size, THREE.RGBAFormat, THREE.FloatType);
-      wordTexture.needsUpdate = true;
-    }
-    this.renderer.initTexture(texture);
-    this.renderer.initTexture(primeTexture);
-    if (wordTexture) this.renderer.initTexture(wordTexture);
-    this.renderer.initTexture(primeTexture);
-    if (this.prepared) {
-      if (this.prepared.texture !== this.origin) this.prepared.texture.dispose();
-      this.prepared.primeTexture?.dispose();
-    }
+    const slot = this.poolNext;
+    let wordIdx = -1;
+    if (wordSrc) { wordIdx = this.wordIdx; this.wordIdx ^= 1; }
+    this.prepared = {
+      formDef, values, primeVals, wordSrc, slot, wordIdx,
+      texture: this.originRT[slot].texture,
+      wordTexture: wordIdx >= 0 ? this.wordRT[wordIdx].texture : null,
+      baked: false,
+    };
     this.preparedKey = key;
-    this.prepared = { formDef, values, texture, primeTexture, wordTexture };
     const warmT0 = performance.now();
     const preparedRecord = this.prepared;
     this.preparedPromise = this.warmForm(formDef)
@@ -1442,11 +1481,18 @@ class ParticleField {
           const geometry = this.particles.geometry;
           const hadRange = { start: geometry.drawRange.start, count: geometry.drawRange.count };
           geometry.setDrawRange(0, 4);
-          this.renderer.setRenderTarget(this.warmTarget);
+          // the sim pass warms into a FULL-SIZE spare: the first draw of a program into a target
+          // of a given size is what costs, and a 4x4 target did not pre-pay the 448x448 one
+          const w0 = performance.now();
+          this.renderer.setRenderTarget(this.spareA);
           this.renderer.render(this.simScene, this.simCamera);
+          const w1 = performance.now();
+          this.renderer.setRenderTarget(this.warmTarget);
           this.renderer.render(this.scene, this.camera);
+          const w2 = performance.now();
           this.renderer.setRenderTarget(null);
           geometry.setDrawRange(hadRange.start, hadRange.count);
+          this.lastWarmDraw = { sim: Math.round(w1 - w0), points: Math.round(w2 - w1) };
         }
       } else {
         // no compileAsync: one real draw is the only way to force the link, and the sim pass
@@ -1473,12 +1519,15 @@ class ParticleField {
     let wordHold = null;
     let preparedBaked = false;
     if (this.preparedKey === key && this.prepared) {
-      this.origin?.dispose();
+      // a fast typist can outrun the warm: bake now, the same way, before the exchange
+      if (!this.prepared.baked) this.prebake(this.prepared);
       this.origin = this.prepared.texture;
+      this.poolLive = this.prepared.slot;
+      this.poolNext = (this.prepared.slot + 1) % 3;
       this.originValues = this.prepared.values;
-      preparedPrime = this.prepared.primeTexture;
+      preparedPrime = this.prepared.texture;
       wordHold = this.prepared.wordTexture || null;
-      preparedBaked = !!this.prepared.baked;
+      preparedBaked = true;
       this.prepared = null;
       this.preparedKey = null;
     } else {
@@ -1490,9 +1539,11 @@ class ParticleField {
       const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
       generator(this.originValues, rng, utterance);
       orientOrigins(this.originValues, seedHash, formDef.origin);
-      this.origin?.dispose();
-      this.origin = new THREE.DataTexture(this.originValues, size, size, THREE.RGBAFormat, THREE.FloatType);
-      this.origin.needsUpdate = true;
+      const slot = this.poolNext;
+      this.scatterInto(this.originRT[slot], this.originValues);
+      this.origin = this.originRT[slot].texture;
+      this.poolLive = slot;
+      this.poolNext = (slot + 1) % 3;
     }
 
     const tOrigins = performance.now();
@@ -1634,12 +1685,15 @@ class ParticleField {
         }
         primeValues = this.primeBuffer;
         if (wordSrc) {
-          wordHold = new THREE.DataTexture(wordSrc, size, size, THREE.RGBAFormat, THREE.FloatType);
-          wordHold.needsUpdate = true;
+          const wi = this.wordIdx;
+          this.wordIdx ^= 1;
+          this.scatterInto(this.wordRT[wi], wordSrc);
+          wordHold = this.wordRT[wi].texture;
         }
       }
-      prime = new THREE.DataTexture(primeValues, size, size, THREE.RGBAFormat, THREE.FloatType);
-      prime.needsUpdate = true;
+      // the raw prime goes straight into the spare that becomes targetA at the exchange
+      this.scatterInto(this.spareA, primeValues);
+      prime = this.spareA.texture;
     }
     this.lastPrime = { arrival: (ARRIVALS[arrival] || ARRIVALS[0])[0], prepared: !!preparedPrime, fromCenter: !!fromCenter, words: (utterance || '').trim().length };
     if (fromCenter) this.swapFlash = 0.5;
@@ -1648,7 +1702,6 @@ class ParticleField {
     this.holdUntil = 0;
     // the sentence holds: for a breath the particles home to the letters, then the origin
     // becomes the answer and the words dissolve into it
-    this.wordHold?.dispose();
     this.wordHold = null;
     if (wordHold && fromCenter) {
       this.wordHold = wordHold;
@@ -1679,7 +1732,6 @@ class ParticleField {
           this.renderMaterial.uniforms.tOrigin.value = this.origin;
         }
         this.wordHold = null;
-        held.dispose();
       }, 1400);
     }
     // Two full-resolution sim passes over every particle, then a dispose — and the dispose is
@@ -1694,11 +1746,6 @@ class ParticleField {
     const freshA = this.spareA;
     const freshB = this.spareB;
     const tM0 = performance.now();
-    if (!preparedBaked) {
-      this.simMaterial.uniforms.tPositions.value = prime;
-      this.renderer.setRenderTarget(freshA);
-      this.renderer.render(this.simScene, this.simCamera);
-    }
     const tPass1 = performance.now();
     this.lastPass1Detail = { baked: preparedBaked, render: Math.round(tPass1 - tM0) };
     // The second pass is not optional. The render draws each particle's motion from its previous
@@ -1717,8 +1764,6 @@ class ParticleField {
     this.targetA = freshA;
     this.targetB = freshB;
     this.simMaterial.uniforms.tPositions.value = this.targetA.texture;
-    const stale = prime;
-    requestAnimationFrame(() => { try { stale.dispose(); } catch (_e) {} });
     this.lastSwapMs = performance.now() - swapT0;
     this.lastSwapPhases = {
       origins: Math.round(tOrigins - swapT0),
@@ -2196,7 +2241,9 @@ class ParticleField {
       renderMaterial.dispose();
     }
     this.materialCache.clear();
-    this.origin?.dispose();
+    for (const rt of [...(this.originRT || []), ...(this.wordRT || [])]) rt.dispose();
+    this.scatterGeometry?.dispose();
+    this.scatterMaterial?.dispose();
     this.noiseTexture?.dispose();
     this.targetA?.dispose();
     this.targetB?.dispose();
@@ -3733,7 +3780,7 @@ window.entryExperience = Object.freeze({
   } : null,
   lastRelease: () => lastRelease,
   lastEffects: () => field?.effects || null,
-  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0), bakeMs: Math.round(field.lastBakeMs || 0), swap: field.lastSwapPhases || null } : null,
+  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0), bakeMs: Math.round(field.lastBakeMs || 0), warmDraw: field.lastWarmDraw || null, swap: field.lastSwapPhases || null } : null,
   force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
   arrival: (name) => { const i = ARRIVALS.findIndex((r) => r[0] === name); forcedArrival = i; return i >= 0 ? name : null; },
   arrivals: () => ARRIVALS.map((r) => r[0]),

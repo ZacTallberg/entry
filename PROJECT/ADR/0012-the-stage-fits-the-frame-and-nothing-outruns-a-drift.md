@@ -162,3 +162,26 @@ And a new state for the sleeping field: a constellation surfaces through the dro
 soft round stars over the visible stage, joined by faint lines along a nearest-neighbour walk that
 breaks into two or three figures like real ones, drawn anew with every dream, gone at a touch. It
 renders through the ordinary path so it takes the same bloom and grade as everything else.
+
+**Amendment (2026-09-02, positions never travel as a texture):** the bake's remaining 150–300 ms
+was run to ground by elimination, each step measured on a cold first release. Not the driver's
+first-draw shader variant (a minimal draw with each program changed nothing). Not writing the
+in-flight target (fresh spares changed nothing). Not the texture format (float32 cost the same as
+half). Not the texture object (a pooled, previously used texture cost the same). Not the bytes
+(sixteen row-strips cost 50–130 ms *each* — worse). The one constant: a 4×4 draw that merely
+sampled freshly uploaded data cost 230–290 ms, and the bake after it cost 1 ms. The driver commits
+uploaded texture data on the first sample, per commit event, whatever the size.
+
+So positions never go up as a texture. The arrays are uploaded as a vertex buffer — a plain memcpy —
+and one draw scatters each particle's value into its own texel of a render target; the three origin
+targets and two word targets are render targets now, allocated once at boot, and the prime is
+scattered straight into the spare that becomes the live position target at the exchange. Measured
+in one session: swapMs 1 and 0 across two releases, a second release's worst frame 85 ms (had been
+218–322), the sentence and the arrivals photographed correct. The bake's own wall time is still
+~170 ms inside the warm, but it no longer produces a frame of that length.
+
+Two other things banked from this pass. The striped uploader's patch sliced out
+`this.preparedKey = key`, so for one build no prepared record ever matched and every swap silently
+took the synchronous path — caught because the phase instrument reports `prepared: false`, not by
+any error. And a `ru`-before-declaration reference in an earlier pass threw every frame; the
+page-error hook, not the pictures, caught it.
