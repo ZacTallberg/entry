@@ -1080,6 +1080,11 @@ class ParticleField {
     this.noiseTexture = bakeNoiseTexture();
     this.targetA = new THREE.WebGLRenderTarget(size, size, options);
     this.targetB = new THREE.WebGLRenderTarget(size, size, options);
+    // a spare pair for the swap: priming a new form into the LIVE targets, from a timer, while
+    // the in-flight frame is still reading them forces the driver to drain the whole GPU queue
+    // first — measured at 150-290ms on the first priming pass, the second pass costing nothing
+    this.spareA = new THREE.WebGLRenderTarget(size, size, options);
+    this.spareB = new THREE.WebGLRenderTarget(size, size, options);
     this.warmTarget = new THREE.WebGLRenderTarget(4, 4, options);
     this.originValues = new Float32Array(size * size * 4);
     this.origin = null;
@@ -1098,6 +1103,40 @@ class ParticleField {
     this.particles = new THREE.Points(this.geometry, null);
     this.particles.frustumCulled = false;
     this.scene.add(this.particles);
+    // While the field sleeps a constellation surfaces over it: a few dozen stars joined by faint
+    // lines, drawn a new way each dream, visible only through the drowse. Ordinary render path,
+    // so it takes the same bloom and grade as everything else.
+    this.starCount = 26;
+    const starPositions = new Float32Array(this.starCount * 3);
+    const linePositions = new Float32Array(this.starCount * 2 * 3);
+    this.starGeometry = new THREE.BufferGeometry();
+    this.starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    this.lineGeometry = new THREE.BufferGeometry();
+    this.lineGeometry.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+    // a soft round star, not the square a bare point sprite draws
+    const starCanvas = document.createElement('canvas');
+    starCanvas.width = 32; starCanvas.height = 32;
+    const sctx = starCanvas.getContext('2d');
+    const halo = sctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    halo.addColorStop(0, 'rgba(255,255,255,1)');
+    halo.addColorStop(0.35, 'rgba(255,255,255,0.55)');
+    halo.addColorStop(1, 'rgba(255,255,255,0)');
+    sctx.fillStyle = halo; sctx.fillRect(0, 0, 32, 32);
+    const starMap = new THREE.CanvasTexture(starCanvas);
+    this.starMaterial = new THREE.PointsMaterial({
+      color: 0xdde4ff, size: 0.11, map: starMap, transparent: true, opacity: 0, depthWrite: false,
+      blending: THREE.AdditiveBlending, sizeAttenuation: true,
+    });
+    this.lineMaterial = new THREE.LineBasicMaterial({
+      color: 0x9fb0ff, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.stars = new THREE.Points(this.starGeometry, this.starMaterial);
+    this.starLines = new THREE.LineSegments(this.lineGeometry, this.lineMaterial);
+    this.stars.frustumCulled = false;
+    this.starLines.frustumCulled = false;
+    this.scene.add(this.starLines);
+    this.scene.add(this.stars);
+    this.drawConstellation((Math.random() * 0xffffffff) >>> 0);
     this.densityPoints = new THREE.Points(this.geometry, this.densityMaterial);
     this.densityPoints.frustumCulled = false;
     this.densityScene.add(this.densityPoints);
@@ -1154,6 +1193,69 @@ class ParticleField {
       m = re.exec(text);
     }
     return out;
+  }
+
+  // The first sim draw with a new form's material at the swap costs 150-290ms on the main
+  // thread (measured statement by statement: one fullscreen quad), whatever the driver is doing
+  // in it. So the two priming passes are baked here, during the warm, into the spare targets —
+  // and the swap becomes a pointer exchange. One step of simulation with the warm-time uniforms
+  // is not distinguishable from one step with the swap-time ones.
+  drawConstellation(seed) {
+    let st = (seed >>> 0) || 1;
+    const rng = () => { st = (Math.imul(st, 1664525) + 1013904223) >>> 0; return st / 0x100000000; };
+    const w = (this.viewHalfW || 4.3) * 0.86;
+    const h = (this.viewHalfH || 2.4) * 0.82;
+    const pos = this.starGeometry.attributes.position.array;
+    const pts = [];
+    for (let i = 0; i < this.starCount; i += 1) {
+      const x = (rng() - 0.5) * 2 * w; const y = (rng() - 0.5) * 2 * h; const z = (rng() - 0.5) * 0.3;
+      pos[i * 3] = x; pos[i * 3 + 1] = y; pos[i * 3 + 2] = z;
+      pts.push([x, y, z]);
+    }
+    // a walk through nearest unvisited neighbours, so the lines read as one figure, not a mesh
+    const lines = this.lineGeometry.attributes.position.array;
+    const used = new Array(this.starCount).fill(false);
+    let at = 0; used[0] = true; let li = 0;
+    for (let step = 0; step < this.starCount - 1; step += 1) {
+      let best = -1; let bestD = Infinity;
+      for (let j = 0; j < this.starCount; j += 1) {
+        if (used[j]) continue;
+        const d = (pts[j][0] - pts[at][0]) ** 2 + (pts[j][1] - pts[at][1]) ** 2;
+        if (d < bestD) { bestD = d; best = j; }
+      }
+      if (best < 0) break;
+      // long jumps are left unjoined: the figure breaks into two or three, like real ones
+      if (bestD < (w * 0.55) ** 2) {
+        lines[li++] = pts[at][0]; lines[li++] = pts[at][1]; lines[li++] = pts[at][2];
+        lines[li++] = pts[best][0]; lines[li++] = pts[best][1]; lines[li++] = pts[best][2];
+      }
+      used[best] = true; at = best;
+    }
+    for (; li < lines.length; li += 1) lines[li] = 0;
+    this.starGeometry.attributes.position.needsUpdate = true;
+    this.lineGeometry.attributes.position.needsUpdate = true;
+    this.lineGeometry.setDrawRange(0, Math.floor(li / 3));
+  }
+
+  prebake(record) {
+    if (this.disposed || !record || this.prepared !== record || record.baked) return;
+    const t0 = performance.now();
+    const { simMaterial } = this.materialsFor(record.formDef);
+    const held = { quad: this.simQuad.material, origin: simMaterial.uniforms.tOrigin.value, pos: simMaterial.uniforms.tPositions.value };
+    simMaterial.uniforms.tOrigin.value = record.texture;
+    simMaterial.uniforms.tPositions.value = record.primeTexture;
+    this.simQuad.material = simMaterial;
+    this.renderer.setRenderTarget(this.spareA);
+    this.renderer.render(this.simScene, this.simCamera);
+    simMaterial.uniforms.tPositions.value = this.spareA.texture;
+    this.renderer.setRenderTarget(this.spareB);
+    this.renderer.render(this.simScene, this.simCamera);
+    this.renderer.setRenderTarget(null);
+    simMaterial.uniforms.tOrigin.value = held.origin;
+    simMaterial.uniforms.tPositions.value = held.pos;
+    this.simQuad.material = held.quad;
+    record.baked = true;
+    this.lastBakeMs = performance.now() - t0;
   }
 
   materialsFor(formDef) {
@@ -1293,6 +1395,8 @@ class ParticleField {
     }
     this.renderer.initTexture(texture);
     this.renderer.initTexture(primeTexture);
+    if (wordTexture) this.renderer.initTexture(wordTexture);
+    this.renderer.initTexture(primeTexture);
     if (this.prepared) {
       if (this.prepared.texture !== this.origin) this.prepared.texture.dispose();
       this.prepared.primeTexture?.dispose();
@@ -1300,7 +1404,10 @@ class ParticleField {
     this.preparedKey = key;
     this.prepared = { formDef, values, texture, primeTexture, wordTexture };
     const warmT0 = performance.now();
-    this.preparedPromise = this.warmForm(formDef).then(() => { this.lastWarmMs = performance.now() - warmT0; }).catch(() => {});
+    const preparedRecord = this.prepared;
+    this.preparedPromise = this.warmForm(formDef)
+      .then(() => { this.lastWarmMs = performance.now() - warmT0; requestAnimationFrame(() => this.prebake(preparedRecord)); })
+      .catch(() => {});
     return this.preparedPromise;
   }
 
@@ -1325,10 +1432,22 @@ class ParticleField {
           this.renderer.compileAsync(this.scene, this.camera),
           this.renderer.compileAsync(this.simScene, this.simCamera),
         ]);
-        // compileAsync has already built and linked the programs off the main thread. The
-        // extra warm render was drawing the WHOLE particle scene — two hundred thousand points,
-        // shaded in full — into a 4x4 target: measured at ~500ms, while the program link itself
-        // costs under 1ms. The draw was never the point; the compile was, and it is done.
+        // compileAsync builds and links the programs off the main thread, but the driver still
+        // compiles its own shader variant on the FIRST DRAW with each program — measured as
+        // 150-230ms landing on the first priming pass of the swap, with the identical second pass
+        // costing nothing. So the warm draws once with each program, minimally: the sim quad into
+        // a 4x4 target, and the point cloud with a draw range of four particles instead of two
+        // hundred thousand. The variant cost is paid here, off the moment the answer arrives.
+        if (!this.disposed) {
+          const geometry = this.particles.geometry;
+          const hadRange = { start: geometry.drawRange.start, count: geometry.drawRange.count };
+          geometry.setDrawRange(0, 4);
+          this.renderer.setRenderTarget(this.warmTarget);
+          this.renderer.render(this.simScene, this.simCamera);
+          this.renderer.render(this.scene, this.camera);
+          this.renderer.setRenderTarget(null);
+          geometry.setDrawRange(hadRange.start, hadRange.count);
+        }
       } else {
         // no compileAsync: one real draw is the only way to force the link, and the sim pass
         // alone is enough to do it without shading every particle
@@ -1352,12 +1471,14 @@ class ParticleField {
     const key = `${formDef.slug}|${seedHash}|${utterance}|${arrival || 0}`;
     let preparedPrime = null;
     let wordHold = null;
+    let preparedBaked = false;
     if (this.preparedKey === key && this.prepared) {
       this.origin?.dispose();
       this.origin = this.prepared.texture;
       this.originValues = this.prepared.values;
       preparedPrime = this.prepared.primeTexture;
       wordHold = this.prepared.wordTexture || null;
+      preparedBaked = !!this.prepared.baked;
       this.prepared = null;
       this.preparedKey = null;
     } else {
@@ -1374,7 +1495,9 @@ class ParticleField {
       this.origin.needsUpdate = true;
     }
 
+    const tOrigins = performance.now();
     const { simMaterial, renderMaterial, js } = this.materialsFor(formDef);
+    const tMaterials = performance.now();
     this.simMaterial = simMaterial;
     this.renderMaterial = renderMaterial;
     this.formJs = js;
@@ -1566,21 +1689,46 @@ class ParticleField {
     // One prime pass is enough to seat the particles; the second only advanced them a frame,
     // which the very next frame does anyway. The prime texture is released on the following
     // frame instead, by which time the GPU is done with it.
-    this.simMaterial.uniforms.tPositions.value = prime;
+    const tPrimeBuilt = performance.now();
     this.simQuad.material = this.simMaterial;
-    this.renderer.setRenderTarget(this.targetA);
-    this.renderer.render(this.simScene, this.simCamera);
+    const freshA = this.spareA;
+    const freshB = this.spareB;
+    const tM0 = performance.now();
+    if (!preparedBaked) {
+      this.simMaterial.uniforms.tPositions.value = prime;
+      this.renderer.setRenderTarget(freshA);
+      this.renderer.render(this.simScene, this.simCamera);
+    }
+    const tPass1 = performance.now();
+    this.lastPass1Detail = { baked: preparedBaked, render: Math.round(tPass1 - tM0) };
     // The second pass is not optional. The render draws each particle's motion from its previous
     // position (tPrev is the other target); with only one pass that target still holds the OLD
     // form, so for the first frames after a swap every particle drew a streak from where it used
     // to be to where it is — a radial spray of rods from every swap, smeared by the trails.
+    if (!preparedBaked) {
+      this.simMaterial.uniforms.tPositions.value = freshA.texture;
+      this.renderer.setRenderTarget(freshB);
+      this.renderer.render(this.simScene, this.simCamera);
+      this.renderer.setRenderTarget(null);
+    }
+    // the live pair becomes the spare pair; the loop reads targetA fresh every frame
+    this.spareA = this.targetA;
+    this.spareB = this.targetB;
+    this.targetA = freshA;
+    this.targetB = freshB;
     this.simMaterial.uniforms.tPositions.value = this.targetA.texture;
-    this.renderer.setRenderTarget(this.targetB);
-    this.renderer.render(this.simScene, this.simCamera);
-    this.renderer.setRenderTarget(null);
     const stale = prime;
     requestAnimationFrame(() => { try { stale.dispose(); } catch (_e) {} });
     this.lastSwapMs = performance.now() - swapT0;
+    this.lastSwapPhases = {
+      origins: Math.round(tOrigins - swapT0),
+      materials: Math.round(tMaterials - tOrigins),
+      prime: Math.round(tPrimeBuilt - tMaterials),
+      pass1: Math.round(tPass1 - tPrimeBuilt),
+      pass1Detail: this.lastPass1Detail,
+      pass2: Math.round(performance.now() - tPass1),
+      prepared: !!preparedPrime,
+    };
     this.formStartedAt = performance.now();
     this.animatedUntil = performance.now() + 4200;
   }
@@ -1812,6 +1960,7 @@ class ParticleField {
       const def = FORM_INDEX.get(pick);
       if (def && def !== this.formDef) {
         this.setForm(def, '', { fromCenter: false, seedHash: (Math.random() * 0xffffffff) >>> 0 });
+        this.drawConstellation((Math.random() * 0xffffffff) >>> 0);
         // a dream must not wake it: setForm marks the field animated, which reads as touch
         this.animatedUntil = 0;
       }
@@ -1849,6 +1998,13 @@ class ParticleField {
     this.swapFlash = (this.swapFlash || 0) * Math.pow(0.90, dt);
     let exposure = 1.92 + this.exposurePop + this.swapFlash;
     exposure *= (1 - this.drowse * 0.55) * (this.hourLight || 1);
+    if (this.starMaterial) {
+      const deep = Math.max(0, (this.drowse - 0.55) / 0.45);
+      this.starMaterial.opacity = deep * 0.55;
+      this.lineMaterial.opacity = deep * 0.14;
+      this.stars.visible = deep > 0.001;
+      this.starLines.visible = deep > 0.001;
+    }
     exposure += this.lean * 0.16;
     if (this.voiceLevel > 0.012) {
       this.energyCurrent = Math.min(1.6, this.energyCurrent + this.voiceLevel * 2.4);
@@ -2049,6 +2205,12 @@ class ParticleField {
     this.trailB?.dispose();
     this.bloomA?.dispose();
     this.bloomB?.dispose();
+    this.spareA?.dispose();
+    this.spareB?.dispose();
+    this.starGeometry?.dispose();
+    this.lineGeometry?.dispose();
+    this.starMaterial?.dispose();
+    this.lineMaterial?.dispose();
     this.streakA?.dispose();
     this.streakB?.dispose();
     this.brightMaterial?.dispose();
@@ -2191,7 +2353,7 @@ function scheduleWarm() {
     // the gesture is deterministic from the hash, so the warm can prepare the exact prime
     // the release will ask for instead of one it will throw away
     field.prepare(chosen.form, raw, chosen.hash, arrivalFor(chosen.hash));
-  }, 550);
+  }, 800);
 }
 
 function paintProgress(now) {
@@ -3571,7 +3733,7 @@ window.entryExperience = Object.freeze({
   } : null,
   lastRelease: () => lastRelease,
   lastEffects: () => field?.effects || null,
-  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0) } : null,
+  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0), bakeMs: Math.round(field.lastBakeMs || 0), swap: field.lastSwapPhases || null } : null,
   force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
   arrival: (name) => { const i = ARRIVALS.findIndex((r) => r[0] === name); forcedArrival = i; return i >= 0 ? name : null; },
   arrivals: () => ARRIVALS.map((r) => r[0]),

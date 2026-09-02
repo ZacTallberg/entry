@@ -142,3 +142,23 @@ luminous forms at dawn, the bright crystalline ones by day, fire and lanterns at
 remembers the one slug it opened on last time in this browser and opens on something else. That
 memory is a single form name in local storage, nothing more. Verified at 19:00: candle, lighthouse,
 magma across three loads, no repeat.
+
+**Amendment (2026-09-01, the swap becomes a pointer exchange; a constellation while it sleeps):**
+the swap's remaining cost was measured statement by statement on a fresh visitor's first release:
+choosing origins, materials and uniforms together took ~2 ms, and the FIRST sim draw with the new
+form's material — one fullscreen quad — took 150–290 ms, with the identical second draw costing
+nothing. Two hypotheses were tested and refuted before the fix: it is not the driver's first-draw
+shader variant (a minimal warm draw with each program changed nothing) and not a GPU-queue drain
+from writing the in-flight target (priming into freshly allocated spare targets changed nothing).
+Whatever the driver does in that draw, it no longer happens at the swap: the two priming passes are
+baked during the warm into a spare pair of position targets, and the swap exchanges references.
+Measured on a cold first release: swapMs 150–290 → 1–2; a slow typist's worst frame 175 → 73 ms.
+The cost lives in the bake now (150–260 ms), which the warm defers until 800 ms after the last
+keystroke (was 550) and runs one frame after its compile; a fast typist still meets it once as a
+~460 ms frame while their words are settling, off the climax. The spare pair is kept regardless —
+it is the right shape for the exchange.
+
+And a new state for the sleeping field: a constellation surfaces through the drowse — twenty-six
+soft round stars over the visible stage, joined by faint lines along a nearest-neighbour walk that
+breaks into two or three figures like real ones, drawn anew with every dream, gone at a touch. It
+renders through the ordinary path so it takes the same bloom and grade as everything else.
