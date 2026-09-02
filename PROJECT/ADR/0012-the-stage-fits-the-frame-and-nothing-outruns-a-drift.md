@@ -130,3 +130,15 @@ judged before this was the dissolve, not the hold. The swap is now awaited insid
 frame is stamped with the field's own since-swap clock. And the error hook earned its keep: a
 `ru`-before-initialisation reference threw every frame and would otherwise have read as a frozen
 field.
+
+**Amendment (2026-09-01, the words sit above the button; the opener keeps the hour):** the glyph
+generator now places every textual form 0.85 units above centre — where the writing was — instead of
+behind the speak circle, and textual forms are drawn thinner (alpha × 0.55, point size × 0.72), since
+two hundred thousand particles on a line of letters burn to white at ordinary settings. Verified on
+palimpsest, inkbleed and the words themselves with a real utterance: legible, above the button.
+
+The first thing a visitor sees now keeps the hour — stars and deep space through the night, the cold
+luminous forms at dawn, the bright crystalline ones by day, fire and lanterns at dusk — and the dark
+remembers the one slug it opened on last time in this browser and opens on something else. That
+memory is a single form name in local storage, nothing more. Verified at 19:00: candle, lighthouse,
+magma across three loads, no repeat.

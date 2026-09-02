@@ -356,7 +356,6 @@ function wordPrime(length, utterance, seedHash) {
   let st = (seedHash >>> 0) || 7;
   const rng = () => { st = (Math.imul(st, 1664525) + 1013904223) >>> 0; return st / 0x100000000; };
   ORIGIN_GENERATORS.glyph(out, rng, utterance);
-  for (let i = 1; i < out.length; i += 4) out[i] += 0.85;
   return out;
 }
 
@@ -594,7 +593,8 @@ const ORIGIN_GENERATORS = {
       const x = lit[pick] + (rng() - 0.5) * 2.2;
       const y = lit[pick + 1] + (rng() - 0.5) * 2.2;
       values[i] = (x / off.width - 0.5) * spanX;
-      values[i + 1] = (0.5 - y / off.height) * spanY;
+      // the words live above the button, where the writing was, not behind it
+      values[i + 1] = (0.5 - y / off.height) * spanY + 0.85;
       values[i + 2] = (rng() - 0.5) * 0.16;
       values[i + 3] = 1;
     }
@@ -1107,13 +1107,28 @@ class ParticleField {
     // already somewhere before you say anything. ?form=<slug> overrides it, and is the only way
     // to put eyes on a particular form deliberately.
     // arrival is the first impression: open on the forms that show the piece at its best
-    const OPENERS = [
-      'aurora', 'galaxy', 'silk', 'magma', 'bioluminescence', 'prism',
-      'accretion', 'photonring', 'fireflies', 'supernova', 'smoke', 'tidepool',
+    // The first thing a visitor sees keeps the hour: stars and deep space through the night,
+    // the cold luminous forms at dawn, the bright crystalline ones by day, fire and lanterns at
+    // dusk. And the dark remembers what it opened on last time for this visitor, and opens on
+    // something else — the memory is a single slug in this browser's storage, nothing more.
+    const OPENERS_BY_HOUR = [
+      [5,  ['galaxy', 'constellation', 'photonring', 'fireflies', 'supernova', 'bioluminescence', 'nebula', 'comets']],
+      [9,  ['aurora', 'tidepool', 'prism', 'silk', 'murmuration', 'dandelion', 'snowfall', 'jellyfish']],
+      [17, ['prism', 'silk', 'magma', 'accretion', 'smoke', 'phyllotaxis', 'crystallize', 'galaxy']],
+      [22, ['embers', 'fireflies', 'aurora', 'magma', 'halo', 'lighthouse', 'candle', 'moths']],
+      [24, ['galaxy', 'constellation', 'photonring', 'fireflies', 'supernova', 'bioluminescence', 'nebula', 'comets']],
     ];
+    let OPENERS = OPENERS_BY_HOUR[OPENERS_BY_HOUR.length - 1][1];
+    for (const [until, list] of OPENERS_BY_HOUR) { if (hour < until) { OPENERS = list; break; } }
+    OPENERS = OPENERS.filter((slug) => FORM_INDEX.has(slug));
+    let lastOpener = null;
+    try { lastOpener = window.localStorage.getItem('entry:last-opener'); } catch (_e) { lastOpener = null; }
+    let openerSlug = OPENERS[sessionSalt % OPENERS.length];
+    if (openerSlug === lastOpener && OPENERS.length > 1) openerSlug = OPENERS[(sessionSalt + 1) % OPENERS.length];
+    try { window.localStorage.setItem('entry:last-opener', openerSlug); } catch (_e) { /* private mode */ }
     const wanted = new URLSearchParams(window.location.search).get('form');
     const opening = (wanted && FORM_INDEX.get(wanted))
-      || FORM_INDEX.get(OPENERS[sessionSalt % OPENERS.length])
+      || FORM_INDEX.get(openerSlug)
       || FORM_INDEX.get('nebula');
     this.setForm(opening, '', { fromCenter: false, seedHash: sessionSalt });
 
@@ -1434,6 +1449,10 @@ class ParticleField {
     this.beatTempo = fx.beat ? 0.6 + v3 * 0.8 : 0;
     ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.95 + v2 * 0.28);
     ru2.uAlpha.value = Math.min(0.9, (js.alpha ?? 0.62) * 1.1);
+    if (formDef.origin === 'glyph') {
+      ru2.uAlpha.value *= 0.55;
+      ru2.uPointSize.value *= 0.72;
+    }
     // Lackadaisical by decree (2026-08-31, the third and final calming): the
     // field's clock runs at roughly six-tenths of the previous pass, which was
     // itself a halving. Everything driven by uTime and uDt — forces, waves,
