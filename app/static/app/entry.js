@@ -54,6 +54,7 @@ const GLSL_PRELUDE = `
   uniform vec2 uGatherPoint;
   uniform float uVmax;
   uniform float uSwirl;
+  uniform float uHold;
   uniform vec2 uViewHalf;
   uniform vec2 uPulseCenter;
   uniform vec2 uStir;
@@ -104,9 +105,11 @@ const buildSimFragment = (formDef) => `
   void main() {
     vec3 pos = texture2D(tPositions, vUv).xyz;
     vec3 origin = texture2D(tOrigin, vUv).xyz;
-    vec3 velocity = formForce(pos, origin) * (0.7 + uEnergy * 0.6);
+    // uHold is 1 while a sentence is being read: the form's own currents wait, the pulses
+    // wait, only the homing to the letters acts — then it fades and the answer takes over
+    vec3 velocity = formForce(pos, origin) * (0.7 + uEnergy * 0.6) * (1.0 - uHold);
 
-    if (abs(uDenseForce) > 0.001 || abs(uDenseSwirl) > 0.001) {
+    if ((abs(uDenseForce) > 0.001 || abs(uDenseSwirl) > 0.001) && uHold < 0.02) {
       vec2 duv = pos.xy * 0.147 + 0.5;
       float e = 0.02;
       float dxp = texture2D(tDensity, duv + vec2(e, 0.0)).r;
@@ -118,13 +121,13 @@ const buildSimFragment = (formDef) => `
       velocity.xy += vec2(-grad.y, grad.x) * uDenseSwirl * 0.05;
     }
 
-    if (uRingAmp > 0.001) {
+    if (uRingAmp > 0.001 && uHold < 0.02) {
       float rd = length(pos.xy) - uRingR;
       velocity.xy += normalize(pos.xy + vec2(0.0001, 0.0)) * exp(-rd * rd * 9.0) * uRingAmp * 0.05;
     }
 
     velocity += normalize(pos + vec3(0.0001)) * uVoice * (0.032 + 0.022 * sin(uTime * 2.6));
-    velocity.xy += uDriftDir * uFxDrift * 0.015;
+    velocity.xy += uDriftDir * uFxDrift * 0.015 * (1.0 - uHold);
 
     vec2 pointerDelta = pos.xy - uPointer;
     float pointerDistance = max(length(pointerDelta), 0.12);
@@ -142,7 +145,7 @@ const buildSimFragment = (formDef) => `
     vec2 pulseDelta = pos.xy - uPulseCenter;
     float pulseDistance = max(length(pulseDelta), 0.12);
     vec3 pulseDirection = normalize(vec3(pulseDelta, pos.z * 0.2));
-    if (uPulse > 0.001) {
+    if (uPulse > 0.001 && uHold < 0.02) {
       float falloff = 1.0 / (pulseDistance + 0.18);
       if (uPulseType < 0.5) {
         velocity += pulseDirection * 0.035 * falloff * uPulse * FORM_POINTER;
@@ -156,7 +159,13 @@ const buildSimFragment = (formDef) => `
     }
 
     float centerDistance = max(length(pos), 0.12);
-    velocity += normalize(pos) * uRelease * (0.036 * FORM_RELEASE / centerDistance);
+    // The release shock scaled as 1/distance, so particles sitting at the centre — every glyph
+    // form, and the sentence itself — took an outward blast of up to 0.3 units a frame. Before the
+    // speed limit that blast overshot the 6.5-unit safety and snapped them straight back home,
+    // which is the only reason the words ever survived it. Under the limit they crawled outward
+    // and never recovered. The shock is bounded at the centre and gentler overall; the arrival
+    // choreographies carry the eruption now.
+    velocity += normalize(pos) * uRelease * (0.016 * FORM_RELEASE / max(centerDistance, 0.5));
     velocity += (origin - pos) * (FORM_HOME + uForm * 0.055);
     // Homing alone is a straight line, and a hundred thousand straight lines aimed at their
     // destinations read as rods. While the release envelope is up, the approach also turns:
@@ -164,7 +173,7 @@ const buildSimFragment = (formDef) => `
     // arrival curves in — a slow swirl with a direction of its own each time.
     vec2 toHome = origin.xy - pos.xy;
     float homeDist = length(toHome) + 0.05;
-    velocity.xy += vec2(-toHome.y, toHome.x) / homeDist * (uForm * uSwirl * homeDist * 0.075);
+    velocity.xy += vec2(-toHome.y, toHome.x) / homeDist * (uForm * uSwirl * homeDist * 0.075 * (1.0 - uHold));
     // the one dial the clocks cannot reach: bursts, respawn teleports and chase forces all
     // produce huge instantaneous velocities however slow time runs. A hard speed limit turns
     // every jump into a glide — nothing in the dark moves faster than a drift.
@@ -334,11 +343,26 @@ const ARRIVALS = [
   }],
   ['horizon', (x, y, z, h) => [x * 1.05, (h - 0.5) * 0.25, z]],
   ['deep',    (x, y, z, h) => [x * 0.55, y * 0.55, z - 5.5]],
+  // the particles snap into the words that were said, hold for a breath, then become the answer;
+  // the prime is built from the glyph rasteriser rather than a transform, see wordPrime()
+  ['words',   null],
 ];
+const WORDS_ARRIVAL = ARRIVALS.length - 1;
+// how much of the outward shockwave each arrival wants: the bloom is the shockwave; the
+// others are already travelling and the sentence must not be blown apart before it is read
+const ARRIVAL_SHOCK = [1.0, 0.35, 0.5, 0.4, 0.4, 0.3, 0.3, 0.25, 0.6, 0.5, 0.3, 0.4, 0.3, 0.0];
+function wordPrime(length, utterance, seedHash) {
+  const out = new Float32Array(length);
+  let st = (seedHash >>> 0) || 7;
+  const rng = () => { st = (Math.imul(st, 1664525) + 1013904223) >>> 0; return st / 0x100000000; };
+  ORIGIN_GENERATORS.glyph(out, rng, utterance);
+  for (let i = 1; i < out.length; i += 4) out[i] += 0.85;
+  return out;
+}
 
 // weighted so the classic gestures still lead, but a third of releases arrive some other way
 const ARRIVAL_TABLE = [
-  [15, 0], [27, 1], [35, 2], [44, 3], [51, 4], [59, 5], [65, 6], [72, 7], [78, 8], [87, 9], [93, 10], [97, 11], [100, 12],
+  [12, 0], [22, 1], [28, 2], [36, 3], [42, 4], [48, 5], [53, 6], [59, 7], [64, 8], [72, 9], [77, 10], [81, 11], [84, 12], [100, 13],
 ];
 let forcedArrival = -1;
 function arrivalFor(hash) {
@@ -348,7 +372,7 @@ function arrivalFor(hash) {
   return 0;
 }
 function primeInto(out, values, i, seedHash, arrival) {
-  const [, fn] = ARRIVALS[arrival] || ARRIVALS[0];
+  const fn = (ARRIVALS[arrival] && ARRIVALS[arrival][1]) || ARRIVALS[0][1];
   const phi = (((seedHash >>> 3) % 1000) / 1000) * Math.PI * 2;
   const sgn = ((seedHash >>> 9) & 1) ? 1 : -1;
   const h = (Math.imul((i >> 2) ^ (seedHash | 0), 2654435761) >>> 0) / 4294967296;
@@ -1137,6 +1161,7 @@ class ParticleField {
         uGatherPoint: { value: new THREE.Vector2(0, 0) },
         uVmax: { value: 0.045 },
         uSwirl: { value: 1.0 },
+        uHold: { value: 0 },
         uViewHalf: { value: new THREE.Vector2(4.4, 2.44) },
         uPulse: { value: 0 },
         uPulseType: { value: 0 },
@@ -1231,8 +1256,12 @@ class ParticleField {
     const packed = new Uint16Array(values.length);
     const primePacked = new Uint16Array(values.length);
     const pt = [0, 0, 0];
+    const spoken = (utterance || '').trim();
+    const wordSrc = (arrival === WORDS_ARRIVAL && spoken.length >= 3) ? wordPrime(values.length, spoken, seedHash) : null;
+    const primeArrival = (arrival === WORDS_ARRIVAL && !wordSrc) ? 0 : arrival;
     for (let i = 0; i < values.length; i += 4) {
-      primeInto(pt, values, i, seedHash, arrival);
+      if (wordSrc) { pt[0] = wordSrc[i] + (Math.random() - 0.5) * 0.05; pt[1] = wordSrc[i + 1] + (Math.random() - 0.5) * 0.05; pt[2] = wordSrc[i + 2]; }
+      else primeInto(pt, values, i, seedHash, primeArrival);
       packed[i] = half(values[i]); packed[i + 1] = half(values[i + 1]);
       packed[i + 2] = half(values[i + 2]); packed[i + 3] = half(values[i + 3]);
       primePacked[i] = half(pt[0]); primePacked[i + 1] = half(pt[1]);
@@ -1242,6 +1271,11 @@ class ParticleField {
     texture.needsUpdate = true;
     const primeTexture = new THREE.DataTexture(primePacked, size, size, THREE.RGBAFormat, THREE.HalfFloatType);
     primeTexture.needsUpdate = true;
+    let wordTexture = null;
+    if (wordSrc) {
+      wordTexture = new THREE.DataTexture(wordSrc, size, size, THREE.RGBAFormat, THREE.FloatType);
+      wordTexture.needsUpdate = true;
+    }
     this.renderer.initTexture(texture);
     this.renderer.initTexture(primeTexture);
     if (this.prepared) {
@@ -1249,7 +1283,7 @@ class ParticleField {
       this.prepared.primeTexture?.dispose();
     }
     this.preparedKey = key;
-    this.prepared = { formDef, values, texture, primeTexture };
+    this.prepared = { formDef, values, texture, primeTexture, wordTexture };
     const warmT0 = performance.now();
     this.preparedPromise = this.warmForm(formDef).then(() => { this.lastWarmMs = performance.now() - warmT0; }).catch(() => {});
     return this.preparedPromise;
@@ -1302,11 +1336,13 @@ class ParticleField {
     // textures never match and every swap regenerates its origins synchronously
     const key = `${formDef.slug}|${seedHash}|${utterance}|${arrival || 0}`;
     let preparedPrime = null;
+    let wordHold = null;
     if (this.preparedKey === key && this.prepared) {
       this.origin?.dispose();
       this.origin = this.prepared.texture;
       this.originValues = this.prepared.values;
       preparedPrime = this.prepared.primeTexture;
+      wordHold = this.prepared.wordTexture || null;
       this.prepared = null;
       this.preparedKey = null;
     } else {
@@ -1356,7 +1392,14 @@ class ParticleField {
       drift: roll(0xe6546b64, 0.3),
       zones: roll(0xcc9e2d51, 0.32),
     };
-    if (!Object.values(fx).some(Boolean)) fx.turb = true;
+    // Glyph forms are the words: the density self-repulsion, the turbulence and the octave
+    // noise blur a compact line of letters into a grid-aligned spray (under the speed limit the
+    // runaway no longer overshoots the 6.5-unit safety that used to snap it home). The words
+    // keep only the effects that do not move them: hue, shimmer, fog, bands, trails.
+    if (formDef.origin === 'glyph') {
+      fx.dense = false; fx.turb = false; fx.octave = false; fx.ring = false; fx.drift = false; fx.zones = false;
+    }
+    if (!Object.values(fx).some(Boolean)) fx.shimmer = true;
     const cosmeticDropOrder = ['beat', 'sizeWave', 'shimmer', 'fog', 'turb', 'bands', 'zones', 'drift', 'hueDrift', 'ignite'];
     let activeCount = Object.values(fx).filter(Boolean).length;
     for (const k of cosmeticDropOrder) {
@@ -1438,17 +1481,65 @@ class ParticleField {
       if (fromCenter) {
         this.primeBuffer ||= new Float32Array(this.originValues.length);
         const pt = [0, 0, 0];
+        const spoken = (utterance || '').trim();
+        const wordSrc = (arrival === WORDS_ARRIVAL && spoken.length >= 3) ? wordPrime(this.originValues.length, spoken, seedHash || 0) : null;
+        const primeArrival = (arrival === WORDS_ARRIVAL && !wordSrc) ? 0 : (arrival || 0);
         for (let i = 0; i < this.originValues.length; i += 4) {
-          primeInto(pt, this.originValues, i, seedHash || 0, arrival || 0);
+          if (wordSrc) { pt[0] = wordSrc[i]; pt[1] = wordSrc[i + 1]; pt[2] = wordSrc[i + 2]; }
+          else primeInto(pt, this.originValues, i, seedHash || 0, primeArrival);
           this.primeBuffer[i] = pt[0]; this.primeBuffer[i + 1] = pt[1];
           this.primeBuffer[i + 2] = pt[2]; this.primeBuffer[i + 3] = 1;
         }
         primeValues = this.primeBuffer;
+        if (wordSrc) {
+          wordHold = new THREE.DataTexture(wordSrc, size, size, THREE.RGBAFormat, THREE.FloatType);
+          wordHold.needsUpdate = true;
+        }
       }
       prime = new THREE.DataTexture(primeValues, size, size, THREE.RGBAFormat, THREE.FloatType);
       prime.needsUpdate = true;
     }
+    this.lastPrime = { arrival: (ARRIVALS[arrival] || ARRIVALS[0])[0], prepared: !!preparedPrime, fromCenter: !!fromCenter, words: (utterance || '').trim().length };
     if (fromCenter) this.swapFlash = 0.5;
+    if (fromCenter) this.releaseEnergy *= (ARRIVAL_SHOCK[arrival] ?? 1);
+    if (fromCenter) this.pulse *= (ARRIVAL_SHOCK[arrival] ?? 1);
+    this.holdUntil = 0;
+    // the sentence holds: for a breath the particles home to the letters, then the origin
+    // becomes the answer and the words dissolve into it
+    this.wordHold?.dispose();
+    this.wordHold = null;
+    if (wordHold && fromCenter) {
+      this.wordHold = wordHold;
+      this.holdUntil = performance.now() + 1400;
+      // two hundred thousand particles packed into a line of letters burn to white at the
+      // answer form's point size; while the sentence is read it is drawn finer and thinner
+      this.holdBase = {
+        size: this.renderMaterial.uniforms.uPointSize.value,
+        alpha: this.renderMaterial.uniforms.uAlpha.value,
+        soft: this.renderMaterial.uniforms.uSoft.value,
+      };
+      // the sentence must be read on a clean field: the previous form's trails would smear
+      // across it for a second otherwise (the swap flash covers the cut)
+      const prevTarget = this.renderer.getRenderTarget();
+      for (const t of [this.trailA, this.trailB]) {
+        if (!t) continue;
+        this.renderer.setRenderTarget(t);
+        this.renderer.clear(true, false, false);
+      }
+      this.renderer.setRenderTarget(prevTarget);
+      this.simMaterial.uniforms.tOrigin.value = wordHold;
+      this.renderMaterial.uniforms.tOrigin.value = wordHold;
+      const held = wordHold; const heldFor = this.formDef;
+      setTimeout(() => {
+        if (this.disposed || this.wordHold !== held) return;
+        if (this.formDef === heldFor) {
+          this.simMaterial.uniforms.tOrigin.value = this.origin;
+          this.renderMaterial.uniforms.tOrigin.value = this.origin;
+        }
+        this.wordHold = null;
+        held.dispose();
+      }, 1400);
+    }
     // Two full-resolution sim passes over every particle, then a dispose — and the dispose is
     // the expensive part: freeing a texture the GPU is still reading forces the driver to finish
     // everything queued, converting work that would have overlapped the next frames into a
@@ -1460,8 +1551,14 @@ class ParticleField {
     this.simQuad.material = this.simMaterial;
     this.renderer.setRenderTarget(this.targetA);
     this.renderer.render(this.simScene, this.simCamera);
-    this.renderer.setRenderTarget(null);
+    // The second pass is not optional. The render draws each particle's motion from its previous
+    // position (tPrev is the other target); with only one pass that target still holds the OLD
+    // form, so for the first frames after a swap every particle drew a streak from where it used
+    // to be to where it is — a radial spray of rods from every swap, smeared by the trails.
     this.simMaterial.uniforms.tPositions.value = this.targetA.texture;
+    this.renderer.setRenderTarget(this.targetB);
+    this.renderer.render(this.simScene, this.simCamera);
+    this.renderer.setRenderTarget(null);
     const stale = prime;
     requestAnimationFrame(() => { try { stale.dispose(); } catch (_e) {} });
     this.lastSwapMs = performance.now() - swapT0;
@@ -1773,6 +1870,15 @@ class ParticleField {
     if (this.gatherPoint) su.uGatherPoint.value.copy(this.gatherPoint);
     su.uViewHalf.value.set(this.viewHalfW, this.viewHalfH);
     su.uVmax.value = 0.045 * (1 - this.drowse * 0.5);
+    su.uHold.value = this.holdUntil ? clamp((this.holdUntil - now) / 450, 0, 1) : 0;
+    if (this.holdBase) {
+      const h = su.uHold.value;
+      const rm = this.renderMaterial.uniforms;
+      rm.uPointSize.value = this.holdBase.size * (1 - h * 0.6);
+      rm.uAlpha.value = this.holdBase.alpha * (1 - h * 0.45);
+      rm.uSoft.value = this.holdBase.soft * (1 - h * 0.35);
+      if (h <= 0) this.holdBase = null;
+    }
     su.uDt.value = dt * (this.speedVariant || 1) * (1 - this.drowse * 0.72);
     su.uTime.value = time * (this.timeScale || 1);
     su.uEnergy.value = this.energyCurrent;
@@ -3437,6 +3543,13 @@ window.entryExperience = Object.freeze({
   },
   lastForm: () => lastForm,
   currentForm: () => (field && field.formDef && field.formDef.slug) || null,
+  lastPrime: () => (field && field.lastPrime) || null,
+  holdInfo: () => field ? {
+    holdUntil: field.holdUntil || 0, now: performance.now(), sinceSwap: field.formStartedAt ? Math.round(performance.now() - field.formStartedAt) : null,
+    uHold: field.simMaterial && field.simMaterial.uniforms.uHold ? field.simMaterial.uniforms.uHold.value : 'absent',
+    originIsHold: !!(field.simMaterial && field.wordHold && field.simMaterial.uniforms.tOrigin.value === field.wordHold),
+    fx: Object.keys(field.effects || {}).filter((k) => field.effects[k]),
+  } : null,
   lastRelease: () => lastRelease,
   lastEffects: () => field?.effects || null,
   perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0) } : null,

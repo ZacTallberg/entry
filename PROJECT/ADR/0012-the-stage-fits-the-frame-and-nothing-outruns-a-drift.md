@@ -104,3 +104,29 @@ thin. The halo's annulus gained more radial depth (0.55–1.5 of its radius) and
 became six units deep, so neither arrives as a white wall: the halo is a wide star-field ring pouring
 inward, the curtain a wave of dust rolling in with wind-blown streaks. The bloom at mid-flight is now
 the loud gesture of the set — a luminous cloud with comet-heads around its rim — by design.
+
+**Amendment (2026-09-01, the field becomes the sentence):** a fourteenth arrival. About one release
+in six, the particles snap into the words that were said — every one of them on a letter, via the
+glyph rasteriser — hold for a breath above the button, drawn finer and thinner than the answer form
+would draw them, and then dissolve into the answer. While the sentence is read (`uHold`, 1.4 s with
+a 450 ms fade) the answer form's own currents, the pulses, the swirl, the density self-repulsion,
+the ring and the drift all wait; only the homing to the letters acts, and the trail buffers are
+cleared so the previous form does not smear across the words.
+
+Getting there exposed a live regression in every glyph form and the true root of the "rods": the
+release shockwave scaled as 1/distance, so particles sitting at the centre — every glyph form, and
+the sentence itself — took an outward blast of up to 0.3 units a frame. Before the speed limit that
+blast overshot the 6.5-unit safety and snapped them straight back home, which is the only reason the
+words ever survived it; under the limit they crawled outward and never recovered. The shock is
+bounded at the centre and gentler overall (`0.016 / max(d, 0.5)`), and the release pulse obeys the
+arrival like the shock does. Glyph forms no longer roll the effects that move them (density,
+turbulence, octave, ring, drift, zones); they keep hue, shimmer, fog, bands and trails. The second
+priming sim pass at the swap is restored: without it the render's previous-position texture still
+held the old form for the first frames, and every particle drew a rod from where it used to be.
+
+Two instrument lessons banked. Playwright's screenshot round-trip under render load is over a
+second, and a poll from outside the page detected the swap seconds late — every "post-swap" frame
+judged before this was the dissolve, not the hold. The swap is now awaited inside the page and each
+frame is stamped with the field's own since-swap clock. And the error hook earned its keep: a
+`ru`-before-initialisation reference threw every frame and would otherwise have read as a frozen
+field.
