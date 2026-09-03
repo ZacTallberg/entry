@@ -84,3 +84,19 @@ Measured after: 2.1–2.9 s from the microphone closing to the release (was 3.3�
 5.5–7 s from the last spoken word (was 8.6–9.7). A typed release is unchanged at 3.1 s, because a
 hand at the keyboard clears the anchor and serves the full wait. `entryExperience.releaseInfo()`
 reports the anchor, the delay and the time remaining.
+
+**Amendment (2026-09-03, the way in and the way it explains itself):** two gaps, both real.
+
+Input. Plain Enter did nothing — the phone keyboard offers it (`enterkeyhint="enter"`) and it was
+inserting a newline into a one-row field; only Cmd/Ctrl+Enter released. Enter releases now, and
+Shift+Enter still breaks the line for anyone who wants two. And once there was any text the speak
+face gave the circle to the release face, so a visitor who typed could not reach the microphone
+again without reloading: Escape holds the words as before, and a second Escape lets them go, which
+clears the composer and brings the speak circle back.
+
+Exposition. The piece said almost nothing about itself: a placeholder, and a whispered form-name
+after the release. The stylesheet already carried a fully written `.invitation` rule — fading to
+.18 while writing, to nothing while releasing — with no element in the markup to wear it. There is
+one now. A newcomer is told, once, what the piece does; afterwards it says something true and quiet
+instead, and that nothing is kept is the most useful thing a visitor can know. The seen-flag is a
+single key in local storage.

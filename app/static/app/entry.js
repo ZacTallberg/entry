@@ -1206,7 +1206,24 @@ class ParticleField {
     let openerSlug = OPENERS[sessionSalt % OPENERS.length];
     if (openerSlug === lastOpener && OPENERS.length > 1) openerSlug = OPENERS[(sessionSalt + 1) % OPENERS.length];
     try { window.localStorage.setItem('entry:last-opener', openerSlug); } catch (_e) { /* private mode */ }
-    const wanted = new URLSearchParams(window.location.search).get('form');
+    // The invitation. A newcomer is told what the piece does, once; after that it says something
+  // true and quiet instead — that nothing is kept is the most useful thing a visitor can know.
+  const invitation = document.getElementById('invitation');
+  if (invitation) {
+    const RETURNING = [
+      'nothing you say is kept',
+      'your voice never leaves this page',
+      'the dark answers in a form of its own',
+      'say anything',
+    ];
+    let seen = null;
+    try { seen = window.localStorage.getItem('entry:seen'); } catch (_e) { seen = null; }
+    invitation.textContent = seen
+      ? RETURNING[sessionSalt % RETURNING.length]
+      : 'say anything. the dark answers in a form of its own, and keeps nothing.';
+    try { window.localStorage.setItem('entry:seen', '1'); } catch (_e) { /* private mode */ }
+  }
+  const wanted = new URLSearchParams(window.location.search).get('form');
     const opening = (wanted && FORM_INDEX.get(wanted))
       || FORM_INDEX.get(openerSlug)
       || FORM_INDEX.get('nebula');
@@ -2416,6 +2433,22 @@ function paintProgress(now) {
   if (now < releaseDeadline) progressFrame = requestAnimationFrame(paintProgress);
 }
 
+function clearComposer() {
+  cancelReleaseSchedule();
+  releaseDeadline = 0;
+  spokenTextAt = 0;
+  voiceBase = '';
+  streamBase = '';
+  text.value = '';
+  autoSize();
+  paintMirror('');
+  dust?.clear?.();
+  body.dataset.hasText = 'false';
+  releaseButton.disabled = true;
+  setProgress(0);
+  setState('empty', '');
+}
+
 function scheduleRelease() {
   cancelReleaseSchedule();
   const length = text.value.trim().length;
@@ -2589,12 +2622,17 @@ text.addEventListener('compositionend', (event) => {
 });
 text.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !locked) {
+    if (!releaseDeadline && text.value) {
+      clearComposer();
+      return;
+    }
     cancelReleaseSchedule();
+    releaseDeadline = 0;
     setState(text.value.trim() ? 'writing' : 'empty', 'listening');
   }
-  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    beginRelease();
+    if (text.value.trim()) beginRelease();
   }
 });
 releaseButton.addEventListener('click', beginRelease);
