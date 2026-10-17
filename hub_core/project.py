@@ -13,7 +13,15 @@ from . import upcast as _upcast
 
 # Entity types that fold into the projected state (everything else, e.g. decision/claim, is a
 # log-only event kept in the event store but not materialized as an entity).
-_KNOWN = {"task", "run", "adr", "feat", "gap", "cap", "deploy", "note"}
+_KNOWN = {"task", "run", "adr", "feat", "gap", "cap", "deploy", "note",
+          # The addressed-delivery plane: a directive is an operator instruction aimed at
+          # named agents (an answer to a question is a directive with `answers`); an ack is
+          # one agent's record that delivery landed. Both fold so the inbox, the board, and
+          # the JSON API read one truth.
+          "directive", "ack",
+          # The promotion lane: a finished commit deliberately held back from live, ageing in
+          # public until it is promoted with evidence (adapters/django/hub/held.py).
+          "held"}
 # Statuses that count as "satisfied" for dependency purposes.
 _DONE = {"done", "closed", "shipped", "accepted", "extracted", "reusable", "proven"}
 # Dependency SATISFACTION additionally treats a dropped dep as terminally resolved, matching the
@@ -65,6 +73,9 @@ _EDGES = {
     "cap": {"realized_by": "realized_by", "depends_on": "depends_on", "consumed_by": "consumed_by"},
     "deploy": {"tasks_closed": "closed_task", "reverts": "reverts", "touches": "touches"},
     "note": {"relates_to": "relates_to"},
+    "directive": {"answers": "answers", "supersedes": "supersedes"},
+    "ack": {"directive": "acks"},
+    "held": {"from_gap": "answers_gap"},
 }
 
 
@@ -85,6 +96,12 @@ def _advance(entities, events):
         # Copy the one touched aggregate. Incremental readers can therefore advance a cached
         # projection without mutating the version still visible to another request.
         ent = dict(entities.get(agg, {"id": agg, "type": _type_of(agg)}))
+        # Who CREATED the aggregate is stamped once, from its first event, and survives any later
+        # payload -- including one that carries its own provenance dict. ``agent`` is the LAST
+        # writer; anything that must reach the author (a reply to a decision, a stalled task's
+        # owner) reads ``created_by``, never ``agent``.
+        first_by = (entities.get(agg, {}).get("provenance") or {})
+        first_by = first_by.get("created_by") if isinstance(first_by, dict) else None
         for k, v in payload.items():
             ent[k] = v
         ent["version"] = ev.get("result_version", ent.get("version", 0))
@@ -103,6 +120,14 @@ def _advance(entities, events):
             prov = {}
         prov.setdefault("created_at", ev.get("ts"))
         prov["updated_at"] = ev.get("ts")
+        if first_by:
+            prov["created_by"] = first_by
+        elif ev.get("agent_id"):
+            prov.setdefault("created_by", ev["agent_id"])
+        # The ledger sequence of the event that last changed this entity: the cursor a local
+        # mirror pages by (/hub/knowledge/since) — "what changed after N" needs no replay.
+        if ev.get("seq") is not None:
+            prov["seq"] = ev["seq"]
         if ev.get("agent_id"):
             prov["agent"] = ev["agent_id"]
         if ev.get("git_sha"):

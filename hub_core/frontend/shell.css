@@ -197,9 +197,7 @@ body.hub-app {
   transition: all var(--motion-base, 0.15s ease);
 }
 .facet-chip:hover { border-color: var(--accent); color: var(--accent); }
-.facet-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .facet-chip .facet-count { font-variant-numeric: tabular-nums; opacity: 0.8; font-size: 11px; }
-.facet-chip.on .facet-count { opacity: 0.9; }
 .toolbar-spacer { flex: 1; }
 .stats-bar { display: flex; align-items: center; gap: 18px; }
 .stat-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
@@ -612,7 +610,6 @@ body.hub-app {
 .mini-progress { display: inline-block; width: 78px; height: 5px; vertical-align: middle; }
 .mini-progress-label { margin-left: 7px; color: var(--muted); font: 600 10px/1 var(--mono); }
 
-.activity-list { max-height: 430px; overflow-y: auto; padding: 7px 14px 13px; }
 .activity-item {
   width: 100%;
   display: grid;
@@ -1320,6 +1317,11 @@ body.hub-app {
 .lease-chip.is-stalled { border-color: var(--warn-solid, #d99a2b); color: var(--warn-solid, #d99a2b); background: var(--warn, rgba(217,154,43,.12)); }
 .lease-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; animation: lease-breathe 2s ease-in-out infinite; }
 .lease-chip.is-stalled .lease-dot { animation: none; }
+/* The holder's console is provably gone: the lease is only waiting out its clock. */
+.lease-chip.is-gone { border-style: dashed; color: var(--muted); border-color: var(--muted); background: transparent; }
+.lease-chip.is-gone .lease-dot { animation: none; opacity: .5; }
+/* Given to a named agent, not yet started: an owner without a lease. */
+.lease-chip.is-assigned { background: transparent; border-style: dotted; }
 @keyframes lease-breathe { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.82); } }
 
 /* ---- in-flight task cards (the live stage above the tasks table) ---- */
@@ -1859,6 +1861,9 @@ body.hub-app {
 }
 .agent-card.s-working { border-color: color-mix(in srgb, var(--accent) 58%, var(--border)); }
 .agent-dot.s-working { background: var(--accent); animation: none; }
+/* Live-console presence follows the same motion budget as a held lease: activity is state,
+   not transport, so the dot holds its color without a perpetual pulse. */
+.agent-dot.s-active { animation: none; }
 .agent-status.s-working { color: var(--accent); background: var(--accent-wash); }
 .agent-card.s-idle { opacity: .82; }
 .attn-item { padding: 11px 12px; border-left-width: 2px; border-radius: calc(var(--radius-sm) + 3px); }
@@ -2019,3 +2024,312 @@ body[data-fleet="0"] .hub-backdrop::after { animation-play-state: paused; }
   .navbar-main::after,
   .progress-hero::before { display: none; }
 }
+
+/* ============ Asks: who is blocked on one fact, and for how long ============ */
+.asks-card .card-body, .errors-card .card-body { display: flex; flex-direction: column; gap: 8px; }
+.ask-item {
+  display: flex; flex-direction: column; gap: 3px; text-align: left; width: 100%;
+  padding: 9px 12px; border: 1px solid var(--border); border-left: 3px solid var(--warn-solid, #d99a2b);
+  border-radius: calc(var(--radius-sm) + 2px); background: var(--surface-2); cursor: pointer; font: inherit; color: inherit;
+}
+.ask-item:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
+.ask-item:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
+.ask-item:disabled { cursor: default; }
+.ask-head { display: flex; align-items: baseline; gap: 8px; }
+.ask-from { font-weight: 700; font-size: 12px; }
+.ask-hop { font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap;
+  padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.ask-age { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ask-title { font-size: 12.5px; font-weight: 600; }
+.ask-body { font-size: 11.5px; color: var(--muted); }
+
+/* ============ Operational errors: the queue the audit cannot see ============ */
+.err-item {
+  display: flex; flex-direction: column; gap: 3px; padding: 9px 12px;
+  border: 1px solid var(--border); border-left: 3px solid var(--fail-solid, #e5484d);
+  border-radius: calc(var(--radius-sm) + 2px); background: var(--surface-2);
+}
+.err-item.is-acked { border-left-color: var(--border); opacity: .66; }
+.err-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.err-where { font-weight: 700; font-size: 11.5px; }
+.err-age { color: var(--muted); font-size: 11px; }
+.err-claim { margin-left: auto; flex: none; white-space: nowrap; font-size: 10.5px; color: var(--muted); letter-spacing: .03em; text-transform: uppercase; }
+.err-item:not(.is-acked) .err-claim { color: var(--fail-solid, #e5484d); font-weight: 700; }
+.err-msg { font-size: 12.5px; }
+.err-meta { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.err-shape { display: flex; align-items: center; gap: 10px; padding-bottom: 4px; }
+.err-spark { flex: none; }
+
+/* ============ Fleet cards: machines, live consoles, checkpoint notes ============ */
+.agent-mach { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
+.agent-machs { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.mach-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.agent-mach.conn-online .mach-dot { background: var(--pass-solid); }
+.agent-mach.conn-activity-only .mach-dot, .agent-mach.conn-degraded .mach-dot { background: var(--warn-solid); }
+.agent-mach.conn-offline .mach-dot { background: var(--fail-solid); }
+.agent-mach.conn-offline, .agent-mach.conn-unverified { border-style: dashed; }
+.mach-state { font-size: 10px; text-transform: uppercase; letter-spacing: .03em; }
+.agent-overlap { display: flex; gap: 6px; align-items: baseline; font-size: 11.5px; padding: 4px 8px; border-radius: 6px; background: var(--warn); color: var(--text); }
+.agent-overlap .b-glyph { color: var(--warn-solid); flex: none; }
+.sess-files { flex: none; font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
+.agent-note { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-card.s-abandoned { border-left-color: var(--warn-solid, #d99a2b); }
+.agent-card.s-active { border-left-color: var(--accent, #4f7cff); }
+.agent-dot.s-abandoned { background: var(--warn-solid, #d99a2b); }
+.agent-dot.s-active { background: var(--accent, #4f7cff); animation: agent-pulse 1.8s infinite; }
+.agent-status.s-abandoned { color: var(--warn-solid, #d99a2b); }
+.agent-status.s-active { color: var(--accent, #4f7cff); }
+.agent-sessions { list-style: none; margin: 0; padding: 6px 0 0; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 3px; }
+.agent-sess { display: flex; align-items: baseline; gap: 7px; font-size: 11px; overflow: hidden; }
+.sess-id { font-family: var(--mono, monospace); color: var(--muted); flex: none; }
+.sess-cwd { color: var(--muted); flex: none; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-focus { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-held { flex: none; font-size: 10.5px; color: var(--accent); border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; white-space: nowrap; }
+.sess-age { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+.sess-rt { flex: none; font-size: 10px; line-height: 1.4; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); white-space: nowrap; }
+
+/* ============ Question threads: state, turns, lanes, the 14-day strip ============ */
+.ask-state { font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap; }
+.ask-state.is-open { color: var(--warn-solid, #d99a2b); font-weight: 700; }
+.ask-state.is-answered { color: var(--accent, #4f7cff); }
+.ask-state.is-closed { color: var(--muted); }
+.ask-item.is-settled { border-left-color: var(--border); opacity: .82; }
+.ask-answer { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; padding: 6px 9px; border-left: 2px solid var(--pass-solid, #2fae66); background: color-mix(in srgb, var(--pass, transparent) 26%, transparent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.ask-answer-by { font-size: 10.5px; color: var(--pass-solid, #2fae66); font-weight: 700; }
+.ask-answer-text { font-size: 12px; }
+.ask-stuck { font-size: 12px; padding: 6px 10px; border-left: 3px solid var(--fail-solid); background: color-mix(in srgb, var(--fail) 30%, transparent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; color: var(--fail-fg); }
+.agent-sess.is-working .sess-id { font-weight: 700; }
+.ask-lanes { display: flex; flex-wrap: wrap; gap: 6px; }
+.ask-lane { font-size: 10.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+.ask-strip { display: flex; align-items: center; gap: 3px; margin-top: 8px; }
+.ask-strip-day { display: flex; flex-direction: column; justify-content: flex-end; gap: 1px; width: 9px; }
+.ask-strip-asked, .ask-strip-answered { display: block; width: 100%; min-height: 2px; border-radius: 1px; }
+.ask-strip-asked { background: var(--warn-solid, #d99a2b); opacity: .55; }
+.ask-strip-answered { background: var(--pass-solid, #2fae66); opacity: .75; }
+
+/* ============ Error coverage: which channels are live, which are silent ============ */
+.err-coverage { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.err-cov-lbl { font-size: 10px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.err-cov-chip { font-size: 10.5px; border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+.err-cov-chip.is-live { color: var(--pass-solid, #2fae66); border-color: var(--pass-solid, #2fae66); }
+.err-cov-chip.is-silent { color: var(--muted); border-style: dashed; }
+
+/* The agent card is an <article> (its lists and meters are flow content a <button> may not
+   hold) and the agent NAME is the real control, stretched across the card so the whole
+   surface stays one click. The card is the positioning context; the overlay sits under the
+   text layer so nothing inside it is obscured. */
+.agent-card { position: relative; }
+.agent-open {
+  position: absolute; inset: 0; z-index: 1;
+  width: 100%; padding: 0; border: 0; background: none; cursor: pointer;
+  border-radius: inherit;
+}
+.agent-card:has(.agent-open:hover) { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.agent-open:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: -2px; }
+
+/* Error detail modal + overdue deadlines + clickable error rows */
+.err-item { text-align: left; width: 100%; font: inherit; color: inherit; cursor: pointer; }
+.err-item:hover:not(:disabled) { background: var(--surface-3, var(--surface-2)); }
+.err-details { font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow-y: auto; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); }
+.deadline-overdue { color: var(--fail-solid, #e5484d); font-weight: 700; font-size: 11.5px; }
+
+/* Agent updates — the first-person "what got fixed" feed. */
+.overview-scroll > .narrative-grid { display: grid; margin-bottom: clamp(18px, 2.2vw, 28px); }
+.updates-feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.update-bubble {
+  display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start;
+  padding: 10px 12px; border: 1px solid var(--border); border-left: 3px solid var(--stale-solid);
+  border-radius: var(--radius); background: var(--surface);
+}
+.update-bubble[data-kind="fixed"], .update-bubble[data-kind="shipped"],
+.update-bubble[data-kind="acked"] { border-left-color: var(--pass-solid); }
+.update-bubble[data-kind="answered"] { border-left-color: var(--info-solid); }
+.update-bubble[data-kind="escalated"] { border-left-color: var(--warn-solid); }
+.update-glyph {
+  width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent-wash); color: var(--text); font-size: 14px;
+}
+.update-meta { font-size: 12px; color: var(--muted); }
+.update-meta strong { color: var(--text); font-weight: 600; }
+.update-summary { margin: 2px 0 0; font-size: 13px; line-height: var(--leading); color: var(--text); overflow-wrap: anywhere; }
+.update-ev { display: inline-block; margin-top: 4px; font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+a.update-ev { color: var(--accent); text-decoration: underline; }
+/* ---- lineage ladder, held commits, escalation hop (tokens only; both themes) ---- */
+.btn-ghost { font: inherit; font-size: 12px; padding: 6px 12px; margin: 6px 0; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+.btn-ghost:hover { background: var(--surface-2); }
+.btn-ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn-ghost[disabled] { opacity: .6; cursor: progress; }
+.lineage-hop { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--border); }
+.lineage-hop:first-child { border-top: 0; }
+.lineage-hop .badge { flex: none; white-space: nowrap; }
+.lineage-detail { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.held-disk { margin-left: 8px; font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 10px; background: var(--fail); color: var(--fail-fg); white-space: nowrap; }
+.ask-hop { font-size: 10.5px; letter-spacing: .03em; text-transform: uppercase; white-space: nowrap;
+  padding: 1px 6px; border-radius: 10px; background: var(--warn); color: var(--warn-fg); }
+/* Record reading (surfaces.js): every field a record carries, structured values as structure. */
+.record-fields { display: grid; gap: 12px; }
+.record-field-label { margin: 0 0 4px; font-size: 11.5px; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
+.record-prose p { margin: 0 0 6px; line-height: var(--leading, 1.5); overflow-wrap: anywhere; }
+.record-prose h4 { margin: 8px 0 4px; font-size: 12.5px; }
+.record-list { margin: 0; padding-left: 18px; }
+.record-list li { margin: 2px 0; overflow-wrap: anywhere; }
+.record-values { display: grid; grid-template-columns: minmax(96px, max-content) 1fr; gap: 4px 12px; margin: 0; }
+.record-values dt { color: var(--muted); font-size: 11.5px; }
+.record-values dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.record-code { margin: 4px 0; padding: 8px 10px; font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); }
+.record-inline-code { font-family: var(--mono); font-size: .92em; padding: 0 3px; background: var(--surface-2); border-radius: 3px; }
+.record-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.record-ref { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline dotted; }
+.record-absent { color: var(--muted); font-style: italic; }
+.record-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.record-timeline li { display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: start; }
+.record-step-marker { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; font-size: 11px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); }
+.record-timeline li.is-done .record-step-marker { background: var(--pass); color: var(--pass-fg); border-color: transparent; }
+.record-step-note { margin-top: 4px; padding-left: 8px; border-left: 2px solid var(--border); color: var(--text); }
+.record-metadata { margin-top: 10px; font-size: 12px; }
+.record-metadata > summary { cursor: pointer; color: var(--muted); }
+.record-metadata[open] > summary { margin-bottom: 6px; }
+
+/* Standard components and app skeletons (the Capabilities view). */
+.catalog-panel { margin: 0 24px 14px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius, 10px); }
+.catalog-panel h3 { margin: 0 0 8px; font-size: 13px; }
+.catalog-panel .catalog-grid + h3 { margin-top: 14px; }
+@media (max-width: 640px) { .catalog-panel { margin: 0 12px 12px; } }
+.catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.catalog-item { text-align: left; font: inherit; color: inherit; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); cursor: pointer; min-width: 0; }
+.catalog-item:hover, .catalog-item:focus-visible { border-color: var(--accent); }
+.catalog-item .cell-sub { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.catalog-steps { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+.catalog-steps li.is-missing { color: var(--fail-fg); }
+.catalog-warn { margin-top: 6px; font-size: 12px; color: var(--stale-fg); }
+@media (prefers-reduced-motion: reduce) { .catalog-item { transition: none; } }
+/* ============ Seats: distribution grades and derived per-person output ============ */
+.dist-list, .built-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.dist-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; min-width: 0; }
+.dist-row.st-current .mach-dot { background: var(--pass-solid); }
+.dist-row.st-drifted .mach-dot { background: var(--warn-solid); }
+.dist-row.st-offline .mach-dot { background: var(--muted); }
+.dist-mach { font-family: var(--mono, monospace); flex: none; }
+.dist-agent { color: var(--muted); flex: none; }
+.dist-what { margin-left: auto; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dist-row.st-drifted .dist-what { color: var(--text); }
+.built-row { padding: 6px 0; border-top: 1px dashed var(--border); }
+.built-row:first-child { border-top: 0; }
+.built-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.built-person { font-weight: 600; }
+.built-recent { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.callout.pass { background: var(--pass); color: var(--pass-fg); }
+/* ============ Problems, service health, crossovers ============ */
+.prob-item.is-in_flight, .prob-item.is-escalated { border-left-color: var(--warn-solid, #d99a2b); }
+.prob-item.is-in_flight .err-claim, .prob-item.is-escalated .err-claim { color: var(--muted); font-weight: 600; }
+.card-stack { display: flex; flex-direction: column; gap: clamp(14px, 1.6vw, 22px); min-width: 0; }
+#appHealthCard .card-body, #crossoversCard .card-body { display: flex; flex-direction: column; gap: 8px; }
+.health-row { display: flex; flex-direction: column; gap: 5px; padding: 9px 12px; border: 1px solid var(--border); border-radius: calc(var(--radius-sm) + 2px); background: var(--surface-2); min-width: 0; }
+.health-row.is-dark { border-left: 3px solid var(--fail-solid, #e5484d); }
+.health-row.is-partial { border-left: 3px solid var(--warn-solid, #d99a2b); }
+.health-row.is-observed { border-left: 3px solid var(--pass-solid, #2fae66); }
+.health-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.health-gaps { margin: 0; padding-left: 18px; font-size: 11.5px; color: var(--muted); }
+.health-gaps li { overflow-wrap: anywhere; }
+.err-cov-chip.is-never { color: var(--fail-solid, #e5484d); border-color: var(--fail-solid, #e5484d); border-style: dashed; font-weight: 700; }
+/* ============ The live cluster: people, then asks + errors directly under them =====   Who is working, who needs a human and what is broken are ONE glance. The asks/errors pair
+   takes row 2 of the left column, straight under the agent cards; the attention rail spans
+   both rows beside them WITHOUT sizing either — height:0 makes its content contribute nothing
+   to track sizing (a long rail otherwise stretched row 1 and pushed the problems a screen away
+   from the people), min-height:100% then fills the rows the left column defined, and its list
+   scrolls inside its own card. */
+.live-cluster { grid-template-rows: auto auto; }
+.live-cluster > .fleet-card { grid-column: 1; grid-row: 1; }
+.live-cluster > .attention-card {
+  grid-column: 2; grid-row: 1 / span 2;
+  height: 0; min-height: 100%; align-self: stretch;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.live-cluster > .attention-card .attn-list { flex: 1 1 auto; min-height: 0; max-height: none; }
+.live-cluster > .signals-duo {
+  grid-column: 1; grid-row: 2;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(14px, 1.6vw, 22px); align-items: start;
+}
+.signals-duo > .card { margin: 0; }
+/* NATURAL HEIGHT, not stretch: stretched to the tallest card, a card pins its header at the
+   top and its chips at the bottom and the middle goes hollow. A card with less to say is
+   simply shorter. */
+.fleet-grid { align-items: start; }
+@media (max-width: 1100px) {
+  /* Single column: people, then asks/errors directly under them, then the rail at its
+     natural height — the height:0 trick only makes sense beside something. */
+  .live-cluster { grid-template-rows: none; }
+  .live-cluster > .fleet-card, .live-cluster > .signals-duo, .live-cluster > .attention-card {
+    grid-column: 1;
+  }
+  /* Explicit rows: the rail precedes the signals in the DOM, so auto placement would put it
+     between the people and their asks/errors. */
+  .live-cluster > .fleet-card { grid-row: 1; }
+  .live-cluster > .signals-duo { grid-row: 2; }
+  .live-cluster > .attention-card { grid-row: 3; }
+  .live-cluster > .attention-card { height: auto; min-height: 0; }
+  .live-cluster > .attention-card .attn-list { max-height: 340px; }
+}
+@media (max-width: 760px) {
+  .live-cluster > .signals-duo { grid-template-columns: minmax(0, 1fr); }
+}
+=======
+/* ── Knowledge tab: ranked search + agent abilities ── */
+.kn-card { padding: 12px 14px 14px; margin-bottom: 18px; }
+.kn-card .toolbar { padding: 0 0 8px; border: 0; background: none; }
+.kn-search { flex: 1; max-width: none; }
+.kn-status { margin: 2px 0 8px; }
+.kn-notice .callout { margin: 0 0 10px; }
+.kn-partial { white-space: pre-line; }
+.kn-results { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: 100%; max-width: none; }
+.kn-hit, .kn-empty { width: auto; max-width: none; min-width: 0; }
+.kn-hit, .kn-empty { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; background: var(--surface-2); }
+.kn-hit-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.kn-title { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 0; color: var(--text); font: inherit; font-weight: 600; cursor: pointer; overflow-wrap: anywhere; }
+.kn-title:hover:not([disabled]) { color: var(--accent); text-decoration: underline; }
+.kn-title[disabled] { cursor: default; }
+.kn-title:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
+.kn-score { font-variant-numeric: tabular-nums; }
+.kn-excerpt { margin-top: 4px; overflow-wrap: anywhere; }
+.kn-caps { display: grid; gap: 6px; }
+.kn-kind { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.kn-kind > summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; font-weight: 600; }
+.kn-kind > summary:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
+.kn-kind-name { flex: 1; }
+.kn-cap { padding: 8px 12px; border-top: 1px solid var(--border); display: grid; gap: 2px; }
+.kn-cap-name { font-weight: 600; overflow-wrap: anywhere; }
+.kn-overlap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-top: 6px; }
+.kn-overlap .detail-prose { flex-basis: 100%; }
+.kn-overlap .chip-link { text-transform: none; }
+/* Evidence references, one per line (a sentence of evidence renders as plain prose). */
+.evidence-list { margin: 0; padding-left: 16px; }
+.evidence-list li { overflow-wrap: anywhere; }
+
+/* Hosted components card: one row per component, version and adopters measured. */
+.comp-card { margin-top: 16px; }
+.comp-row { padding: 10px 0; border-top: 1px solid var(--border); }
+.comp-row:first-child { border-top: 0; padding-top: 0; }
+.comp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.comp-ver { font-size: 11.5px; color: var(--muted); }
+.comp-what { margin: 4px 0 2px; }
+/* ---- Console chat history (operator-only dialog) ---- */
+.chat-open { margin-top: 4px; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.chat-open:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
+.chat-log { display: flex; flex-direction: column; gap: 10px; }
+.chat-meta { margin-bottom: 2px; }
+.chat-turn { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px;
+  background: var(--surface); }
+.chat-turn.chat-user { background: var(--accent-wash); border-color: var(--accent-ring); }
+.chat-turn.chat-event { background: transparent; border-style: dashed; padding: 4px 10px; }
+.chat-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.chat-role { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); }
+.chat-user .chat-role { color: var(--accent); }
+.chat-tools { font-size: 12px; color: var(--muted); padding: 2px 10px; }
+.chat-tools summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-tools ul { margin: 4px 0 0; padding-left: 18px; }
+.chat-tools li { overflow-wrap: anywhere; }
+.tab-newest { gap: 6px; }

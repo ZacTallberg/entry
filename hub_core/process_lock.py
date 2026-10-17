@@ -47,6 +47,18 @@ def _pid_alive(pid: int | None) -> bool:
         return True
 
 
+class LockBusy(TimeoutError):
+    """A lock wait that ran out, carrying its own diagnosis.
+
+    ``str(exc)`` is the full operator message (it names the lock file). ``public`` is the same
+    diagnosis without the server path -- the form an HTTP caller may be shown, so a refused
+    claim tells the worker WHO held the lock and for how long instead of answering a bare 500."""
+
+    def __init__(self, message, public=""):
+        super().__init__(message)
+        self.public = public or "a runtime lock was busy"
+
+
 class ProcessFileLock:
     """Re-entrant-in-process, exclusive-across-processes lock.
 
@@ -92,40 +104,66 @@ class ProcessFileLock:
         # Only age can break an empty/unrecognized lock.
         return time.time() - stat.st_mtime > self.LEGACY_STALE_S
 
+    def _busy_message(self, budget, where) -> "LockBusy":
+        """Name the holder in the timeout, so a refusal carries its own diagnosis.
+
+        "runtime lock busy" says nothing about WHO held the lock or for how long, and those are
+        exactly what decide between a slow live holder, a dead one, and a recycled pid. Every
+        field is read off the lock file at the moment of giving up, best-effort.
+        """
+        pid = self._holder_pid()
+        try:
+            age = round(time.time() - self.path.stat().st_mtime, 1)
+        except OSError:
+            age = None
+        if pid == os.getpid():
+            holder = "this process (another thread)"
+        elif pid:
+            holder = f"pid {pid} ({'alive' if _pid_alive(pid) else 'dead'})"
+        else:
+            holder = "no pid recorded"
+        detail = (f"waited {budget:g}s on the {where} lock; held by {holder}, lock file age "
+                  f"{age}s, waiting pid {os.getpid()}")
+        return LockBusy(f"runtime lock busy: {self.path} -- {detail}",
+                        public=f"runtime lock busy: {self.path.name} -- {detail}")
+
     def __enter__(self):
-        self._thread_lock.acquire()
-        if _DEPTH.get(self._key, 0) == 0:
-            deadline = time.monotonic() + self.timeout
-            while True:
-                try:
-                    fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        # ONE budget covers other threads in this process as well as other processes. An
+        # unbounded in-process acquire used to spend seconds before the file timer even began,
+        # so a caller that asked for a 5 s bound could wait far longer behind a sibling thread.
+        budget = max(0.0, self.timeout)
+        deadline = time.monotonic() + budget
+        if not self._thread_lock.acquire(timeout=budget):
+            raise self._busy_message(budget, where="thread")
+        try:
+            if _DEPTH.get(self._key, 0) == 0:
+                while True:
                     try:
-                        os.write(fd, str(os.getpid()).encode("ascii"))
-                    finally:
-                        os.close(fd)
-                    break
-                except FileExistsError:
-                    if self._holder_pid() == os.getpid():
-                        # A prior Windows unlink may have failed after our critical section ended.
+                        fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                         try:
-                            self.path.unlink()
-                        except OSError:
-                            pass
-                        continue
-                    if self._breakable():
-                        try:
-                            self.path.unlink()
-                        except OSError:
-                            pass
-                        continue
-                except PermissionError:
-                    pass  # Windows delete-pending window: ordinary contention.
-                if time.monotonic() >= deadline:
-                    self._thread_lock.release()
-                    raise TimeoutError(f"runtime lock busy: {self.path}")
-                time.sleep(0.005)
-        _DEPTH[self._key] = _DEPTH.get(self._key, 0) + 1
-        return self
+                            os.write(fd, str(os.getpid()).encode("ascii"))
+                        finally:
+                            os.close(fd)
+                        break
+                    except FileExistsError:
+                        if self._holder_pid() == os.getpid() or self._breakable():
+                            # A prior Windows unlink may have failed after our critical section
+                            # ended, or the holder is dead. A DENIED unlink must still reach the
+                            # deadline check below rather than spin past it.
+                            try:
+                                self.path.unlink()
+                            except OSError:
+                                pass
+                    except PermissionError:
+                        pass  # Windows delete-pending window: ordinary contention.
+                    if time.monotonic() >= deadline:
+                        raise self._busy_message(budget, where="file")
+                    time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+            _DEPTH[self._key] = _DEPTH.get(self._key, 0) + 1
+            return self
+        except BaseException:
+            self._thread_lock.release()
+            raise
 
     def __exit__(self, *_exc):
         depth = _DEPTH.get(self._key, 1) - 1

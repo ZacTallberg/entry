@@ -5,6 +5,7 @@ these. NOT session/login gated (the agent uses a header token). Fail-closed if n
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import subprocess
@@ -16,14 +17,61 @@ from functools import wraps
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 
-from hub_core import agent_auth, collision, flow, ids, schedule, validate
-from hub_core.process_lock import ProcessFileLock
-from hub_core.store import ConflictError
+from hub_core import agent_auth, collision, flow, ids, offer, schedule, secretscan, textguard, validate
+from hub_core import errorlog as _errorlog
+from hub_core.canonical import content_hash
+from hub_core.process_lock import LockBusy, ProcessFileLock
+from hub_core.store import ConflictError, StoreBusy
 
 from . import hub_app
 
 
+def _lock_refusal(fn):
+    """A claims-lock wait that runs out answers 503 WITH ITS DIAGNOSIS, never a bare 500.
+
+    The lock's own timeout names the holder pid (alive or dead), the lock file's age and which
+    lock ran out (hub_core.process_lock.LockBusy); a caller that receives it can tell a slow live
+    holder from a dead one and retry sensibly. The full message (with the server path) goes to
+    the operational stream; the caller sees the path-free form."""
+    @wraps(fn)
+    def w(request, b):
+        try:
+            return fn(request, b)
+        except LockBusy as exc:
+            try:
+                hub_app.record_error("hub.claims", str(exc), severity="warning",
+                                     code="lock_busy",
+                                     context={"component": "hub-write",
+                                              "path": request.path_info})
+            except Exception:                                # noqa: BLE001 - never mask the refusal
+                pass
+            response = JsonResponse({"errors": [{"code": "lock_busy", "msg": exc.public,
+                                                 "retry_after_s": 2}]}, status=503)
+            response["Retry-After"] = "2"
+            return response
+    return w
+
+
 _AUTH = ContextVar("hub_write_auth", default=None)
+# The request being written, so a refusal recorded deep in the append names its route.
+_REQUEST = ContextVar("hub_write_request", default=None)
+_FINGERPRINT = re.compile(r"[0-9a-f]{16}")
+
+
+def _record_refusal(request, code, message):
+    """Put a 4xx auth refusal into the operational stream. A worker whose credential was
+    revoked or rotated out otherwise retries forever while the board shows nothing but a
+    seat going quietly stale — indistinguishable from someone stepping away. Fail-soft:
+    telemetry must never be the reason a refusal turns into a 500."""
+    try:
+        hub_app.record_error(
+            "hub.auth", message, severity="warning", code=code,
+            context={"component": "hub-write", "path": request.path_info,
+                     "method": request.method,
+                     "agent": (request.headers.get("X-Hub-Agent") or "")[:120],
+                     "machine": (request.headers.get("X-Hub-Machine") or "")[:120]})
+    except Exception:                                        # noqa: BLE001
+        pass
 
 
 def _as_bool(value, default=True):
@@ -59,41 +107,116 @@ def _body(request):
         return None
 
 
-def writer(fn=None, *, scope=None):
+def writer(fn=None, *, scope=None, methods=("POST",), presence=True):
+    """The one authenticated seam. `methods` admits GET for a token-gated READ that serves
+    another server (an app asking on behalf of a person it signed in) -- the same credential,
+    scope and refusal recording as a write, with an empty body. `scope` may be a mapping of
+    method -> scope when one route both reads and writes (read and write are different
+    authorities). `presence=False` keeps such service calls off the fleet roster: an app's
+    server is not somebody's seat."""
     if fn is None:
-        return lambda view: writer(view, scope=scope)
+        return lambda view: writer(view, scope=scope, methods=methods, presence=presence)
 
     @csrf_exempt
     @wraps(fn)
     def w(request, *a, **k):
-        if request.method != "POST":
-            return HttpResponseNotAllowed(["POST"])
+        if request.method not in methods:
+            return HttpResponseNotAllowed(list(methods))
         auth, problem = _authenticate(request)
         if not auth:
+            _record_refusal(request, "auth_refused", "a write was refused: " + str(problem))
             return JsonResponse({"errors": [{"code": "forbidden", "msg": problem}]}, status=403)
-        if not auth.allows(scope):
-            return JsonResponse({"errors": [{"code": "insufficient_scope", "required": scope,
+        # `scope` may be a mapping of method -> scope (a route that both reads and writes);
+        # a tuple is ANY-OF: a narrower operation scope that an older, broader grant must keep
+        # satisfying (answering a question was once directive:write-only).
+        required = scope.get(request.method) if isinstance(scope, dict) else scope
+        scopes = required if isinstance(required, (tuple, list)) else (required,)
+        if not required or not any(auth.allows(one) for one in scopes):
+            _record_refusal(request, "insufficient_scope",
+                            "a write was refused: subject %r lacks scope %r" % (auth.subject, required))
+            return JsonResponse({"errors": [{"code": "insufficient_scope",
+                                              "required": scopes[0] if len(scopes) == 1 else list(scopes),
                                               "subject": auth.subject}]}, status=403)
-        b = _body(request)
+        b = {} if request.method == "GET" else _body(request)
         if not isinstance(b, dict):
             return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
+        # SECRET-SHAPE REFUSAL, at the one choke point that covers every current and future
+        # writer. The ledger is append-only and hash-chained — a secret written into it can
+        # never be removed without destroying the tamper-evidence — and the highest-volume
+        # risky behaviour on an agent board is pasting failing command output into a question
+        # or note. Refuse at the door, in milliseconds, with instructions.
+        shape = secretscan.secret_problem(b)
+        if shape:
+            return JsonResponse({"errors": [{"code": "secret_shaped_payload",
+                "msg": f"refused: the payload looks like it contains {shape}. The hub ledger "
+                       f"is append-only and hash-chained — a secret written here can never be "
+                       f"removed. Redact it and retry. If a real secret already reached the "
+                       f"ledger, ROTATE it; editing the chain is not possible."}]}, status=422)
+        # CONTROL-BYTE REFUSAL, same choke point, same reasoning: a backslash escape eaten
+        # between an author's source and this call (\a inside a Windows path) lands raw BEL
+        # bytes in the ledger, invisible on the page and corrupting every reader's copy. The
+        # operational error stream is exempt — it never enters the ledger, and a stack trace
+        # with ESC colour codes refused at the door is a failure nobody would ever see.
+        if scope != "error:report":
+            controls = textguard.control_char_problems(b)
+            if controls:
+                return JsonResponse({"errors": [{"code": "control_chars",
+                    "msg": textguard.message(controls), "found": controls}]}, status=422)
         requested_agent = b.get("agent")
         if auth.mode == "scoped-agent":
             if requested_agent not in (None, "", auth.subject):
+                # State only what is ESTABLISHED: the credential resolved, so it is valid and
+                # bound; the payload named someone else. Two readings, most common first --
+                # never "your identity is stale, re-enroll", which sends a working seat to
+                # rebuild itself and still cannot do what it meant.
                 return JsonResponse({"errors": [{"code": "identity",
-                    "msg": "agent must match the immutable credential subject",
-                    "subject": auth.subject}]}, status=403)
+                    "msg": ("this credential is VALID and bound to %r, but the payload declares "
+                            "agent %r. `agent` is WHO IS WRITING, never who the write is about. "
+                            "(1) If you meant the RECIPIENT of a task, use POST /hub/api/hand "
+                            "with to=%r (client: `hand <task> --to %s`); (2) if this seat is "
+                            "configured with the wrong agent name, fix that configuration. "
+                            "Writes that omit `agent` land normally."
+                            % (auth.subject, requested_agent, requested_agent, requested_agent)),
+                    "subject": auth.subject, "declared": requested_agent}]}, status=403)
             b["agent"] = auth.subject
         else:
             # Compatibility keeps legacy seat labels only as labels. The event and lease actor is
             # always the visibly bounded shared-root subject.
             pass
+        # OBSERVED PRESENCE rides the authenticated write seam: every write refreshes the
+        # caller's seat from the optional X-Hub-Machine/-Session/-Cwd/-Focus headers, so the
+        # board knows who is on it without anyone filing a report — and an unauthenticated
+        # caller can never forge a seat. The label the write carries (or, for a scoped
+        # credential, its immutable subject) names the seat. Fail-soft by construction.
+        if presence:
+            seat = b.get("agent") if isinstance(b.get("agent"), str) and b.get("agent") else auth.subject
+            hub_app.observe_presence(seat, request.headers)
         request.hub_auth = auth
         marker = _AUTH.set(auth)
+        req_marker = _REQUEST.set(request)
         try:
             response = fn(request, b, *a, **k)
+        except ids.InvalidId as exc:
+            # UNMINTABLE ID, answered once for every writer. Each writer composes its entity id
+            # from caller-supplied input (a raw `local`, or a slug of a name), and make_id
+            # refuses what the id grammar does not accept. Unhandled, that refusal is a 500
+            # with an empty body whose only trace is the server log. Scoped to InvalidId on
+            # purpose: a blanket `except ValueError` would dress a genuine server bug up as a
+            # caller error, which is the same failure inverted.
+            response = JsonResponse({"errors": [{"code": "invalid_local", "id": exc.id,
+                "msg": "cannot mint %r: a local id must start with a letter or digit and use "
+                       "only [a-z0-9._-]. Send a valid 'local', or a name/title that slugs to "
+                       "one." % (exc.id,)}]}, status=400)
         finally:
+            _REQUEST.reset(req_marker)
             _AUTH.reset(marker)
+        # Which worker client this hub serves: a client that differs knows it is stale (and,
+        # opted in, converges itself); the seat's own version rode in on X-Hub-Client-Version.
+        try:
+            from . import hub_api
+            response["X-Hub-Client-Current"] = hub_api.hub_client_version()
+        except Exception:                                    # noqa: BLE001
+            pass
         response["X-Hub-Auth-Subject"] = auth.subject
         response["X-Hub-Auth-Mode"] = auth.mode
         response["X-Hub-Credential-Id"] = auth.credential_id
@@ -112,18 +235,57 @@ def _event_identity(fallback_agent):
             "actor_kind": auth.actor_kind}
 
 
-def _evidence_problem(ev):
+def _own_repo_name() -> str:
+    """The repository this hub resolves commits against, for an error that has to name it."""
+    try:
+        r = subprocess.run(["git", "-C", str(hub_app.WORK_ROOT), "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=5)
+        url = (r.stdout or "").strip().rstrip("/")
+        if url.endswith(".git"):
+            url = url[:-4]
+        leaf = url.replace(":", "/").rsplit("/", 1)[-1]
+        if leaf:
+            return leaf
+    except Exception:                                        # noqa: BLE001
+        pass
+    return getattr(hub_app.WORK_ROOT, "name", "") or "this repository"
+
+
+_EVIDENCE_SHA = re.compile(r"[0-9a-f]{7,40}")
+
+
+def _evidence_problem(ev, project: str = "", resolver=None):
     """Return None if the evidence string dereferences to something real, else the reason it
-    doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this repo, or an existing
-    file path resolved from WORK_ROOT. This proves existence, not confinement: strict URL evidence
-    is fetched from the Hub service account's network. 'done' evidence that cannot resolve is
-    decoration."""
-    import re
+    doesn't. Accepted forms: http(s) URL (status <400), a commit sha in this Hub's repository OR
+    in the task's own project (hub_core.commits), or an existing file path resolved from
+    WORK_ROOT. This proves existence, not confinement: strict URL evidence is fetched from the
+    Hub service account's network. 'done' evidence that cannot resolve is decoration.
+
+    THE TASK'S OWN PROJECT COUNTS. A task about another project ends with a commit in THAT
+    project's repository, and its worker finishes with that sha. Resolving a bare sha against the
+    Hub's own repository only refused every such completion as "not a commit in this repo" -- and
+    an unattended worker has nobody to re-send it. And "could not be asked" (no checkout, no
+    resolver) is said as such, never as "not a commit".
+
+    A LIST IS ORDINARY EVIDENCE: a task spanning six commits is normal, and refusing the list
+    teaches people to put the proof in the accept note and leave the evidence field empty — an
+    evidence field that stops carrying evidence is a gate everyone routes around. A comma- or
+    space-separated list splits ONLY when every part is sha- or URL-shaped (a path or prose with
+    spaces stays one item), and each part must dereference; a bad part is NAMED rather than the
+    whole string refused."""
     import urllib.request
 
     ev = (ev or "").strip()
     if not ev:
         return "empty"
+    parts = [x.strip() for x in re.split(r"[,\s]+", ev) if x.strip()]
+    if len(parts) > 1 and all(_EVIDENCE_SHA.fullmatch(x) or x.startswith(("http://", "https://"))
+                              for x in parts):
+        for part in parts:
+            why = _evidence_problem(part, project, resolver)
+            if why:
+                return "%s: %s" % (part[:60], why)
+        return None
     if ev.startswith(("http://", "https://")):
         for method in ("HEAD", "GET"):
             try:
@@ -137,11 +299,20 @@ def _evidence_problem(ev):
         return f"URL did not resolve (<400): {err}"
     if re.fullmatch(r"[0-9a-f]{7,40}", ev):
         try:
-            r = subprocess.run(["git", "-C", str(hub_app.WORK_ROOT), "cat-file", "-e", ev + "^{commit}"],
-                               capture_output=True, timeout=10)
-            return None if r.returncode == 0 else "not a commit in this repo"
-        except Exception as e:
+            resolver = resolver or hub_app.commit_resolver()
+            found, searched = resolver.has(ev, project)
+        except Exception as e:                               # noqa: BLE001
             return str(e)[:120]
+        if found:
+            return None
+        where = "; ".join(searched) or _own_repo_name()
+        if found is None:
+            return ("could not establish whether %s is a commit (searched: %s). Configure "
+                    "HUB_PROJECT_REPOS / HUB_COMMIT_RESOLVER for the task's project, or give a "
+                    "URL that dereferences" % (ev[:12], where))
+        return ("not a commit in %s. For work in a repository this hub does not resolve, send "
+                "the commit's URL on its forge, e.g. https://git.example.com/<repo>/commit/%s"
+                % (where, ev[:12]))
     try:
         if (hub_app.WORK_ROOT / ev).exists():
             return None
@@ -150,10 +321,53 @@ def _evidence_problem(ev):
     return "not a resolvable URL, commit sha, or existing path from WORK_ROOT"
 
 
-def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype):
-    """Validate the MERGED entity, then append. Returns (response_dict, http_status)."""
-    state = hub_app.current_state(s)
-    existing = state["entities"].get(eid, {})
+def _unattended_hop(request, b) -> int:
+    """How many unattended hops deep THIS write is: 0 for a person or an attended session.
+
+    An unattended launcher marks its run (the client sends ``X-Hub-Unattended: 1`` and the
+    ``X-Hub-Hop`` its launcher set, from HUB_UNATTENDED / HUB_RESPONDER_HOP); a payload ``hop``
+    is honoured too. The DEEPEST value wins, so a hop-2 run whose model also typed a bare marker
+    can never re-open the chain it was meant to end (hub_core.offer)."""
+    hops = []
+    for raw in (b.get("hop"), request.headers.get("X-Hub-Hop")):
+        try:
+            hops.append(max(0, min(9, int(raw))))
+        except (TypeError, ValueError):
+            pass
+    flagged = str(request.headers.get("X-Hub-Unattended") or "").strip().lower() in ("1", "true")
+    hop = max(hops or [0])
+    return max(hop, 1) if flagged else hop
+
+
+def _request_scoped_idem(idem, payload):
+    """Bind an idempotency key to the CONTENT it was sent with.
+
+    An idempotency key identifies a REQUEST, and the store's contract is that a repeated key
+    replays the first event verbatim. Several keys minted on this write path are derived from an
+    ENTITY instead (``ack:<id>``, a caller's per-record key), so a later, genuinely different
+    write to the same entity would collide with the key of the ORIGINAL one and be discarded --
+    answered 200 with the first event's id, success-shaped, while nothing landed.
+
+    Salting with a content hash fixes the class once, at the choke point:
+      - a genuine retry (a POST whose response was lost) carries an IDENTICAL payload, so an
+        identical key -- it still replays, which is the property the key exists for;
+      - a distinct write carries a different payload, so a different key -- it lands.
+    """
+    if not idem:
+        return idem
+    return "%s#%s" % (idem, content_hash(payload)[:12])
+
+
+def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem, etype,
+                       idem_scope=None, allocate=None):
+    """Validate the MERGED entity, then append. Returns (response_dict, http_status).
+
+    With ``idem_scope`` (creates only) a key already recorded under that id prefix replays the
+    ORIGINAL record: the response names the aggregate the first attempt created, with
+    ``replayed: true`` — a retried create is not a new record."""
+    # The entity this write is about, from its own aggregate's events -- never a fold of the
+    # whole ledger (hub_app.entity_from_store).
+    existing = hub_app.entity_from_store(s, eid)
     # OCC: updating an existing entity REQUIRES expected_version (else concurrent writes lose).
     # None is allowed only on first-create. (store.py also skips its head check on None.)
     if existing and expected_version is None:
@@ -168,22 +382,138 @@ def _append_with_store(s, type_, eid, payload, *, expected_version, agent, idem,
     try:
         before = s.latest_cursor().get("seq", 0)
         ev = s.append(aggregate=eid, type=etype, payload=payload, expected_version=expected_version,
-                      git_sha=hub_app._git_head(), idem_key=idem, **_event_identity(agent))
+                      git_sha=hub_app._git_head(), idem_key=_request_scoped_idem(idem, payload),
+                      idem_scope=idem_scope if idem else None, allocate=allocate,
+                      **_event_identity(agent))
     except ConflictError as c:
         return ({"errors": [{"code": "conflict", "expected": c.expected, "current": c.current}]}, 409)
+    except StoreBusy as busy:
+        # BACK-PRESSURE, NOT A FAULT. The lock was held past the wait budget, so nothing was
+        # appended — no line, no index row, no fsync. 503 + Retry-After (set by
+        # LedgerBusyMiddleware) says exactly that to a caller that already retries writes.
+        req = _REQUEST.get()
+        hub_app.record_ledger_busy(getattr(req, "path", "") or f"append:{etype}",
+                                   getattr(req, "method", "POST"), busy.waited_s, busy)
+        return ({"errors": [{"code": "busy", "msg": str(busy), "retry_after": 2}]}, 503)
+    # The event names the aggregate that was written: under ``allocate`` the store picked the id,
+    # and under ``idem_scope`` a retried create replays the ORIGINAL record.
+    data = {"id": ev.get("aggregate") or eid, "version": ev["result_version"],
+            "event": ev["event_id"]}
     if ev.get("seq", 0) > before:
         hub_app.publish_event(ev)
-    return ({"data": {"id": eid, "version": ev["result_version"], "event": ev["event_id"]}}, 200)
+    else:
+        # A replay: this exact request already landed (a retry whose first response was lost).
+        # Said out loud so a client can report "already recorded" rather than a second write.
+        data["replayed"] = True
+    return ({"data": data}, 200)
 
 
-def _append(type_, eid, payload, *, expected_version, agent, idem, etype):
+def _append(type_, eid, payload, *, expected_version, agent, idem, etype, idem_scope=None,
+            allocate=None):
     """Append using a request-owned store and always release its database handle."""
     s = hub_app.store()
     try:
         return _append_with_store(s, type_, eid, payload, expected_version=expected_version,
-                                  agent=agent, idem=idem, etype=etype)
+                                  agent=agent, idem=idem, etype=etype, idem_scope=idem_scope,
+                                  allocate=allocate)
     finally:
         s.close()
+
+
+# Bounded retries for the id races that remain possible OUTSIDE the store lock (the answer
+# path's find-or-create). Jittered so a burst of concurrent writers de-synchronises instead of
+# re-colliding on the same freshly read state.
+CREATE_ATTEMPTS = 8
+
+
+def _create_backoff(attempt):
+    import random
+    time.sleep(random.uniform(0.005, 0.03) * attempt)
+
+
+def _id_allocator(type_, first_guess):
+    """The allocator ``EventStore.append(allocate=...)`` calls INSIDE its write transaction: the
+    first numeric id at or above ``first_guess`` that the index does not hold."""
+    def allocate(taken):
+        number = first_guess
+        while taken("%s:%s:%04d" % (hub_app.PROJECT_KEY, type_, number)):
+            number += 1
+        return "%s:%s:%04d" % (hub_app.PROJECT_KEY, type_, number)
+    return allocate
+
+
+def _append_create(type_, payload, *, agent, idem, etype):
+    """Create a record under a SERVER-numbered id, allocated under the store's write lock.
+
+    Deriving the id from one read and appending it later is a check-then-act: a concurrent
+    create mints the same id in between, and either the loser is refused (its caller sees a
+    failure for a write it never got to make) or -- with no expected_version -- its ``created``
+    event silently overwrites the winner's record. Measured on the example board before this
+    shape: twelve parallel creates, twelve 200s, eight tasks. The snapshot high-water mark is
+    therefore only a first guess; the store picks the first id at or above it that its index
+    does not hold while it holds the lock, and the event names the id that was used. The
+    append still carries ``expected_version=0`` so a create can never land on an existing id.
+
+    The idempotency key is scoped to the type's id prefix, so a client retry of a create whose
+    response was lost replays the ORIGINAL record (under its original id) instead of minting a
+    twin under a freshly allocated one."""
+    scope = "%s:%s:" % (hub_app.PROJECT_KEY, type_)
+    state = hub_app.current_state()
+    first = ids.high_water(state["entities"], hub_app.PROJECT_KEY, type_) + 1
+    guess = "%s:%s:%04d" % (hub_app.PROJECT_KEY, type_, first)
+    return _append(type_, guess, payload, expected_version=0, agent=agent, idem=idem,
+                   etype=etype, idem_scope=scope if idem else None,
+                   allocate=_id_allocator(type_, first))
+
+
+#: How many fresh reads a server-side read-then-append gets before it gives up.
+FRESH_APPEND_ATTEMPTS = 3
+
+
+def _append_fresh(type_, eid, payload, *, agent, idem, etype, operation,
+                  attempts=FRESH_APPEND_ATTEMPTS):
+    """Append where the SERVER derives expected_version from its own read of state.
+
+    Both optimistic-concurrency refusals are retryable here, because the version this path
+    sends comes from a read a concurrent writer can beat:
+
+    - 409 — the entity moved between the read and the append;
+    - 428 — it did not EXIST at the read, so None was sent, and a concurrent writer created
+      it before this append landed. This is the half that is easy to miss: treating it as
+      terminal makes a first-ever write under contention fail with a refusal that the very
+      next fresh read would satisfy.
+
+    Anything else (schema, secret shape) is terminal — retrying cannot help. ``payload`` may
+    be a callable ``payload(existing) -> dict`` when the body is derived from the current
+    entity. When the attempts run out, WHICH status ended the loop travels with the result
+    (``ledger`` on the response body) and into the operational error stream, so a refusal
+    never reaches an operator as a bare status with no cause."""
+    resp, status = {"errors": [{"code": "append_not_attempted"}]}, 0
+    for _attempt in range(max(1, int(attempts))):
+        existing = hub_app.current_state()["entities"].get(eid)
+        body = payload(existing) if callable(payload) else payload
+        resp, status = _append(type_, eid, body,
+                               expected_version=existing.get("version") if existing else None,
+                               agent=agent, idem=idem, etype=etype)
+        if status in (200, 201) or status not in (409, 428):
+            return resp, status
+    code = ""
+    try:
+        code = str((resp.get("errors") or [{}])[0].get("code") or "")
+    except Exception:                                        # noqa: BLE001
+        code = ""
+    resp = dict(resp)
+    resp["ledger"] = {"status": status, "code": code, "attempts": attempts}
+    try:
+        hub_app.record_error(
+            "hub.write", "%s: append to %s gave up after %d fresh reads" % (operation, eid, attempts),
+            severity="error", code="append_contention",
+            details="entity=%s agent=%s attempts=%d last_status=%s last_code=%s"
+                    % (eid, agent, attempts, status, code or "-"),
+            context={"component": "hub-write", "operation": operation})
+    except Exception:                                        # noqa: BLE001 - telemetry never
+        pass                                                 # decides a write's outcome
+    return resp, status
 
 
 @writer(scope="task:write")
@@ -201,7 +531,11 @@ def task(request, b):
         return JsonResponse({"errors": [{"code": "use_claim",
             "msg": "status 'in_progress' is granted only by a successful fenced claim"}]},
             status=409)
+    refusal = _decision_guard(b, is_create)
+    if refusal is not None:
+        return refusal
     twins = []
+    fixer_step = False
     if is_create:
         state = hub_app.current_state()
         # MINT-TIME TWIN DETECTION. Two seats bitten by the same incident file the same unit
@@ -210,24 +544,60 @@ def task(request, b):
         # what hub_core.collision compares. This WARNS and never refuses: a false positive that
         # blocks a legitimate mint is worse than a duplicate the operator can see and fold.
         twins = collision.mint_collisions(b, state)
-        eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "task")
+        eid = None                          # allocated under the store lock by _append_create
         b.setdefault("status", "todo")
     else:
         eid = b["id"]
-        existing = hub_app.current_state().get("entities", {}).get(eid)
+        existing = hub_app.entity(eid) or None
         lease = hub_app._read_lease(eid)
         claimed = bool(lease and lease.get("expires", 0) > time.time())
         if existing and (existing.get("status") == "in_progress" or claimed):
-            if not hub_app.lease_authorized(eid, b.get("token"), request.hub_auth.subject,
-                                            request.hub_auth.credential_id):
+            # A PROBLEM MIRROR (hub_core/fix_tasks.py) is in progress because its problem is
+            # claimed, and nobody holds a lease on it by design. A fixer's `step` -- a change to
+            # the PLAN only, nothing else -- is how the app's Fixes panel shows the work, so it
+            # is admitted without a lease; every other field stays the problem's (the next sync
+            # rewrites it) and still needs the lease no one holds.
+            from hub_core import fix_tasks as _fix_core
+            fixer_step = (not claimed and _fix_core.is_mirror(existing)
+                          and set(b) - {"id", "agent", "expected_version", "idem_key", "token",
+                                        "type"} == {"plan"})
+            if not fixer_step and not hub_app.lease_authorized(
+                    eid, b.get("token"), request.hub_auth.subject, request.hub_auth.credential_id):
                 return JsonResponse({"errors": [{"code": "lease",
                     "msg": "mutating claimed work requires its current fenced lease and subject"}]},
                     status=409)
     payload = {k: v for k, v in b.items()
                if k not in ("agent", "expected_version", "idem_key", "token")}
     payload["type"] = "task"
-    resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"), agent=agent,
-                           idem=b.get("idem_key"), etype="task.created" if is_create else "task.updated")
+    if is_create:
+        # A task an UNATTENDED run raises carries its depth, so no unattended caller is ever
+        # offered a chain deeper than one hop (hub_core.offer). Stamped once, at birth.
+        hop = _unattended_hop(request, b)
+        if hop:
+            payload["hop"] = hop
+        else:
+            payload.pop("hop", None)
+    elif "hop" in payload:
+        # Depth only ever grows: an update may never make an escalation look attended.
+        try:
+            prior = int((existing or {}).get("hop") or 0)
+            if int(payload["hop"]) <= prior:
+                payload.pop("hop")
+        except (TypeError, ValueError):
+            payload.pop("hop")
+    if is_create:
+        resp, status = _append_create("task", payload, agent=agent, idem=b.get("idem_key"),
+                                      etype="task.created")
+    else:
+        resp, status = _append("task", eid, payload, expected_version=b.get("expected_version"),
+                               agent=agent, idem=b.get("idem_key"), etype="task.updated")
+    if fixer_step and status < 400:
+        # Put the fixer's checkpoint in its place (between "Picked up" and "Fixed") now, so the
+        # app's Fixes panel never shows a default `step` that landed on "Fixed" as fixed.
+        from . import fix_tasks as _fix_tasks
+        _fix_tasks.sync_pid(str(existing.get("source") or "")[len(_fix_core.SOURCE_PREFIX):])
+    if (resp.get("data") or {}).get("replayed"):
+        twins = []                  # the retry IS the first record; it is not its own twin
     if twins and status < 400:
         resp["warnings"] = [{"code": "possible_twin",
                              "msg": "this task shares surfaces with existing work; fold if duplicate",
@@ -235,7 +605,58 @@ def task(request, b):
     return JsonResponse(resp, status=status)
 
 
+def _is_true(value) -> bool:
+    return value in (True, 1, "1", "true")
+
+
+def _decision_guard(b, is_create):
+    """A decision (work_kind ``decision``) is a person's call and is NEVER unattended.
+
+    Turning a task INTO a decision clears the flag (fail safe). Asking for ``unattended`` on a
+    decision — on create or on a later write, including a later write that only sets the flag on
+    a task that already is a decision — is refused with its fix, because the caller expected a
+    worker that must not come. Observed once: decision tasks marked unattended were offered in
+    priority order and an unattended worker claimed one that rewrote production figures awaiting
+    their owner's check."""
+    kind = str(b.get("work_kind") or "").strip().lower()
+    if kind == "decision":
+        if _is_true(b.get("unattended")):
+            return JsonResponse({"errors": [{"code": "decision_not_unattended",
+                "msg": "a decision is a person's call and is never offered to an unattended "
+                       "worker; drop unattended, or change work_kind if this is build work"}]},
+                status=409)
+        b["unattended"] = False     # becoming (or staying) a decision always clears the flag
+        return None
+    if _is_true(b.get("unattended")) and not is_create and not kind:
+        current = (hub_app.current_state().get("entities") or {}).get(b.get("id")) or {}
+        if str(current.get("work_kind") or "").lower() == "decision":
+            return JsonResponse({"errors": [{"code": "decision_not_unattended",
+                "msg": "%s is a decision (a person's call); it is never offered to an "
+                       "unattended worker" % b.get("id")}]}, status=409)
+    return None
+
+
+def _commit_done(eid, token, agent, payload, *, verified_version, auth, idem=None):
+    """THE one terminal write every ``done`` takes, whoever grants it.
+
+    ``complete()``, a person's decision and a deploy's automatic close all end here, so ``done``
+    always rests on a held lease (re-checked under the lease lock, bound to the subject that
+    acquired it), a version bound to exactly the task that was judged, and recorded evidence —
+    there is no second way to mint terminal task state. Returns ``(response, status)``; the
+    lease is released only when the transition landed."""
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        if not hub_app.lease_authorized(eid, token, auth.subject, auth.credential_id):
+            return ({"errors": [{"code": "lease",
+                                 "msg": "lease expired or was reclaimed during verification"}]}, 409)
+        resp, status = _append("task", eid, payload, expected_version=verified_version,
+                               agent=agent, idem=idem, etype="task.transitioned")
+        if status == 200:
+            hub_app.release_lease(eid, token)
+    return resp, status
+
+
 @writer(scope="task:complete")
+@_lock_refusal
 def complete(request, b):
     eid, token, agent = b.get("id"), b.get("token"), b.get("agent", "agent")
     if not isinstance(eid, str) or not eid.strip():
@@ -266,18 +687,35 @@ def complete(request, b):
     #               typed exit-0 receipt (the Hub never runs it).
     #   "strict"  — evidence must dereference. It never manufactures a test requirement.
     strict = str(hub_app._dj_setting("HUB_DONE_STRICTNESS", "tracked")).lower() == "strict"
+    ent = hub_app.current_state().get("entities", {}).get(eid)
+    if not ent:
+        return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
     if strict:
         # FALSE-GREEN GUARD: evidence must DEREFERENCE — a string nothing can resolve is not evidence.
+        # A commit in the task's OWN project dereferences too (hub_core.commits).
+        resolver = hub_app.commit_resolver()
+        project = resolver.project_of(ent)
         bad = {}
         for e in evidence:
-            problem = _evidence_problem(e)
+            problem = _evidence_problem(e, project, resolver)
             if problem:
                 bad[str(e)[:200]] = problem
         if bad:
+            # The refusal carries its own fix. The check is all-or-nothing, so a good URL
+            # sent BESIDE an unreachable item still refuses the whole completion -- and the
+            # usual reaction, dropping the real reference into prose, loses it from the record.
             return JsonResponse({"errors": [{"code": "evidence_unresolvable",
-                "msg": "every evidence_uri must dereference (URL <400 / commit in repo / existing path from WORK_ROOT)",
+                "msg": "every evidence_uri must dereference (URL <400 / commit in this Hub's "
+                       "repository or the task's project / existing path from WORK_ROOT)",
+                "project": project or None,
+                "fix": "resend with only references this hub can resolve: a URL it can fetch "
+                       "unauthenticated, a commit pushed to the repo it serves, or a path under "
+                       "its WORK_ROOT. A reference it cannot reach (a commit in another repo, a "
+                       "page behind sign-in) belongs behind a URL it can fetch -- or the board "
+                       "runs tracked mode (HUB_DONE_STRICTNESS=tracked), which records it as "
+                       "given. Keep the reference in evidence_uri; do not move it into prose.",
                 "bad": bad}]}, status=422)
-    ent = hub_app.current_state().get("entities", {}).get(eid)
+    ent = hub_app.entity(eid)
     if not ent:
         return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
     verified_version = ent.get("version")
@@ -336,14 +774,8 @@ def complete(request, b):
     # Fence the final append against an expiry/reclaim race. Verification can take minutes, so the
     # global lease lock is deliberately acquired only for this short commit section. The original
     # entity version binds the result to exactly the task definition that was verified.
-    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
-        if not hub_app.lease_authorized(eid, token, request.hub_auth.subject,
-                                        request.hub_auth.credential_id):
-            return JsonResponse({"errors": [{"code": "lease", "msg": "lease expired or was reclaimed during verification"}]}, status=409)
-        resp, status = _append("task", eid, payload, expected_version=verified_version, agent=agent,
-                               idem=b.get("idem_key"), etype="task.transitioned")
-        if status == 200:
-            hub_app.release_lease(eid, token)
+    resp, status = _commit_done(eid, token, agent, payload, verified_version=verified_version,
+                                auth=request.hub_auth, idem=b.get("idem_key"))
     return JsonResponse(resp, status=status)
 
 
@@ -376,10 +808,15 @@ def adr(request, b):
 @writer(scope="capability:write")
 def capability(request, b):
     agent = b.get("agent", "agent")
-    name = b.get("name")
-    if not name:
-        return JsonResponse({"errors": [{"code": "need_name"}]}, status=400)
+    name = str(b.get("name") or "")
+    # Guard on the SLUG, not the raw string: a whitespace-only name is truthy and used to walk
+    # past `if not name` into an id the grammar refuses (a 500). "This name yields a usable
+    # local" is the precondition actually meant. The slug rule itself is unchanged, so a
+    # retried registration keeps resolving to the same id.
     local = b.get("local") or "".join(c if c.isalnum() or c in "._-" else "-" for c in name.lower())
+    if not name.strip() or not str(local).strip("-._"):
+        return JsonResponse({"errors": [{"code": "need_name",
+            "msg": "name is required to register a capability"}]}, status=400)
     eid = ids.make_id(hub_app.PROJECT_KEY, "cap", local)
     payload = {k: v for k, v in b.items() if k not in ("agent", "expected_version", "idem_key", "local")}
     payload["type"] = "cap"
@@ -418,10 +855,37 @@ def agent_credential(request, b):
                                       "msg": "action must be issue, revoke, or list"}]}, status=422)
 
 
+@writer(scope="credential:manage")
+def tier(request, b):
+    """Set one agent's visibility tier: `{agent, tier}` with tier operator | member |
+    contributor (or "" to clear). Identity management, so it rides the credential scope. A tier
+    is a fact about an identity — never a header a reader sends about itself."""
+    from hub_core import veil as _veil
+    agent = str(b.get("target") or "").strip().lower()
+    value = str(b.get("tier") or "").strip().lower()
+    if not _valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_target",
+            "msg": "pass target (the agent whose tier to set)"}]}, status=422)
+    try:
+        tiers = _veil.set_tier(hub_app.HUB_DIR, agent, value)
+    except (ValueError, OSError, TimeoutError) as exc:
+        return JsonResponse({"errors": [{"code": "bad_tier", "msg": str(exc)}]}, status=422)
+    return JsonResponse({"data": {"agent": agent, "tier": tiers.get(agent, ""),
+                                  "tiers": tiers}})
+
+
 def _slug(text, fallback):
     s = "".join(c if c.isalnum() or c in "._-" else "-" for c in str(text or "").lower())
     s = re.sub(r"-{2,}", "-", s).strip("-._")[:48].strip("-._")
-    return s or fallback
+    if s and s[0].isalnum():
+        return s
+    # A title that is entirely punctuation (or opens with it) used to fall back to the bare
+    # type name — which COLLIDES every such entity into one id per type — or mint an id the
+    # grammar refuses (an unhandled 500). A stable digest keeps the id deterministic: the
+    # same title always resolves to the same entity, which is what create-or-update needs.
+    if str(text or "").strip():
+        return "x" + hashlib.sha256(str(text).encode("utf-8")).hexdigest()[:16]
+    return fallback
 
 
 def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None):
@@ -445,20 +909,23 @@ def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None)
             if not str(b.get(name_field) or "").strip():
                 return JsonResponse({"errors": [{"code": "need_" + name_field,
                     "msg": f"{name_field} is required to create a {type_}"}]}, status=400)
-            state = hub_app.current_state()
             if natural_key and str(b.get(natural_key) or "").strip():
                 eid = ids.make_id(hub_app.PROJECT_KEY, type_,
                                   _slug(b[natural_key], type_))
             elif numeric:
-                eid = ids.next_id(state["entities"], hub_app.PROJECT_KEY, type_)
+                eid = None                  # allocated under the store lock by _append_create
             else:
                 eid = ids.make_id(hub_app.PROJECT_KEY, type_,
                                   b.get("local") or _slug(b[name_field], type_))
         payload = {k: v for k, v in b.items()
                    if k not in ("agent", "expected_version", "idem_key", "local")}
         payload["type"] = type_
-        resp, status = _append(type_, eid, payload, expected_version=b.get("expected_version"),
-                               agent=agent, idem=b.get("idem_key"), etype=etype)
+        if eid is None:
+            resp, status = _append_create(type_, payload, agent=agent, idem=b.get("idem_key"),
+                                          etype=etype)
+        else:
+            resp, status = _append(type_, eid, payload, expected_version=b.get("expected_version"),
+                                   agent=agent, idem=b.get("idem_key"), etype=etype)
         return JsonResponse(resp, status=status)
     view.__name__ = type_
     return view
@@ -470,6 +937,66 @@ def _simple_writer(type_, etype, *, name_field, numeric=False, natural_key=None)
 gap = _simple_writer("gap", "gap.created", name_field="title", numeric=True)
 feat = _simple_writer("feat", "feat.upserted", name_field="name")
 note = _simple_writer("note", "note.created", name_field="title")
+
+
+@writer(scope="record:retire")
+def retire(request, b):
+    """Retire (or re-open) one knowledge record: a gap, note, directive, ADR, or finding.
+
+    A record that can be FILED but never retired only grows, and a knowledge surface full of
+    claims that stopped being true is worse than an empty one. The lifecycle rules live in
+    ``hub_core.record_state``: each type moves only to a status its own schema enumerates, a
+    retirement needs a ``note`` (appended with a dated stamp, never written over the evidence),
+    and a closed/mitigated gap must name the work that closed it. The caller needs the target
+    ``record:retire`` scope AND the target type's ordinary ``<type>:write`` scope — retiring is
+    writing that record, and a credential scoped to one type cannot retire another.
+
+    Target by ``id``, or by ``type`` + exact ``title`` (the name the filer actually remembers).
+    """
+    from hub_core import record_state
+
+    agent = b.get("agent", "agent")
+    state = hub_app.current_state()
+    entities = state.get("entities", {})
+    eid = str(b.get("id") or "").strip()
+    ent = entities.get(eid) if eid else None
+    if ent is None and not eid and b.get("title") and b.get("type"):
+        want_type, want_title = str(b["type"]).strip(), str(b["title"]).strip().lower()
+        matches = [e for e in entities.values() if isinstance(e, dict)
+                   and e.get("type") == want_type
+                   and str(e.get("title") or e.get("name") or "").strip().lower() == want_title]
+        if len(matches) > 1:
+            return JsonResponse({"errors": [{"code": "ambiguous_title",
+                "msg": "several records share that title; pass the id",
+                "ids": sorted(m["id"] for m in matches)}]}, status=409)
+        ent = matches[0] if matches else None
+    if ent is None:
+        return JsonResponse({"errors": [{"code": "not_found",
+            "msg": "no such record: pass an existing id, or type + exact title"}]}, status=404)
+    otype = ent.get("type")
+    scope = f"{otype}:write"
+    if not request.hub_auth.allows(scope):
+        return JsonResponse({"errors": [{"code": "insufficient_scope", "required": scope,
+                                          "subject": request.hub_auth.subject}]}, status=403)
+    addressed_by = b.get("addressed_by")
+    if isinstance(addressed_by, str):
+        addressed_by = [addressed_by]
+    try:
+        payload = record_state.plan_retirement(
+            ent, status=b.get("status"), note=b.get("note") or "", agent=agent,
+            addressed_by=addressed_by, superseded_by=b.get("superseded_by") or "")
+    except record_state.RetireRefused as refused:
+        return JsonResponse({"errors": [{"code": refused.code, "msg": str(refused)}]}, status=422)
+    if payload.get("status") == ent.get("status") and set(payload) == {"status"}:
+        return JsonResponse({"data": {"id": ent["id"], "version": ent.get("version"),
+                                      "status": ent.get("status"), "unchanged": True}})
+    resp, status = _append(otype, ent["id"], payload,
+                           expected_version=b.get("expected_version", ent.get("version")),
+                           agent=agent, idem=b.get("idem_key"), etype=f"{otype}.retired")
+    if status == 200:
+        resp["data"]["status"] = payload["status"]
+        resp["data"]["previous_status"] = ent.get("status")
+    return JsonResponse(resp, status=status)
 
 
 @writer(scope="deploy:write")
@@ -532,7 +1059,9 @@ def deploy(request, b):
                     "tasks_closed": normalized_tasks})
     existing = entities.get(eid)
     if existing:
-        immutable_fields = ("type", "sha", "served_sha", "tasks_closed", "at", "build",
+        # `at` is when the release was recorded, not part of what was released: a re-run job
+        # that re-posts the same proof later is the same record, answered with the first `at`.
+        immutable_fields = ("type", "sha", "served_sha", "tasks_closed", "build",
                             "method", "audit_ok")
         comparable_existing = dict(existing)
         if isinstance(comparable_existing.get("tasks_closed"), list):
@@ -541,7 +1070,7 @@ def deploy(request, b):
                          for field in immutable_fields)
         if same_proof:
             return JsonResponse({"data": {"id": eid, "version": existing.get("version"),
-                                           "idempotent": True}})
+                                           "idempotent": True, "at": existing.get("at")}})
         return JsonResponse({"errors": [{"code": "immutable_deploy",
             "msg": "a deploy record is immutable; publish a different SHA for a different release",
             "id": eid, "version": existing.get("version")}]}, status=409)
@@ -551,7 +1080,132 @@ def deploy(request, b):
     resp, status = _append("deploy", eid, payload, expected_version=0,
                            agent=b.get("agent", "agent"), idem=b.get("idem_key"),
                            etype="deploy.created")
+    if status == 200:
+        # THE DEPLOY CLOSES THE LOOP (hub_core.task_completion). Fail-soft: the release record
+        # is already durable, and a task that could not be annotated must never 500 it.
+        try:
+            outcome = close_deployed_tasks(eid, sha)
+            if any(outcome.get(k) for k in ("closed", "stepped", "refused", "unchecked")):
+                resp = dict(resp, tasks=outcome)
+        except Exception as exc:                             # noqa: BLE001
+            hub_app.record_error("hub.deploy-close", "deploy-driven task closure failed: %s"
+                                 % type(exc).__name__, severity="error",
+                                 context={"component": "hub-write", "deploy": eid})
     return JsonResponse(resp, status=status)
+
+
+DEPLOY_ACTOR = "hub"
+_CLOSE_LEASE_TTL_S = 120
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _record_auto_close(eid, state, why, sha, deploy_id):
+    """Write what the automatic close did onto the task, so a task waiting on a close that
+    cannot fire SAYS so instead of looking untouched."""
+    ent = (hub_app.current_state().get("entities") or {}).get(eid)
+    if not ent or ent.get("status") == "done":
+        return
+    _append("task", eid, {"type": "task", "auto_close": {
+        "state": state, "why": str(why or "")[:200], "sha": str(sha or "")[:40],
+        "deploy": deploy_id, "at": _utc_now()}},
+        expected_version=ent.get("version"), agent=DEPLOY_ACTOR,
+        idem="deploy-close-%s:%s:%s" % (state, eid, str(sha or "")[:12]), etype="task.updated")
+
+
+def close_deployed_tasks(deploy_id, deployed_sha):
+    """Step every open task whose recorded commit this verified release contains, and finish
+    the UNATTENDED ones through the one done path (a lease the hub holds, the deploy record as
+    evidence). A person's task is only stepped. Returns what happened for the record's answer."""
+    from hub_core import task_completion
+
+    from . import deploy_close
+    state = hub_app.current_state()
+    tasks = state.get("by_type", {}).get("task", [])
+    # A sha a checkpoint's PROSE names counts only when a deploy record served exactly it.
+    served = [str(d.get("sha") or "") for d in state.get("by_type", {}).get("deploy", [])
+              if d.get("sha")]
+    matches, unchecked = task_completion.plan_matches(tasks, deployed_sha, hub_app.git_is_ancestor,
+                                                      served=served)
+    closed, stepped, refused = [], [], {}
+    for task, commit, retry in matches:
+        tid = task["id"]
+        if retry:
+            # Stepped already, and an earlier close was refused (a live lease, a version race):
+            # offered to the close again, never stepped twice.
+            res = deploy_close.close_one(task, commit, deployed_sha, deploy_id)
+            if res.get("closed"):
+                closed.append(tid)
+            elif res.get("why"):
+                refused[tid] = res["why"]
+            continue
+        at = _utc_now()
+        plan = [dict(x) for x in (task.get("plan") or []) if isinstance(x, dict)]
+        plan.append(task_completion.deployed_step(commit, deployed_sha, deploy_id, at))
+        resp, status = _append("task", tid, {"type": "task", "plan": plan},
+                               expected_version=task.get("version"), agent=DEPLOY_ACTOR,
+                               idem="deploy-step:%s:%s" % (tid, commit[:12]), etype="task.updated")
+        if status != 200:
+            refused[tid] = "the deployed checkpoint could not be written (%s)" % status
+            continue
+        if not task_completion.is_unattended(task):
+            stepped.append(tid)
+            continue
+        fresh = (hub_app.current_state().get("entities") or {}).get(tid) or task
+        res = deploy_close.close_one(fresh, commit, deployed_sha, deploy_id)
+        if res.get("closed"):
+            closed.append(tid)
+        elif res.get("why"):
+            refused[tid] = res["why"]
+    out = {"closed": closed, "stepped": stepped, "refused": refused}
+    if unchecked:
+        out["unchecked"] = ("the repository could not answer whether %s %s contained in %s; only a "
+                            "task naming the served sha exactly could close"
+                            % (", ".join(u[:12] for u in unchecked[:5]),
+                               "is" if len(unchecked) == 1 else "are", deployed_sha[:12]))
+    return out
+
+
+def _hub_finish(tid, commit, deployed_sha, deploy_id):
+    """Finish one unattended task as the hub: claim a short lease (refused when anyone else
+    holds it — the hub never finishes work another agent holds), then the shared done path.
+    Returns '' on success, else the reason."""
+    note = ("Closed by the hub: its recorded commit %s is live in verified build %s (%s)."
+            % (commit[:12], deployed_sha[:12], deploy_id))
+    payload = {"type": "task", "status": "done", "verified_by": [note],
+               "evidence_uri": [deploy_id, commit], "auto_close": {
+                   "state": "closed", "sha": commit[:40], "deploy": deploy_id, "at": _utc_now()}}
+    return hub_grant_done(tid, payload, credential_id="hub-deploy-close",
+                          idem="deploy-close:%s:%s" % (tid, deployed_sha[:12]))
+
+
+def hub_grant_done(tid, payload, *, credential_id, idem):
+    """The HUB finishing a task through the one done path: claim a short lease (refused when
+    anyone else holds it -- the hub never finishes work another agent holds), then the shared
+    terminal write (``_commit_done``). For proof the hub already holds as its own record -- a
+    verified deploy, a resolved problem. Returns '' on success, else the reason."""
+    from hub_core import agent_auth
+    auth = agent_auth.AuthContext(subject=DEPLOY_ACTOR, credential_id=credential_id,
+                                  scopes=("task:complete",), actor_kind="hub",
+                                  mode="hub-internal")
+    res = hub_app.claim(tid, DEPLOY_ACTOR, ttl_s=_CLOSE_LEASE_TTL_S, auth_subject=auth.subject,
+                        credential_id=auth.credential_id, actor_kind=auth.actor_kind)
+    if not res.get("ok"):
+        return "held by %s" % res.get("held_by")
+    ent = (hub_app.current_state().get("entities") or {}).get(tid)
+    if not ent or ent.get("status") == "done":
+        if res.get("created"):
+            hub_app.release_lease(tid, res["token"])
+        return "gone or already done"
+    resp, status = _commit_done(tid, res["token"], DEPLOY_ACTOR, payload,
+                                verified_version=ent.get("version"), auth=auth, idem=idem)
+    if status != 200:
+        if res.get("created"):
+            hub_app.release_lease(tid, res["token"])
+        return "done refused: %s %s" % (status, json.dumps(resp)[:120])
+    return ""
 
 
 @writer(scope="decision:write")
@@ -578,6 +1232,7 @@ def decision(request, b):
 
 
 @writer(scope="task:claim")
+@_lock_refusal
 def claim(request, b):
     eid, agent = b.get("id"), b.get("agent")
     if (not isinstance(eid, str) or not eid.strip() or
@@ -600,6 +1255,15 @@ def claim(request, b):
         status = ent.get("status")
         flags = state.get("flags", {}).get(eid, {})
         live = hub_app.leases()
+        # A lease whose console is provably GONE past its grace holds nothing (hub_core.liveness):
+        # it neither blocks this task nor counts against its agent or the WIP ceiling. hub_app.claim
+        # applies the same verdict and records whom the new lease took over from.
+        if any(lease.get("session") for lease in live):
+            roster_ = hub_app.roster()
+            live = [lease for lease in live
+                    if not (lease.get("session") and lease.get("session") !=
+                            (request.headers.get("X-Hub-Session") or "") and
+                            hub_app.lease_verdict(lease, roster_)["released"])]
         existing = next((lease for lease in live if lease.get("task") == eid), None)
         same_lease = bool(
             existing and existing.get("agent") == agent and
@@ -616,30 +1280,140 @@ def claim(request, b):
                                              "msg": "configured WIP ceiling reached"}]}, status=429)
         verdict = flow.classify(ent, flags, existing)
         if not same_lease and not verdict["available"]:
-            return JsonResponse({"errors": [{"code": verdict["state"],
-                                             "msg": verdict["reason"]}]}, status=409)
+            error = {"code": verdict["state"], "msg": verdict["reason"]}
+            if verdict["state"] == "leased" and existing:
+                # Say WHEN it frees: a gone holder's lease is released once its grace runs out,
+                # a live or unprovable one only by its clock.
+                v = hub_app.lease_verdict(existing)
+                frees = (v["frees_in_s"] if v["state"] == "gone" else
+                         max(0, int(float(existing.get("expires") or 0) - time.time())))
+                error.update({"holder_session": existing.get("session"),
+                              "holder_state": v["state"], "gone_s": v["gone_s"],
+                              "frees_in_s": frees})
+                error["msg"] += ("; its console %s is GONE (not seen for %ds) and the claim "
+                                 "frees itself in %ds" % (existing.get("session"), v["gone_s"],
+                                                          frees)
+                                 if v["state"] == "gone" else
+                                 "; the lease frees itself in %ds unless renewed" % frees)
+                lost = hub_app.taken_over_notice(existing, agent, _claim_session(request, b))
+                if lost:
+                    # This caller HELD the task and it was taken over while it was away: say so
+                    # by name, so it hands its changes over instead of pushing over the holder.
+                    error.update({"code": "taken_over", "msg": lost["msg"],
+                                  "held_by": lost["held_by"], "taken_at": lost["taken_at"]})
+            return JsonResponse({"errors": [error]}, status=409)
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
-                            actor_kind=request.hub_auth.actor_kind)
+                            actor_kind=request.hub_auth.actor_kind,
+                            session=_claim_session(request, b),
+                            machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
+        if res.get("took_over") and res.get("took_over_from"):
+            _notify_taken_over(eid, ent, agent, res)
         if status != "in_progress":
             transition, transition_status = _append(
                 "task", eid, {"type": "task", "status": "in_progress"},
                 expected_version=ent.get("version"), agent=agent,
                 idem=b.get("idem_key"), etype="task.transitioned",
             )
+            if keep_lease_on_raced_transition(res, transition_status):
+                # A RENEWAL whose transition lost an OCC race is not a failed claim: this worker
+                # already held the lease, and the version moved because something else — very
+                # often its own retried request, after a timeout — already did the work.
+                # Releasing here tore down a valid fencing token and made the next complete()
+                # answer "claim the task first" to a worker that had claimed. Hand back the
+                # token it still holds and the version as it now stands.
+                fresh = hub_app.current_state().get("entities", {}).get(eid) or {}
+                res["version"] = fresh.get("version", ent.get("version"))
+                res["transition_raced"] = True
+                return JsonResponse(res, status=200)
             if transition_status != 200:
-                hub_app.release_lease(eid, res["token"])
+                if res.get("created"):
+                    hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=transition_status)
             res["version"] = transition["data"]["version"]
+            # A task START carries what the board already knows about THIS task (its title
+            # and acceptance as the query, above the relevance cut-off; nothing when nothing
+            # clears it). Only on the start: a renewal re-claims too, and learns nothing new.
+            try:
+                from .knowledge_api import event_knowledge
+                known = event_knowledge("%s %s" % (ent.get("title") or "",
+                                                   str(ent.get("acceptance") or "")[:200]))
+                if known:
+                    res["knowledge"] = known
+            except Exception:                                # noqa: BLE001 - a hint, never a failure
+                pass
         else:
             res["version"] = ent.get("version")
     return JsonResponse(res, status=200 if res["ok"] else 409)
 
 
+def _notify_taken_over(eid, ent, agent, lease) -> None:
+    """Tell the console whose lease was just taken over that it lost the task.
+
+    Its own step/finish is refused with reason ``taken_over``; this message reaches it even if
+    it never tries either -- a console whose machine only dropped off the network may still be
+    editing, and must learn the task is someone else's before it pushes. Pinned to the previous
+    holder's machine and console. Never raises: a missed notice must not undo a granted claim."""
+    try:
+        prev = lease.get("took_over_from") or {}
+        old = str(prev.get("agent") or "").strip().lower()
+        if not old or not _valid_agent_name(old):
+            return
+        if prev.get("ended"):
+            why = "the console holding it (%s) had ended" % prev.get("session")
+        elif prev.get("machine_silent"):
+            why = "its machine (%s) had gone silent" % (prev.get("machine") or "?")
+        else:
+            why = "its console (%s) was %s" % (prev.get("session") or "?",
+                                               prev.get("state") or "gone")
+        body = ("%s (%s) was taken over by %s%s because %s. Stop work on it: hand anything you "
+                "changed for it to %s (a message naming your branch, sha or patch) rather than "
+                "pushing -- they are working the same outcome now.\n\n%s"
+                % (eid, ent.get("title") or "", agent,
+                   (" on " + lease["machine"]) if lease.get("machine") else "", why, agent,
+                   board_link(eid)))
+        local = "m-takeover-%s" % hashlib.sha256(
+            ("%s|%s|%s" % (eid, prev.get("claimed"), agent)).encode("utf-8")).hexdigest()[:12]
+        note = {"type": "note", "category": "context", "status": "standing",
+                "title": "%s was taken over by %s" % (eid, agent), "tags": ["message", "open"],
+                "to": old, "from_agent": str(agent), "body_md": body}
+        if prev.get("machine"):
+            note["machine"] = str(prev["machine"])[:60]
+        # Pinned to the old console only while it may still be there: a console the hub proved
+        # ended, gone or silent reads nothing, so the notice goes to the AGENT on its MACHINE
+        # (the inbox also reroutes a dead console's mail to a live one on the same machine).
+        gone = prev.get("ended") or prev.get("machine_silent") or prev.get("gone_s") is not None             or str(prev.get("state") or "") == "gone"
+        if not gone and prev.get("session") and _SESSION_ID.fullmatch(str(prev["session"])):
+            note["session"] = str(prev["session"])
+        _append("note", ids.make_id(hub_app.PROJECT_KEY, "note", local), note,
+                expected_version=None, agent=agent, idem="takeover:" + local,
+                etype="note.created")
+    except Exception:                                        # noqa: BLE001
+        logging.getLogger(__name__).exception("could not notify the previous holder of %s", eid)
+
+
+def keep_lease_on_raced_transition(res, transition_status) -> bool:
+    """Should a failed todo->in_progress transition LEAVE the lease alone?
+
+    Yes exactly when this call did not create the lease and the transition lost an OCC race.
+    A lease this call CREATED is still cleaned up on failure: nothing else holds it. The rule
+    fails toward keeping: a stranded lease expires on its own, a destroyed one strands the
+    worker that holds its token."""
+    return transition_status == 409 and not (res or {}).get("created")
+
+
+def _claim_session(request, b) -> str:
+    """The console making this claim: an explicit `session` in the body, else the observed
+    presence header every client already sends. Empty when neither is present."""
+    value = b.get("session") if isinstance(b.get("session"), str) else ""
+    return (value or request.headers.get("X-Hub-Session") or "").strip()[:64]
+
+
 @writer(scope="task:release")
+@_lock_refusal
 def release(request, b):
     eid, token = b.get("id"), b.get("token")
     if not isinstance(eid, str) or not eid.strip() or not isinstance(token, str) or not token.strip():
@@ -654,7 +1428,114 @@ def release(request, b):
     if agent and agent != lease.get("agent"):
         return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
     hub_app.release_lease(eid, token)
+    _kick_deploy_close()
     return JsonResponse({"ok": True, "task": eid, "stale_reclaim": True})
+
+
+HAND_BACK_KIND = "handed_back"
+
+
+def handed_back_count(plan) -> int:
+    """How many runs ended with this task unfinished, from its own plan. One self-counting row
+    carries `times`; a row written without it counts once. Every reader that caps attempts reads
+    this number, so it means the same thing on every machine."""
+    from hub_core import checkpoints
+    return sum(checkpoints.charged_runs(step) for step in (plan or [])
+               if isinstance(step, dict) and step.get("kind") == HAND_BACK_KIND)
+
+
+def handed_back_total(plan) -> int:
+    """Every hand-back the task's row records, charged or idle (the row's own ``times``)."""
+    from hub_core import checkpoints
+    return sum(checkpoints.total_runs(step) for step in (plan or [])
+               if isinstance(step, dict) and step.get("kind") == HAND_BACK_KIND)
+
+
+@writer(scope="task:release")
+def hand_back(request, b):
+    """A run ended with its task still in progress: put the task back on the queue, say so ONCE.
+
+    Held work whose worker has gone is the board's most expensive lie — it reads as in flight
+    while nobody is on it. `release` alone returns the lease but leaves the task `in_progress`
+    and silent. A hand-back is the whole transition, atomically under the lease lock: the fenced
+    lease is proven (token + subject), the task returns to `todo`, and its plan gains ONE
+    lifecycle row (`kind: handed_back`, `lifecycle: true`) that counts itself (`times`).
+
+    One row, not one per run: three hand-backs are a pattern about the task, and three copies of
+    one sentence are how a pattern goes unread. The row is re-appended at the END, so "the newest
+    checkpoint is a hand-back" still means nobody has picked the task up since. `lifecycle: true`
+    keeps it out of every "N of M steps done" counter while it stays visible — a hand-back
+    recorded as a done step made a task look MORE finished each time a run died on it.
+
+    ``idle: true`` says the run that ended did NO new work (no checkpoint, no push since it
+    started): it re-read a pipeline still running, or waited on a push it could not make. That
+    run did not lose to the task, so it is counted apart: ``times`` counts every hand-back and
+    the idle ones ride the row's note (``[handed back N times, M idle]``), because the plan item
+    schema is closed. The CHARGED count (``handed_back`` in the answer) is ``times`` minus the
+    idle runs; launchers cap on it and backstop every run at twice the cap."""
+    eid, token = b.get("id"), b.get("token")
+    agent = str(b.get("agent") or "agent")
+    note = str(b.get("note") or "").strip()
+    if (not isinstance(eid, str) or not eid.strip() or not isinstance(token, str)
+            or not token.strip()):
+        return JsonResponse({"errors": [{"code": "need_id_token"}]}, status=400)
+    if not note or len(note) > 600:
+        return JsonResponse({"errors": [{"code": "need_note",
+            "msg": "say why the run ended with the task unfinished (1..600 characters)"}]},
+            status=400)
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        lease = hub_app._read_lease(eid)
+        if not lease or lease.get("token") != token:
+            return JsonResponse({"errors": [{"code": "lease_mismatch"}]}, status=409)
+        if not hub_app.lease_authorized(eid, token, request.hub_auth.subject,
+                                        request.hub_auth.credential_id):
+            return JsonResponse({"errors": [{"code": "lease_subject_mismatch"}]}, status=409)
+        if b.get("agent") and b.get("agent") != lease.get("agent"):
+            return JsonResponse({"errors": [{"code": "lease_agent_mismatch"}]}, status=409)
+        state = hub_app.current_state()
+        ent = state.get("entities", {}).get(eid)
+        if not ent or ent.get("type") != "task":
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        if ent.get("status") != "in_progress":
+            return JsonResponse({"errors": [{"code": "not_in_progress",
+                "msg": "only held, unfinished work is handed back",
+                "status": ent.get("status")}]}, status=409)
+        from hub_core import checkpoints
+        plan = [dict(step) for step in (ent.get("plan") or []) if isinstance(step, dict)]
+        prior = [step for step in plan if step.get("kind") == HAND_BACK_KIND]
+        idle = sum(checkpoints.idle_runs(step) for step in prior)
+        times = handed_back_total(plan) + 1
+        if b.get("idle") is True:
+            idle += 1
+        plan = [step for step in plan if step.get("kind") != HAND_BACK_KIND]
+        if idle:
+            line = ("[handed back %d times, %d idle] %s" % (times, idle, note))[:600]
+        else:
+            line = note if times == 1 else ("[handed back %d times] %s" % (times, note))[:600]
+        plan.append({"step": note[:80], "done": True, "note": line, "kind": HAND_BACK_KIND,
+                     "lifecycle": True, "times": times,
+                     "note_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
+        resp, status = _append("task", eid, {"type": "task", "status": "todo", "plan": plan},
+                               expected_version=ent.get("version"), agent=agent,
+                               idem=b.get("idem_key"), etype="task.handed_back")
+        if status != 200:
+            return JsonResponse(resp, status=status)
+        released = hub_app.release_lease(eid, token)
+    # A close the deploy record already proved and this lease refused can land now -- in the
+    # close sweep's own thread, never on this request (deploy_close.sweep_async).
+    _kick_deploy_close()
+    return JsonResponse({"ok": True, "task": eid, "handed_back": times - idle, "idle": idle,
+                         "handed_back_total": times,
+                         "lease_released": released, "version": resp["data"]["version"]})
+
+
+def _kick_deploy_close() -> None:
+    try:
+        from . import deploy_close
+        deploy_close.sweep_async(force=True)
+    except Exception:                                        # noqa: BLE001 - never break a write
+        logging.getLogger(__name__).warning("could not start the deploy-close sweep",
+                                            exc_info=True)
 
 
 def _bounded_setting(name, default, low, high):
@@ -681,6 +1562,7 @@ def _schedule_failure_retry(task_id, not_before):
 
 
 @writer(scope="task:fail")
+@_lock_refusal
 def fail(request, b):
     """Atomically turn one real failed attempt into bounded, specialist-routable repair work."""
     eid, token, agent = b.get("id"), b.get("token"), b.get("agent", "agent")
@@ -834,6 +1716,7 @@ def fail(request, b):
 
 
 @writer(scope="task:claim")
+@_lock_refusal
 def take(request, b):
     agent = b.get("agent")
     if not isinstance(agent, str) or not agent.strip() or len(agent) > 256:
@@ -852,15 +1735,30 @@ def take(request, b):
         if hub_app.wip_status(len(live))["saturated"]:
             return JsonResponse({"errors": [{"code": "board_saturated"}]}, status=429)
         lease_ids = {row.get("task") for row in live}
-        candidates = []
+        candidates, withheld = [], {}
+        # The same offer rule the readiness rail applies (hub_core.offer): given to somebody
+        # else by name, only another machine can do it, or an unattended run's escalation that
+        # is a person's. Counted by reason so an empty pull says WHY it is empty.
+        machine = str(b.get("machine") or request.headers.get("X-Hub-Machine") or "")
+        unattended = (b.get("unattended") is True or str(
+            request.headers.get("X-Hub-Unattended") or "").strip().lower() in ("1", "true"))
+        now_s = time.time()
         for task in state.get("entities", {}).values():
             if task.get("type") != "task" or task.get("id") in lease_ids:
                 continue
             verdict = flow.classify(task, state.get("flags", {}).get(task.get("id"), {}), None)
-            if verdict["available"]:
-                candidates.append(task)
+            if not verdict["available"]:
+                continue
+            why = offer.withheld(task, agent=agent, machine=machine, unattended=unattended,
+                                 now=now_s)
+            if why:
+                key = why.split(":")[0].split(" (")[0]
+                withheld[key] = withheld.get(key, 0) + 1
+                continue
+            candidates.append(task)
         if not candidates:
-            return JsonResponse({"errors": [{"code": "no_ready_task"}]}, status=409)
+            return JsonResponse({"errors": [{"code": "no_ready_task",
+                                             "withheld": withheld}]}, status=409)
         busy_touches = set()
         entities = state.get("entities", {})
         for lease in live:
@@ -885,7 +1783,9 @@ def take(request, b):
         res = hub_app.claim(eid, agent, ttl_s=ttl,
                             auth_subject=request.hub_auth.subject,
                             credential_id=request.hub_auth.credential_id,
-                            actor_kind=request.hub_auth.actor_kind)
+                            actor_kind=request.hub_auth.actor_kind,
+                            session=_claim_session(request, b),
+                            machine=str(request.headers.get("X-Hub-Machine") or ""))
         if not res["ok"]:
             return JsonResponse(res, status=409)
         if task.get("status") != "in_progress":
@@ -893,7 +1793,8 @@ def take(request, b):
                                        expected_version=task.get("version"), agent=agent,
                                        idem=b.get("idem_key"), etype="task.transitioned")
             if code != 200:
-                hub_app.release_lease(eid, res["token"])
+                if res.get("created"):
+                    hub_app.release_lease(eid, res["token"])
                 return JsonResponse(transition, status=code)
             res["version"] = transition["data"]["version"]
         res["task"] = task
@@ -901,7 +1802,156 @@ def take(request, b):
     return JsonResponse(res)
 
 
+def known_agents():
+    """``(names, readable)``: every agent this board knows -- issued credential subjects, seats
+    presence has seen, and lease holders.
+
+    An EMPTY or unreadable roster proves nothing (a board that answered nothing looks like one
+    with no members), so a caller treats ``readable=False`` or an empty set as "cannot check",
+    never as "no such agent". Widening a check until it passes is how a typo becomes work that
+    is offered to nobody; refusing on an unreadable roster is how assignment stops working the
+    day a sidecar is unreadable."""
+    names, readable = set(), True
+    try:
+        names.update(str(row.get("subject") or "").strip().lower()
+                     for row in agent_auth.CredentialRegistry(hub_app.HUB_DIR).list_public())
+    except Exception:                                        # noqa: BLE001
+        readable = False
+    try:
+        names.update(str(k).strip().lower() for k in (hub_app.read_presence() or {}))
+    except Exception:                                        # noqa: BLE001
+        readable = False
+    try:
+        names.update(str(row.get("agent") or "").strip().lower()
+                     for row in hub_app.leases(include_expired=True))
+    except Exception:                                        # noqa: BLE001
+        readable = False
+    names.discard("")
+    return names, readable
+
+
+@writer(scope="task:claim")
+def item_claim(request, b):
+    """POST /hub/api/item-claim {item, machine, [release]} -> 200 granted | 409 held elsewhere.
+
+    One responder per NON-task item (a question, an error fingerprint) across every machine
+    (hub_core.item_claims). Behind the explicit @writer gate like every other write -- never
+    reliant on a middleware alone -- which also binds `agent` to the authenticated credential
+    instead of trusting the payload. Same authority class as claiming a task, so the same scope.
+    A caller that cannot reach this route decides for itself whether to proceed; the route is
+    strict."""
+    from hub_core import item_claims
+    item = str(b.get("item") or "").strip()
+    machine = str(b.get("machine") or request.headers.get("X-Hub-Machine") or "").strip()
+    if not item or not machine:
+        return JsonResponse({"errors": [{"code": "need_item_and_machine",
+            "msg": "item (a question id or error fingerprint) and machine are required"}]},
+            status=400)
+    session = str(b.get("session") or request.headers.get("X-Hub-Session") or "").strip()
+    try:
+        roster = hub_app.roster()
+    except Exception:                                        # noqa: BLE001 - unprovable, not gone
+        roster = None
+    try:
+        granted, row = item_claims.claim(hub_app.HUB_DIR, item, machine,
+                                         b.get("agent") or request.hub_auth.subject,
+                                         release=b.get("release") is True, session=session,
+                                         roster=roster, grace_s=hub_app.gone_grace_s())
+    except ValueError as exc:
+        return JsonResponse({"errors": [{"code": "bad_claim", "msg": str(exc)}]}, status=400)
+    if not granted:
+        who = row.get("machine") or "another machine"
+        if row.get("session"):
+            who += " (console %s)" % row["session"]
+        if row.get("holder_state") == "gone":
+            msg = ("%s is GONE (not seen for %ds); the claim frees itself in %ds -- claim again "
+                   "then" % (who, row.get("gone_s") or 0, row.get("frees_in_s") or 0))
+        else:
+            msg = ("%s claimed it %ds ago; it releases in %ds unless renewed"
+                   % (who, row.get("age_s") or 0, row.get("releases_in_s") or 0))
+        return JsonResponse({"errors": [{"code": "claimed_elsewhere", "msg": msg}],
+            "data": {"holder": row.get("machine"), "holder_session": row.get("session"),
+                     "agent": row.get("agent"), "age_s": row.get("age_s"),
+                     "releases_in_s": row.get("releases_in_s"),
+                     "holder_state": row.get("holder_state"), "gone_s": row.get("gone_s"),
+                     "frees_in_s": (row.get("frees_in_s") if row.get("holder_state") == "gone"
+                                    else row.get("releases_in_s"))}},
+            status=409)
+    hub_app._publish_realtime("item.claimed", item=item, machine=row.get("machine"),
+                              released=bool(row.get("released")))
+    return JsonResponse({"data": {"granted": True, **row}})
+
+
+@writer(scope="task:assign")
+def assign(request, b):
+    """GIVE a task to a named agent (or clear the assignment with ``to: ""``).
+
+    The payload's ``agent`` is always WHO IS WRITING; the recipient is ``to``. Conflating the two
+    is the failure this route exists to end: an assignment verb that put the recipient in the
+    identity field was refused on every call, so assignment lived in prose only a person read.
+
+    Until the recipient claims it the task carries ``assigned_to``: the board shows them as its
+    owner, their inbox (and its long-poll) carries it, and atomic pull never hands it to anybody
+    else. The recipient is checked against the known roster; an unreadable roster is "cannot
+    check" (the assignment lands with a warning), never "no such agent"."""
+    eid = b.get("id")
+    to = b.get("to")
+    if not isinstance(eid, str) or not eid.strip() or not isinstance(to, str):
+        return JsonResponse({"errors": [{"code": "need_id_to",
+            "msg": "id and to (the recipient agent; empty string clears) are required"}]},
+            status=400)
+    to = to.strip().lower()
+    if to and not _valid_agent_name(to):
+        return JsonResponse({"errors": [{"code": "bad_recipient",
+            "msg": "to must be a lowercase agent name (letters, digits, . _ -)"}]}, status=422)
+    state = hub_app.current_state()
+    ent = state.get("entities", {}).get(eid)
+    if not ent or ent.get("type") != "task":
+        return JsonResponse({"errors": [{"code": "not_found", "msg": "task does not exist"}]},
+                            status=404)
+    if ent.get("status") in ("done", "dropped", "shadow"):
+        return JsonResponse({"errors": [{"code": "terminal",
+            "msg": "task is %s; there is nothing left to hand" % ent.get("status")}]}, status=409)
+    lease = hub_app._read_lease(eid)
+    if lease and lease.get("expires", 0) > time.time():
+        return JsonResponse({"errors": [{"code": "held",
+            "msg": "%s is holding this task right now; a lease beats an assignment -- ask them "
+                   "to release it first" % (lease.get("agent") or "a worker"),
+            "held_by": lease.get("agent")}]}, status=409)
+    warnings = []
+    if to:
+        known, readable = known_agents()
+        if readable and known and to not in known:
+            return JsonResponse({"errors": [{"code": "unknown_agent",
+                "msg": "no agent named %r is known to this board; a task given to a name nobody "
+                       "answers to is offered to no one" % to,
+                "known": sorted(known)[:50]}]}, status=422)
+        if not readable or not known:
+            warnings.append({"code": "recipient_unchecked",
+                             "msg": "the roster could not be read, so %r was not checked" % to})
+    expected = b.get("expected_version", ent.get("version"))
+    delta = {"type": "task", "assigned_to": to}
+    if isinstance(b.get("machine"), str):
+        # MACHINE AFFINITY rides the hand-off when the recipient's work only exists on one
+        # machine; an empty string clears it (hub_core.offer).
+        machine = b["machine"].strip().lower()[:120]
+        if machine and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,119}", machine):
+            return JsonResponse({"errors": [{"code": "bad_machine",
+                "msg": "machine is a lowercase host name (letters, digits, . _ -)"}]},
+                status=422)
+        delta["machine"] = machine
+    resp, status = _append("task", eid, delta,
+                           expected_version=expected, agent=b.get("agent") or "operator",
+                           idem=b.get("idem_key"), etype="task.updated")
+    if status < 400:
+        resp.setdefault("data", {})["assigned_to"] = to or None
+        if warnings:
+            resp["warnings"] = warnings
+    return JsonResponse(resp, status=status)
+
+
 @writer(scope="task:heartbeat")
+@_lock_refusal
 def heartbeat(request, b):
     if (not isinstance(b.get("id"), str) or not b.get("id").strip() or
             not isinstance(b.get("token"), str) or not b.get("token").strip()):
@@ -981,3 +2031,1680 @@ def consume_launch_grant(request, b):
     if not ok:
         return JsonResponse({"errors": [{"code": "launch_refused", "msg": str(detail)}]}, status=403)
     return JsonResponse({"data": {"authorized": True, "count": int(detail)}})
+
+
+# ── The ask/answer loop: a blocked worker's question actually reaches the operator ──
+
+_ASK_NOISE = {
+    "the", "and", "for", "are", "but", "not", "you", "your", "our", "with", "that", "this",
+    "from", "have", "has", "was", "were", "why", "how", "what", "when", "who", "should",
+    "would", "could", "can", "does", "did", "any", "all", "its", "there", "their",
+}
+_ASK_DUP_BAR = 0.5          # Jaccard over significant tokens
+
+
+def _ask_tokens(text):
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9._/-]{2,}", str(text or "").lower())
+            if w not in _ASK_NOISE}
+
+
+def _ask_overlap(one, other):
+    a, b = _ask_tokens(one), _ask_tokens(other)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / float(len(a | b))
+
+
+def _already_covered(state, text):
+    """Surfaces the answer could already be on: questions (open or answered) and notes tagged
+    as shared knowledge. FAILS OPEN, deliberately and in both directions: any error returns
+    nothing and the ask proceeds — a worker blocked on a real question must never be silenced
+    by a search outage. A duplicate is cheap and visible; a lost question is neither."""
+    hits = []
+    try:
+        for eid, ent in (state.get("entities") or {}).items():
+            if not isinstance(ent, dict) or ent.get("type") != "note":
+                continue
+            tags = {str(t).lower() for t in (ent.get("tags") or [])}
+            if "question" in tags:
+                score = max(_ask_overlap(text, ent.get("title")),
+                            _ask_overlap(text, ent.get("body_md")))
+                kind = "open" if "open" in tags else "answered"
+            elif tags & {"pattern", "memory", "solution"}:
+                score = _ask_overlap(text, ent.get("title"))
+                kind = "crystallized"
+            else:
+                continue
+            if score >= _ASK_DUP_BAR:
+                hits.append({"score": round(score, 2), "id": eid, "kind": kind,
+                             "title": str(ent.get("title") or "")[:120]})
+    except Exception:                                        # noqa: BLE001 - fail open
+        return []
+    # One id, one row: a question both open on the board AND crystallized matches on two
+    # surfaces and would print twice, overstating the case against the asker.
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    best, seen = [], set()
+    for hit in hits:
+        if hit["id"] in seen:
+            continue
+        seen.add(hit["id"])
+        best.append(hit)
+    return best[:5]
+
+
+_AGENT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def _valid_agent_name(name) -> bool:
+    # fullmatch, NOT match: `$` also matches immediately before a trailing newline, so a name
+    # with one passes the shape check and then fails deeper as an id error — a 500 instead of
+    # a 422. Anchor the end for real.
+    return bool(isinstance(name, str) and _AGENT_NAME.fullmatch(name))
+
+
+_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _session_header(request) -> str:
+    """The sender's console id from X-Hub-Session, when it is shaped like one."""
+    value = str(request.headers.get("X-Hub-Session") or "").strip()
+    return value if _SESSION_ID.fullmatch(value) else ""
+
+
+def _reader_tier(agent) -> str:
+    try:
+        from . import veil as _veil
+        return _veil.tier_of(agent)
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
+@writer(scope="ask:write")
+def ask(request, b):
+    """A question as a first-class board entity that DELIVERS.
+
+    The note lands tagged `question`+`open`, carries its asker in a stable `asker` field
+    (never derived from provenance, which answering REWRITES), and the asking console's
+    session in `from_session`, so the answer is delivered back to the console that asked. It
+    wakes connected cockpits through the push plane the moment it exists and is returned by
+    /hub/inbox/wait for whoever should answer it:
+
+        to=<agent>       addressed: that agent's inbox, nobody else's
+        (no to)          the operator's
+        waited too long  every console's (HUB_ASK_UNSTICK_S; never a human-only gate)
+
+    `human_only: true` files a gate — something only a person can do — which is delivered to
+    the operator and never widened. Idempotent on the exact wording (the id is a digest of it),
+    and guarded against restatements: a question the board already has is refused with the
+    matching ids instead of minting another copy. `anyway: true` is the escape hatch."""
+    agent = b.get("agent") or ""
+    if not _valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_agent",
+            "msg": "ask requires a valid lowercase agent name (the asker) in the payload"}]},
+            status=422)
+    text = str(b.get("question") or "").strip()
+    if not text:
+        return JsonResponse({"errors": [{"code": "need_question"}]}, status=400)
+    to = str(b.get("to") or "").strip().lower()
+    if to and not _valid_agent_name(to):
+        return JsonResponse({"errors": [{"code": "bad_addressee",
+            "msg": "`to` must be a lowercase agent name"}]}, status=422)
+    if to and to == agent:
+        return JsonResponse({"errors": [{"code": "self_addressed",
+            "msg": "an ask addressed to its own asker reaches nobody"}]}, status=422)
+    state = hub_app.current_state()
+    local = "q-%s-%s" % (_slug(agent, "agent"),
+                         hashlib.sha256(text.encode("utf-8")).hexdigest()[:8])
+    eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
+    # `review: true` marks a HUMAN GATE: delivered like any question, but tagged so no
+    # unattended session may take it (the responder skips `review`; its charter forbids it).
+    # `synthetic: true` marks a SELF-TEST (the responder canary): the responder, which reads
+    # with ?include=synthetic, sees it; no person's inbox or notifier ever does.
+    tags = (["question", "open"] + (["human-only"] if b.get("human_only") else [])
+            + (["review"] if b.get("review") is True else [])
+            + (["synthetic"] if b.get("synthetic") is True and not b.get("human_only")
+               and b.get("review") is not True else []))
+    # The question is stored WHOLE. It used to be cut at 300 characters with no marker, so
+    # the operator answered the first half of a question and the asker never learned why.
+    payload = {"type": "note", "category": "context", "title": text,
+               "asker": agent, "from_agent": agent, "status": "standing", "tags": tags,
+               "body_md": str(b.get("context") or "")}
+    if to:
+        payload["to"] = to
+    session = _session_header(request)
+    if session:
+        payload["from_session"] = session
+    tier = _reader_tier(agent)
+    if tier and tier != "member":
+        # A contributor's ask says so, so an answer is checked against what that tier may see.
+        payload["tier"] = tier
+    hop = _unattended_hop(request, b)
+    if hop:
+        payload["hop"] = hop
+    related = [t for t in (b.get("relates_to") or []) if isinstance(t, str) and ":" in t]
+    if related:
+        payload["relates_to"] = related
+    existing = state["entities"].get(eid)
+    if not b.get("anyway"):
+        # THIS asker's identical wording is the same entity, not a duplicate, in exactly two
+        # cases: the question is STILL OPEN (a keyless retry of an ask whose response was lost
+        # updates it in place), or this exact keyed request already landed (the store replays
+        # it). Refusing either would report a write that landed as a failure. Once the question
+        # is answered, a keyless re-ask is a duplicate like any other: it must never overwrite
+        # the answer and silently reopen the thread.
+        still_open = (bool(existing) and existing.get("status") == "standing"
+                      and "open" in (existing.get("tags") or []))
+        own_replay = False
+        if existing and b.get("idem_key"):
+            ledger = hub_app.store()
+            try:
+                own_replay = ledger.has_idem(eid, _request_scoped_idem(b.get("idem_key"), payload))
+            finally:
+                ledger.close()
+        dups = [hit for hit in _already_covered(state, text)
+                if not ((still_open or own_replay) and hit.get("id") == eid)]
+        if dups:
+            return JsonResponse({"errors": [{"code": "duplicate_question",
+                "msg": "the board already has this question — read the matches first; if "
+                       "yours is genuinely different, retry with anyway=true; if it is the "
+                       "same one still unanswered, add to that thread instead of filing "
+                       "another copy",
+                "matches": dups}]}, status=409)
+    resp, status = _append_fresh("note", eid, payload, agent=agent, idem=b.get("idem_key"),
+                                 etype="note.created", operation="ask")
+    return JsonResponse(resp, status=status)
+
+
+@writer(scope=("ask:answer", "directive:write"))
+def answer(request, b):
+    """Close a question: reply to the asker AND retire the open question, as ONE verb.
+
+    ANYONE WHO MAY ANSWER, MAY ANSWER — the `ask:answer` scope (or the older, broader
+    `directive:write`). The gate is on the act, not the vehicle: the reply travels as a
+    directive, but this one is built here with `targets` = the asker read from the QUESTION
+    (never chosen by the caller) and `answers` = an existing question, so it cannot broadcast
+    and cannot carry a standing instruction. A single-answerer funnel is how a board's open
+    asks pile up behind the one person allowed to clear them.
+
+    The reply is ADDRESSED: to the asker, and to the asking CONSOLE when the question recorded
+    one (never broadcast to every window the asker has open). Re-answering updates the one
+    answer directive in place and bumps its `delivery_revision`, so a correction is a new
+    delivery that an ack of the old text does not close. A reply to a contributor that names a
+    hidden facet is refused unless the answerer passes `disclose: true` (and holds
+    `veil:disclose`), and the disclosure is recorded."""
+    question_id = str(b.get("question") or "").strip()
+    text = str(b.get("text") or "").strip()
+    if not question_id or not text:
+        return JsonResponse({"errors": [{"code": "need_question_and_text"}]}, status=400)
+    if ":" not in question_id:
+        question_id = ids.make_id(hub_app.PROJECT_KEY, "note", question_id)
+
+    state = hub_app.current_state()
+    note_ent = (state.get("entities") or {}).get(question_id)
+    if not note_ent or note_ent.get("type") != "note":
+        return JsonResponse({"errors": [{"code": "no_such_question", "msg": question_id}]}, status=404)
+    # The asker comes from the note's own stable field. provenance.agent is the LAST writer,
+    # which after a first answer is the answerer — deriving from it would mis-target every
+    # re-answered directive at the answerer themselves.
+    asker = str(note_ent.get("asker")
+                or (note_ent.get("provenance") or {}).get("agent") or "").strip().lower()
+    if not _valid_agent_name(asker):
+        return JsonResponse({"errors": [{"code": "unknown_asker",
+            "msg": "the question does not name who asked; issue a directive instead"}]}, status=409)
+
+    # THE ANSWER VEIL: the person who asked cannot be told a thing exists by the act of
+    # answering them.
+    try:
+        from . import veil as _veil
+        asker_tier = _veil.tier_of(asker)
+        hit = _veil.Veil(asker_tier).hit(text)
+    except Exception:                                        # noqa: BLE001
+        asker_tier, hit = "", None
+    if hit:
+        if not (b.get("disclose") and request.hub_auth.allows("veil:disclose")):
+            return JsonResponse({"errors": [{"code": "answer_would_disclose", "facet": hit,
+                "tier": asker_tier,
+                "msg": "this reply names the '%s' facet, which %s cannot see at tier %s. "
+                       "Reword it, or pass disclose=true (veil:disclose scope) to send it "
+                       "anyway and record the disclosure." % (hit, asker, asker_tier)}]},
+                status=422)
+        try:
+            hub_app.record_error(
+                "hub.veil", "a facet was disclosed to a %s in an answer" % asker_tier,
+                severity="warning", code="veil_disclosed",
+                context={"component": "veil", "facet": hit, "asker": asker,
+                         "question": question_id, "by": request.hub_auth.subject})
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    question_text = str(note_ent.get("title") or "")
+    # AN ASK FOR A PERSON IS NOT CLOSED BY ITS ASKER'S OWN UNATTENDED PASS. Measured on the
+    # instance this was lifted from: most answered asks had been "answered" by the asker's own
+    # identity, many by a responder -- a question put to the operator, closed by a pass of the
+    # machine that asked it before any person saw it. For an ask addressed to the operator (or
+    # to nobody, which is the operator's), an unattended answer from the asker is kept on the
+    # note as a PROPOSED answer and the ask stays open for a person.
+    answerer = str(b.get("agent") or request.hub_auth.subject or "").strip().lower()
+    operator = str(_operator_name() or "").strip().lower()
+    addressed = str(note_ent.get("to") or "").strip().lower()
+    for_person = (not addressed) or addressed == operator
+    if (for_person and answerer == asker and answerer != operator
+            and (b.get("unattended") is True or _unattended_hop(request, b))):
+        proposal = {"text": text[:4000], "by": answerer,
+                    "session": str(request.headers.get("X-Hub-Session") or "")[:64],
+                    "at": _utc_now()}
+
+        def _with_proposal(current):
+            # Rebuilt from the note as it stands at each attempt, so a concurrent proposal
+            # or edit survives.
+            base = dict(current or note_ent)
+            kept = {k: v for k, v in base.items() if k not in ("version", "provenance")}
+            prior = [dict(x) for x in (base.get("proposed_answers") or []) if isinstance(x, dict)]
+            kept["proposed_answers"] = (prior + [proposal])[-5:]
+            return kept
+        presp, pstatus = _append_fresh("note", question_id, _with_proposal, agent=answerer,
+                                       idem=None, etype="note.created",
+                                       operation="answer:propose")
+        if pstatus not in (200, 201):
+            return JsonResponse(presp, status=pstatus)
+        return JsonResponse({"data": {
+            "id": question_id, "proposed": True, "question_still_open": True,
+            "why": "an ask for a person is not closed by its own asker's unattended pass; your "
+                   "answer is recorded on it as a proposal for the person to confirm"}})
+    # HONEST ATTRIBUTION, mechanically -- the mirror of the ask's hop stamp. An answer an
+    # unattended run wrote reads identically to one a person wrote unless it SAYS so, and the
+    # asker deserves to know which they got. Structured (`unattended`) for every surface, and
+    # one line in the text for any reader that only sees the body.
+    unattended = bool(b.get("unattended") is True or _unattended_hop(request, b))
+    if unattended and "unattended run" not in text:
+        text += "\n\n[answered by an unattended run -- verify against the source if it matters]"
+    payload = {
+        "type": "directive",
+        "title": "Answer: %s" % question_text,
+        "body_md": text + "\n\n---\nIn answer to your question: " + question_text,
+        "targets": [asker],
+        "status": "active",
+        "answers": question_id,
+    }
+    # The ORIGINAL ask identifies the destination console — not the answering request.
+    asking_session = str(note_ent.get("from_session") or "")
+    if _SESSION_ID.fullmatch(asking_session):
+        payload["session"] = asking_session
+    if unattended:
+        payload["unattended"] = True
+    existing_dir = next(
+        (e for e in state["entities"].values()
+         if isinstance(e, dict) and e.get("type") == "directive"
+         and e.get("answers") == question_id),
+        None)
+    agent = b.get("agent", request.hub_auth.subject)
+    # One question has exactly ONE answer directive; the find-or-create is re-run on an OCC
+    # refusal, because both the id and the version it derives come from a read a concurrent
+    # answer can beat. Bounded: a race surviving three fresh reads is returned loudly.
+    resp, status, eid = {"errors": [{"code": "occ_retry_exhausted"}]}, 409, ""
+    for attempt in range(CREATE_ATTEMPTS):
+        if attempt:
+            _create_backoff(attempt)
+            state = hub_app.current_state()
+        existing_dir = next(
+            (e for e in state["entities"].values()
+             if isinstance(e, dict) and e.get("type") == "directive"
+             and e.get("answers") == question_id), None)
+        if existing_dir:
+            eid = existing_dir["id"]
+            if all(existing_dir.get(k) == payload.get(k)
+                   for k in ("title", "body_md", "targets", "session")):
+                resp, status = {"data": {"id": eid, "version": existing_dir.get("version"),
+                                         "unchanged": True}}, 200
+                break
+            payload["delivery_revision"] = int(existing_dir.get("delivery_revision") or 0) + 1
+            resp, status = _append("directive", eid, payload,
+                                   expected_version=existing_dir.get("version"),
+                                   agent=agent, idem=b.get("idem_key"), etype="directive.issued")
+        else:
+            # The id is allocated under the store lock (see _append_create); what can still
+            # race is a parallel attempt of THIS answer creating its directive first, which the
+            # re-read above turns into the in-place update.
+            payload["delivery_revision"] = 1
+            resp, status = _append_create("directive", payload, agent=agent,
+                                          idem=b.get("idem_key"), etype="directive.issued")
+            eid = (resp.get("data") or {}).get("id") or eid
+        if status not in (409, 428):
+            break
+    if status not in (200, 201):
+        return JsonResponse(resp, status=status)
+
+    # Retire the question by flipping its tags: `open` -> `answered`. The tag, not the
+    # status enum, is what marks a question as awaiting an answer.
+    still_open = False
+    try:
+        def _closed(current):
+            # Rebuilt from the entity as it stands at EACH attempt: a concurrent edit to the
+            # question must survive the retire, not be overwritten by the first read's copy.
+            base = current or note_ent
+            kept = [t for t in (base.get("tags") or []) if str(t).lower() != "open"]
+            if "answered" not in [str(t).lower() for t in kept]:
+                kept.append("answered")
+            closed = {k: v for k, v in base.items() if k not in ("version", "provenance")}
+            closed["tags"] = kept
+            return closed
+        _retire_resp, retire_status = _append_fresh(
+            "note", question_id, _closed, agent=agent, idem=None, etype="note.created",
+            operation="answer:retire-question")
+        still_open = retire_status not in (200, 201)
+    except Exception:                                    # noqa: BLE001 - never lose the reply
+        still_open = True
+    if still_open:
+        # Loud, in the response the answerer reads: an answer that leaves its question open
+        # is how a board's question count only ever grows.
+        resp.setdefault("data", {})["question_still_open"] = True
+    hub_app.receipt("question", question_id, "resolved", agent=asker,
+                    detail="answered by %s" % agent)
+    resp.setdefault("data", {})["directive"] = eid
+    resp["data"]["asker"] = asker
+    if payload.get("session"):
+        resp["data"]["session"] = payload["session"]
+    if payload.get("delivery_revision"):
+        resp["data"]["delivery_revision"] = payload["delivery_revision"]
+
+    # CRYSTALLIZE is OPT-IN: the knowledge surface rides every future duplicate-ask check, so
+    # minting indiscriminately taxes it to remember something true for one afternoon. The
+    # answerer decides, because only they know which of the two this was.
+    if not b.get("crystallize") or hit:
+        resp["data"]["crystallized"] = False
+        return JsonResponse(resp, status=status)
+    try:
+        note_local = "qa-" + question_id.rsplit(":", 1)[-1]
+        lesson_id = ids.make_id(hub_app.PROJECT_KEY, "note", note_local)
+        lesson_payload = {
+            "type": "note", "category": "method",
+            "title": question_text or ("answer for " + asker),
+            "body_md": text + "\n\n(Crystallized from a question asked by " + asker + ".)",
+            "tags": ["pattern", "memory", "answered-question"],
+            "status": "standing",
+            "relates_to": [question_id],
+        }
+        _lesson_resp, lesson_status = _append_fresh(
+            "note", lesson_id, lesson_payload, agent=agent, idem=None, etype="note.created",
+            operation="answer:crystallize")
+        resp["data"]["crystallized"] = lesson_id if lesson_status in (200, 201) else False
+    except Exception:                                    # noqa: BLE001 - bookkeeping never
+        resp["data"]["crystallized"] = False             # loses an answer already sent
+    return JsonResponse(resp, status=status)
+
+
+@writer(scope="ask:write")
+def withdraw_question(request, b):
+    """The ASKER closes their own question, with the reason it is no longer live.
+
+    Without this only `answer` closes an ask, so a question whose blocker cleared, or which a
+    newer ask superseded, stays open until somebody happens to answer it -- and the stuck count
+    it inflates is exactly what the operator reads to decide what is urgent. Several asks for
+    one blocker that has since been fixed look like several people still stuck.
+
+    Only the asker may withdraw (read from the question's stable `asker` field, never from
+    provenance, which answering rewrites): it issues no directive, so nobody else's queue is
+    written to, and a question somebody ELSE wants closed still needs its answer. A reason is
+    required and is appended to the body, so the board shows WHY it closed, never just that it
+    did. The question keeps its history: `open` is dropped and `withdrawn` added."""
+    question_id = str(b.get("question") or "").strip()
+    reason = str(b.get("reason") or "").strip()
+    agent = str(b.get("agent") or "").strip().lower()
+    if not question_id or not reason:
+        return JsonResponse({"errors": [{"code": "need_question_and_reason",
+            "msg": "withdraw names the question and WHY it is no longer live"}]}, status=400)
+    if not _valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_agent",
+            "msg": "withdraw requires the asker's agent name in the payload"}]}, status=422)
+    if ":" not in question_id:
+        question_id = ids.make_id(hub_app.PROJECT_KEY, "note", question_id)
+    state = hub_app.current_state()
+    note_ent = (state.get("entities") or {}).get(question_id)
+    tags = [str(t) for t in ((note_ent or {}).get("tags") or [])]
+    if (not note_ent or note_ent.get("type") != "note"
+            or "question" not in [t.lower() for t in tags]):
+        return JsonResponse({"errors": [{"code": "no_such_question", "msg": question_id}]},
+                            status=404)
+    asker = str(note_ent.get("asker")
+                or (note_ent.get("provenance") or {}).get("agent") or "").strip().lower()
+    if not asker or agent != asker:
+        return JsonResponse({"errors": [{"code": "not_the_asker",
+            "msg": "only %s can withdraw this question; anyone else closes it with an answer"
+                   % (asker or "its asker")}]}, status=403)
+    if "open" not in [t.lower() for t in tags]:
+        return JsonResponse({"data": {"id": question_id, "unchanged": True,
+                                      "msg": "already closed"}}, status=200)
+
+    def _withdrawn(current):
+        # Rebuilt from the entity as it stands at EACH attempt, like answer's retire: a
+        # concurrent edit to the question survives the close.
+        base = current or note_ent
+        kept = [t for t in (base.get("tags") or []) if str(t).lower() != "open"]
+        if "withdrawn" not in [str(t).lower() for t in kept]:
+            kept.append("withdrawn")
+        closed = {k: v for k, v in base.items() if k not in ("version", "provenance")}
+        closed["tags"] = kept
+        closed["body_md"] = (str(base.get("body_md") or "")
+                             + "\n\n---\nWithdrawn by %s: %s" % (asker, reason[:2000]))
+        return closed
+
+    resp, status = _append_fresh("note", question_id, _withdrawn, agent=agent,
+                                 idem=b.get("idem_key"), etype="note.created",
+                                 operation="question:withdraw")
+    if status in (200, 201):
+        hub_app.receipt("question", question_id, "resolved", agent=asker,
+                        detail="withdrawn by its asker: %s" % reason[:200])
+    return JsonResponse(resp, status=status)
+
+
+@writer(scope="directive:write")
+def directive(request, b):
+    """An operator instruction addressed to named agents (or 'all'). `directive:write` is an
+    authority tier above ordinary board writes: the shared-root credential holds it, and a
+    worker credential is issued it only deliberately."""
+    agent = b.get("agent", request.hub_auth.subject)
+    is_create = not b.get("id")
+    # PINNED DELIVERY. `machine` pins to one computer; `session` pins to one console and may
+    # be given as the console's NAME. Either way the addressed console must be LIVE now: a
+    # pinned message to a window nobody has open is delivered nowhere while reporting 201.
+    pin_session = str(b.get("session") or "").strip()
+    pin_machine = str(b.get("machine") or "").strip().lower()[:120]
+    if pin_machine:
+        b["machine"] = pin_machine
+    if pin_session:
+        targets = [str(t).strip().lower() for t in (b.get("targets") or [])]
+        live = [s for s in hub_app.live_sessions()
+                if (not targets or "all" in targets or str(s.get("agent") or "").lower() in targets)
+                and (not pin_machine or str(s.get("machine") or "").lower() == pin_machine)]
+        by_id = [s for s in live if str(s.get("session") or "") == pin_session[:8]]
+        by_name = [s for s in live if str(s.get("name") or "") == pin_session]
+        hits = by_id or by_name
+        if len(hits) != 1:
+            return JsonResponse({"errors": [{
+                "code": "console_not_live" if not hits else "console_ambiguous",
+                "msg": ("no live console %r for %s%s — it must be open now; read "
+                        "overlap.json for the roster" if not hits else
+                        "%d live consoles answer to %r; pin by session id") % (
+                    (pin_session, ", ".join(targets) or "any agent",
+                     (" on " + pin_machine) if pin_machine else "") if not hits
+                    else (len(hits), pin_session)),
+                "live": [{k: s.get(k) for k in ("agent", "machine", "session", "name")}
+                         for s in (hits or live)[:8]]}]}, status=409)
+        b["session"] = str(hits[0].get("session") or "")[:8]
+        if not pin_machine and hits[0].get("machine"):
+            b["machine"] = str(hits[0]["machine"]).lower()
+    if is_create:
+        b.setdefault("status", "active")
+        b.setdefault("targets", ["all"])
+    payload = {k: v for k, v in b.items() if k not in ("agent", "expected_version", "idem_key")}
+    payload["type"] = "directive"
+    if is_create:
+        resp, status = _append_create("directive", payload, agent=agent, idem=b.get("idem_key"),
+                                      etype="directive.issued")
+    else:
+        resp, status = _append("directive", b["id"], payload,
+                               expected_version=b.get("expected_version"), agent=agent,
+                               idem=b.get("idem_key"), etype="directive.updated")
+    return JsonResponse(resp, status=status)
+
+
+@writer(scope="ack:write")
+def ack(request, b):
+    """One agent's record that one directive (or answer) was delivered to it. A scoped
+    credential acks FOR ITSELF — the write seam already forced b['agent'] to the credential
+    subject. Stable id => replay-safe for offline retry queues.
+
+    A REVISIONED answer must be acked at the revision the reader actually read: a missing
+    revision answers 428 with the current one, a stale revision 409 — a correction is never
+    marked read by a receipt for the text it replaced."""
+    agent = b.get("agent") or ""
+    if not _valid_agent_name(agent):
+        return JsonResponse({"errors": [{"code": "need_agent"}]}, status=422)
+    directive_id = str(b.get("directive") or "")
+    if directive_id and ":" not in directive_id:
+        directive_id = ids.make_id(hub_app.PROJECT_KEY, "directive", directive_id)
+    state = hub_app.current_state()
+    target = state["entities"].get(directive_id) if directive_id else None
+    if not target:
+        return JsonResponse({"errors": [{"code": "unknown_directive", "id": directive_id}]}, status=404)
+    kind = "answer" if target.get("answers") else "directive"
+    revision = target.get("delivery_revision")
+    if revision is not None:
+        received = b.get("delivery_revision")
+        if received is None:
+            hub_app.receipt(kind, directive_id, "failed", agent=agent, outcome="need_revision")
+            return JsonResponse({"errors": [{"code": "need_delivery_revision",
+                "current_revision": revision,
+                "msg": "read the current answer with `inbox`, then ack its delivery_revision"}]},
+                status=428)
+        if type(received) is not int or received != revision:
+            hub_app.receipt(kind, directive_id, "failed", agent=agent, outcome="stale_revision",
+                            detail="acked revision %r, current %r" % (received, revision))
+            return JsonResponse({"errors": [{"code": "answer_changed",
+                "current_revision": revision,
+                "msg": "the answer was corrected after the revision you read — read the "
+                       "correction before acknowledging it"}]}, status=409)
+    local = "%s--%s" % (directive_id.rsplit(":", 1)[-1], _slug(agent, "agent"))
+    eid = ids.make_id(hub_app.PROJECT_KEY, "ack", local)
+    payload = {"type": "ack", "directive": directive_id, "agent": agent,
+               "note": str(b.get("note") or "")}
+    idem = b.get("idem_key") or f"ack:{eid}"
+    if revision is not None:
+        payload["delivery_revision"] = revision
+        idem += f":revision:{revision}"
+    resp, status = _append_fresh("ack", eid, payload, agent=agent, idem=idem,
+                                 etype="ack.recorded", operation="ack")
+    if status in (200, 201):
+        hub_app.receipt(kind, directive_id, "delivered", agent=agent,
+                        detail=str(b.get("note") or "")[:200])
+        _retire_if_fully_acked(directive_id, agent)
+    else:
+        hub_app.receipt(kind, directive_id, "failed", agent=agent, outcome="append_%s" % status)
+    return JsonResponse(resp, status=status)
+
+
+#: A message's life, in hours. A message between consoles is about work in flight; anything
+#: that must outlive a week is a task, a finding or a lesson, not mail.
+MESSAGE_EXPIRES_MIN_H = 0.25
+MESSAGE_EXPIRES_MAX_H = 168.0
+_STRUCTURED_KEYS = ("finding", "evidence", "split")
+
+
+def _message_expires_default_h() -> float:
+    try:
+        h = float(os.environ.get("HUB_MESSAGE_EXPIRES_H") or 24)
+    except ValueError:
+        h = 24.0
+    return min(max(h, MESSAGE_EXPIRES_MIN_H), MESSAGE_EXPIRES_MAX_H)
+
+
+def _message_expires_at(b):
+    """(expires_at ISO, None) or (None, refusal). The HUB's clock decides: `expires_hours` is
+    counted from now; a sent `expires_at` (the client fixes it at intent time, so a send queued
+    offline is not replayed with a fresh life) must parse and is capped at the ceiling; neither
+    means the default life. A skewed sender clock can shorten a message, never make it immortal."""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    ceiling = now + _dt.timedelta(hours=MESSAGE_EXPIRES_MAX_H)
+    hours, raw = b.get("expires_hours"), b.get("expires_at")
+    if hours is not None:
+        try:
+            h = float(hours)
+        except (TypeError, ValueError):
+            h = -1.0
+        if not (MESSAGE_EXPIRES_MIN_H <= h <= MESSAGE_EXPIRES_MAX_H):
+            return None, JsonResponse({"errors": [{"code": "bad_expires",
+                "msg": "expires_hours must be a number between %s and %s"
+                       % (MESSAGE_EXPIRES_MIN_H, MESSAGE_EXPIRES_MAX_H)}]}, status=422)
+        at = now + _dt.timedelta(hours=h)
+    elif raw not in (None, ""):
+        try:
+            at = _dt.datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=_dt.timezone.utc)
+        except (TypeError, ValueError):
+            return None, JsonResponse({"errors": [{"code": "bad_expires",
+                "msg": "expires_at must be an ISO-8601 instant"}]}, status=422)
+        at = min(at, ceiling)
+    else:
+        at = now + _dt.timedelta(hours=_message_expires_default_h())
+    return at.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), None
+
+
+def _message_structured(b):
+    """({finding, evidence, split} as capped strings, None) or (None, refusal)."""
+    block = b.get("structured")
+    if block in (None, {}):
+        return {}, None
+    if not isinstance(block, dict) or set(block) - set(_STRUCTURED_KEYS):
+        return None, JsonResponse({"errors": [{"code": "bad_structured",
+            "msg": "structured takes only %s, as strings" % ", ".join(_STRUCTURED_KEYS)}]},
+            status=422)
+    return {k: str(block[k]).strip()[:2000] for k in _STRUCTURED_KEYS
+            if isinstance(block.get(k), (str, int, float)) and str(block[k]).strip()}, None
+
+
+@writer(scope="message:write")
+def message(request, b):
+    """Agent-to-agent mail: `{to, note, title?, session?, machine?}` — no operator in the loop.
+
+    The note lands tagged `message`+`open` with `to`, the sender in `from_agent` and the
+    sender's console in `from_session` (from X-Hub-Session), so a reply can be addressed back to
+    exactly that console. `session` addresses one of the recipient's consoles; `machine` pins
+    delivery to one of their computers. It is delivered by the recipient's inbox/wait like any
+    other item and retired by /hub/api/message/ack. Idempotent on (sender, recipient, text).
+
+    A MESSAGE HAS AN END: `expires_at` is stamped (from `expires_hours`, a client-fixed
+    `expires_at`, or HUB_MESSAGE_EXPIRES_H, default 24 h). Past it the note is kept and listed
+    (inbox.json?expired=1) but never delivered into a console. A console that reopens after days
+    is otherwise handed every stale message as if it were current. `structured`
+    {finding, evidence, split} is the shape a peer can act on without re-parsing prose; it is
+    also appended to the body, so a reader that knows nothing of it still sees every word."""
+    agent = b.get("agent") or request.hub_auth.subject or ""
+    to = str(b.get("to") or "").strip().lower()
+    note_text = str(b.get("note") or b.get("body") or "").strip()
+    if not _valid_agent_name(str(agent)) or not _valid_agent_name(to):
+        return JsonResponse({"errors": [{"code": "need_sender_and_recipient",
+            "msg": "message needs a valid sender (agent) and recipient (to)"}]}, status=422)
+    if not note_text:
+        return JsonResponse({"errors": [{"code": "need_note"}]}, status=400)
+    target_session = str(b.get("session") or "").strip()
+    if target_session and not _SESSION_ID.fullmatch(target_session):
+        return JsonResponse({"errors": [{"code": "bad_session"}]}, status=422)
+    expires_at, refusal = _message_expires_at(b)
+    if refusal is not None:
+        return refusal
+    structured, refusal = _message_structured(b)
+    if refusal is not None:
+        return refusal
+    title = str(b.get("title") or note_text.splitlines()[0])[:300]
+    local = "m-%s-%s" % (_slug(agent, "agent"), hashlib.sha256(
+        ("%s|%s|%s" % (to, target_session, note_text)).encode("utf-8")).hexdigest()[:8])
+    eid = ids.make_id(hub_app.PROJECT_KEY, "note", local)
+    state = hub_app.current_state()
+    existing = state["entities"].get(eid)
+    if existing and "open" in [str(t).lower() for t in (existing.get("tags") or [])]:
+        return JsonResponse({"data": {"id": eid, "already": True}})
+    body_md = note_text
+    if structured:
+        body_md += "\n\n" + "\n".join("%s: %s" % (k.capitalize(), structured[k])
+                                      for k in _STRUCTURED_KEYS if k in structured)
+    payload = {"type": "note", "category": "context", "title": title, "status": "standing",
+               "tags": ["message", "open"], "to": to, "from_agent": str(agent),
+               "body_md": body_md, "expires_at": expires_at}
+    if structured:
+        payload["structured"] = structured
+    sender_session = _session_header(request)
+    if sender_session:
+        payload["from_session"] = sender_session
+    if target_session:
+        payload["session"] = target_session
+    machine = str(b.get("machine") or "").strip().lower()[:60]
+    if not machine and target_session:
+        # A message for a CONSOLE is a message for that console's MACHINE: stamped here so
+        # that when the console ends, delivery prefers another console on the same computer
+        # instead of whichever console of the agent happened to be freshest.
+        machine = _session_machine(to, target_session)
+    if machine:
+        payload["machine"] = machine
+    resp, status = _append("note", eid, payload,
+                           expected_version=existing.get("version") if existing else None,
+                           agent=str(agent), idem=b.get("idem_key"), etype="note.created")
+    if status in (200, 201):
+        resp.setdefault("data", {})["to"] = to
+        resp["data"]["expires_at"] = expires_at
+        if target_session:
+            resp["data"]["session"] = target_session
+    return JsonResponse(resp, status=status)
+
+
+def _session_machine(agent, session) -> str:
+    """The machine a live console of ``agent`` runs on, from presence; '' when unknown."""
+    from hub_core.inbox import sid_match
+    try:
+        for row in hub_app.live_sessions():
+            if (str(row.get("agent") or "").lower() == str(agent or "").lower()
+                    and sid_match(row.get("session_id") or row.get("session"), session)):
+                return str(row.get("machine") or "").strip().lower()[:60]
+    except Exception:                                        # noqa: BLE001 - a hint, never a failure
+        pass
+    return ""
+
+
+@writer(scope="message:write")
+def message_ack(request, b):
+    """Retire an addressed message once it reached its recipient. Only the recipient may retire
+    it — a REFUSED delivery is recorded as a failed receipt, because without it an item that
+    never reached anyone looks exactly like one that did. A message pinned to one machine is
+    retired only from that machine."""
+    mid = str(b.get("id") or "").strip()
+    if not mid:
+        return JsonResponse({"errors": [{"code": "need_id"}]}, status=400)
+    if ":" not in mid:
+        mid = ids.make_id(hub_app.PROJECT_KEY, "note", mid)
+    state = hub_app.current_state()
+    ent = (state.get("entities") or {}).get(mid)
+    tags = [str(t).lower() for t in ((ent or {}).get("tags") or [])]
+    if not ent or ent.get("type") != "note" or "message" not in tags:
+        return JsonResponse({"errors": [{"code": "no_such_message", "msg": mid}]}, status=404)
+    agent = str(b.get("agent") or request.hub_auth.subject or "").lower()
+    to = str(ent.get("to") or "").lower()
+    if to and to != agent and request.hub_auth.mode == "scoped-agent":
+        hub_app.receipt("message", mid, "failed", agent=to, outcome="not_recipient",
+                        detail="%s tried to retire mail addressed to %s" % (agent, to))
+        return JsonResponse({"errors": [{"code": "not_recipient",
+            "msg": "that message is addressed to %s" % to}]}, status=403)
+    pinned = str(ent.get("machine") or "").strip().lower()
+    reader_machine = str(request.headers.get("X-Hub-Machine") or "").strip().lower()
+    if pinned and reader_machine and pinned != reader_machine:
+        hub_app.receipt("message", mid, "failed", agent=to, outcome="other_machine",
+                        detail="pinned to %s, retired from %s" % (pinned, reader_machine))
+        return JsonResponse({"errors": [{"code": "other_machine",
+            "msg": "that message is for %s, not %s" % (pinned, reader_machine)}]}, status=409)
+    if "open" not in tags:
+        return JsonResponse({"data": {"id": mid, "already": True}})
+    closed = {k: v for k, v in ent.items() if k not in ("version", "provenance")}
+    closed["tags"] = [t for t in (ent.get("tags") or []) if str(t).lower() != "open"] + ["delivered"]
+    via = str(b.get("via") or "")[:40]
+    if via:
+        closed["found_at"] = "delivered via %s" % via
+    resp, status = _append("note", mid, closed, expected_version=ent.get("version"),
+                           agent=agent or "agent", idem=b.get("idem_key") or f"msgack:{mid}",
+                           etype="note.created")
+    hub_app.receipt("message", mid, "delivered" if status in (200, 201) else "failed",
+                    agent=to or agent, outcome="ok" if status in (200, 201) else "append_%s" % status,
+                    detail=("delivered via %s" % via) if via else "")
+    return JsonResponse(resp, status=status)
+
+
+def _retire_if_fully_acked(directive_id, actor):
+    """Close a directive once every agent it names has acknowledged it. Without this,
+    delivered-and-read directives sit "active" forever and the queue reads as a backlog —
+    and a queue people learn to ignore is worse than no queue. Deliberately conservative:
+    only explicitly named targets ('all' has no closed roster to check off), and any
+    failure is swallowed — an ack that was correctly recorded must not fail because the
+    tidy-up afterwards did."""
+    try:
+        state = hub_app.current_state()
+        ent = (state.get("entities") or {}).get(directive_id)
+        if not ent or ent.get("status") != "active":
+            return
+        targets = [str(t).strip().lower() for t in (ent.get("targets") or []) if str(t).strip()]
+        if not targets or "all" in targets:
+            return
+        from hub_core.inbox import ack_covers
+        acked = set()
+        for other in (state.get("entities") or {}).values():
+            if other.get("type") == "ack" and ack_covers(ent, other):
+                acked.add(str(other.get("agent") or "").strip().lower())
+        if not all(t in acked for t in targets):
+            return
+        payload = {k: ent[k] for k in ("type", "title", "body_md", "targets",
+                                       "remediation_cmd", "answers", "session",
+                                       "delivery_revision") if k in ent}
+        payload["status"] = "fulfilled"
+        _append("directive", directive_id, payload, expected_version=ent.get("version"),
+                agent=actor, idem=f"retire:{directive_id}:{ent.get('version')}",
+                etype="directive.updated")
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
+@writer(scope="presence:write")
+def presence_ping(request, b):
+    """The seat heartbeat. An ordinary write proves an agent ACTED; only a repeating
+    heartbeat proves the seat is still there after the request returned. A session between
+    tasks pings here (with the X-Hub-* headers) so the live-console view stays true, and
+    the response publishes the shared freshness contract so clients and the board can never
+    quietly disagree about what offline means."""
+    from hub_core import presence as _presence
+    agent = b.get("agent") or request.hub_auth.subject or ""
+    if not _valid_agent_name(str(agent)):
+        return JsonResponse({"errors": [{"code": "need_agent"}]}, status=422)
+    # The session DIGEST rides the heartbeat body: what a supervisor distilled from the
+    # session's own activity (phase, doing, narration, last result, targets) and, for an
+    # unattended run, its lifecycle (kind, run, subject, started/ended, outcome). Bounded and
+    # typed by hub_core.presence; unknown keys are dropped.
+    digest = b.get("session_state") if isinstance(b.get("session_state"), dict) else {}
+    hub_app.observe_presence(agent, request.headers, heartbeat=True, extra=digest)
+    return JsonResponse({"data": {"ok": True, "server_time": time.time(),
+                                  **_presence.contract()}})
+
+
+@writer(scope="presence:manage")
+def forget_presence(request, b):
+    """Drop a stale or phantom seat row. Without this, any machine that ever spoke to the
+    hub keeps a presence row until the retirement horizon — a decommissioned laptop or a
+    one-off probe sits on the fleet strip looking like a teammate, and the only remedy is
+    editing files on the host. Refuses to drop everything: at least one of machine/target
+    is required, so a typo can never blank the whole roster."""
+    machine = (b.get("machine") or "").strip().lower()
+    target = (b.get("target") or "").strip().lower()
+    if not machine and not target:
+        return JsonResponse({"errors": [{"code": "need_machine_or_target",
+            "msg": "pass machine and/or target (the agent name) — refusing to drop everything"}]},
+            status=422)
+    from hub_core import presence as _presence
+    removed = _presence.forget(hub_app.HUB_DIR, machine=machine, agent=target)
+    if removed:
+        # Presence changed with no ledger event: wake connected cockpits so the phantom
+        # leaves every open board now, not at the next unrelated append.
+        try:
+            hub_app._publish_realtime("presence.observed")
+        except Exception:                                    # noqa: BLE001
+            pass
+    return JsonResponse({"data": {"machine": machine, "target": target, "forgotten": removed}})
+
+
+# ── The agents' own feed: what they DID, in their words ──
+
+@writer(scope="update:write")
+def agent_update(request, b):
+    """Post one first-person line to the updates feed: ``{summary, kind?, evidence?, item?}``.
+
+    The agent is bound by the write seam (a scoped credential's subject, never a body claim), so
+    an update can never be attributed to someone else; the machine comes from X-Hub-Machine. A
+    write lost to contention answers a RETRYABLE 503 naming the reason and records a warning row
+    — a lost narrative line is real data loss that must be visible, but not a defect to page on."""
+    from hub_core import updates as _updates
+    summary = str(b.get("summary") or "").strip()
+    if not summary:
+        return JsonResponse({"errors": [{"code": "need_summary"}]}, status=400)
+    agent = b.get("agent") or request.hub_auth.subject
+    row, reason = _updates.record(
+        hub_app.HUB_DIR, agent=agent, kind=str(b.get("kind") or "fixed"), summary=summary,
+        machine=request.headers.get("X-Hub-Machine") or str(b.get("machine") or ""),
+        evidence=str(b.get("evidence") or ""), item=str(b.get("item") or ""),
+        by=str(b.get("by") or ""))
+    if row is None:
+        try:
+            hub_app.record_error(
+                "hub.agent-updates", "an agent update was dropped: %s" % reason,
+                severity="warning", code="update_write_failed",
+                context={"component": "agent-updates", "agent": str(agent)[:120]})
+        except Exception:                                    # noqa: BLE001
+            pass
+        return JsonResponse({"errors": [{"code": "update_write_failed", "reason": reason,
+            "msg": "the updates feed was busy and this line was not appended; retry is safe"}]},
+            status=503)
+    hub_app._publish_realtime("updates.recorded")
+    return JsonResponse({"data": row}, status=201)
+
+
+# ── Operational error ingest: the surfaces the ledger audit cannot see ──
+
+@writer(scope="error:report")
+def app_error(request, b):
+    """Errors from a SATELLITE SERVICE this project ships, forwarded by that service's own
+    error handler. Without this channel, "is anything broken?" has to be asked once per
+    service, by someone who already suspects the answer — so it never gets asked. Services
+    forward only what belongs on a queue a human drains: server exceptions and background
+    job deaths, never uncaught browser noise from somebody's stale tab. Attributed to the
+    APP (source `app.<slug>.<kind>`), never to a person's machine.
+
+    Kinds a sender names: server, background, django, data, other, agent (a fault inside an
+    agentic chat loop) and the browser's js/promise/http/stream. `severity: info` with code
+    `app_forwarder_armed` is the forwarder's startup row: recorded, shown under coverage, and
+    never queued. The body carries no `agent` field; the scoped token names the sender."""
+    slug = re.sub(r"[^a-z0-9-]", "", str(b.get("app") or "").strip().lower())[:60]
+    if not slug:
+        return JsonResponse({"errors": [{"code": "need_app", "msg": "app slug is required"}]}, status=400)
+    kind = re.sub(r"[^a-z_]", "", str(b.get("kind") or "server").strip().lower())[:20] or "server"
+    # The store owns the limits (message 4000, a trace kept head AND tail up to 32000,
+    # redacted before any cut). Cutting here first would throw away the end of a traceback —
+    # the exception line and the frame that raised — before the store could keep it.
+    row = hub_app.record_error(
+        "app.%s.%s" % (slug, kind),
+        str(b.get("message") or "Application error")[:_errorlog.MESSAGE_LIMIT],
+        severity=str(b.get("severity") or "error").lower(),
+        code=str(b.get("code") or "app_error")[:120],
+        details=str(b.get("details") or ""),     # errorlog keeps head AND tail
+        context={
+            "app": slug,
+            "component": str(b.get("component") or "app")[:120],
+            "operation": str(b.get("operation") or "")[:120],
+            "path": str(b.get("path") or "")[:240],
+            "machine": str(b.get("host") or "")[:120],
+            "url": str(b.get("url") or "")[:600],
+            "project": str(b.get("project") or "")[:120],
+        },
+    )
+    # A real app error is also a board task the app's banner shows being fixed
+    # (hub/fix_tasks.py). KICKED, never run here: this endpoint sits on the app's error path.
+    from . import fix_tasks as _fix_tasks
+    _fix_tasks.kick()
+    return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
+
+
+@writer(scope="error:report")
+def ci_failure(request, b):
+    """A failed CI job, classified by what its OWN LOG says (hub_core.ci_trace).
+
+    The CI job (an ``after_script`` on failure, or a forwarder) posts the tail of its log with
+    the pipeline's metadata; the hub classifies it — rollback / real / not_deployed / unclear /
+    unreadable — and records ONE operational row whose severity comes from the verdict, never
+    from the trigger: a rollback is critical whatever the pipeline status said, and a failure
+    on an api- or schedule-triggered run is not explained away by its trigger unless its log
+    shows it stopped before any phase ran. The raw log is never stored — only the classified
+    line — and a secret-shaped log is refused at the write seam like any other payload."""
+    from hub_core import ci_trace
+    project = re.sub(r"[^a-z0-9._-]", "", str(b.get("project") or "").strip().lower())[:80]
+    job = str(b.get("job") or "").strip()[:120]
+    if not project or not job:
+        return JsonResponse({"errors": [{"code": "need_project_and_job",
+            "msg": "project and job are required"}]}, status=400)
+    source = re.sub(r"[^a-z_]", "", str(b.get("source") or "").strip().lower())[:30]
+    verdict = ci_trace.classify(str(b.get("trace") or ""), source=source,
+                                deployless=bool(b.get("deployless")))
+    ref = str(b.get("ref") or "")[:120]
+    sha = str(b.get("sha") or "")[:64]
+    row = hub_app.record_error(
+        "ci.%s.%s" % (project, re.sub(r"[^a-z0-9_-]", "-", job.lower())[:60]),
+        ("%s failed%s: %s" % (job, (" on " + ref) if ref else "", verdict["note"]))[:800],
+        severity=verdict["severity"],
+        code="ci_" + verdict["verdict"],
+        details=("pipeline=%s job_id=%s source=%s deployless=%s verdict=%s detail=%s"
+                 % (str(b.get("pipeline") or "-")[:40], str(b.get("job_id") or "-")[:40],
+                    source or "-", bool(b.get("deployless")), verdict["verdict"],
+                    verdict["detail"] or "-"))[:2000],
+        context={"app": project, "component": "ci", "operation": job,
+                 "reason": verdict["verdict"], "release": sha,
+                 "url": str(b.get("url") or "")[:240]},
+    )
+    return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"],
+                                  "verdict": verdict["verdict"], "detail": verdict["detail"],
+                                  "note": verdict["note"], "severity": verdict["severity"]}},
+                        status=201)
+
+
+@writer(scope="error:report")
+def agent_error(request, b):
+    """Operational failures on a WORKER's side — a launcher that will not start, tooling
+    that cannot write, a client refused upstream. Without this the operational stream
+    covers exactly one computer: the one the hub runs on, and every worker-side failure is
+    written to a local log read by nobody."""
+    agent = b.get("agent") or request.hub_auth.subject or "unknown-agent"
+    row = hub_app.record_error(
+        "agent.%s.%s" % (agent, str(b.get("source") or "worker")[:60]),
+        str(b.get("message") or "Worker reported an operational error")[:_errorlog.MESSAGE_LIMIT],
+        severity=str(b.get("severity") or "error").lower(),
+        code=str(b.get("code") or "agent_error")[:120],
+        details=str(b.get("details") or ""),     # errorlog keeps head AND tail
+        context={
+            "component": str(b.get("component") or "worker")[:120],
+            "operation": str(b.get("operation") or "")[:120],
+            "agent": str(agent)[:120],
+            "machine": str(b.get("machine") or request.headers.get("X-Hub-Machine") or "")[:120],
+            "project": str(b.get("project") or "")[:120],
+        },
+    )
+    return JsonResponse({"data": {"recorded": True, "fingerprint": row["fingerprint"]}}, status=201)
+
+
+@writer(scope="error:manage")
+def ack_error(request, b):
+    """Acknowledge (or reopen) one recurring error signature — the button of the error
+    queue. Reporting is truthful both ways: reopening a signature that was never acked is
+    a refusal, not a 200 over a row nothing touched."""
+    fingerprint = str(b.get("fingerprint") or "").strip().lower()
+    if not fingerprint:
+        return JsonResponse({"errors": [{"code": "need_fingerprint"}]}, status=400)
+    # SHAPE GATE: an ack CREATES the record it is handed, so an id that is not a signature
+    # (a mistyped directive id, a problem id) would mint an acknowledged row for something
+    # nothing ever reported, and answer 201. A fingerprint is 16 hex characters.
+    if not _FINGERPRINT.fullmatch(fingerprint):
+        return JsonResponse({"errors": [{"code": "not_a_fingerprint",
+            "msg": "an error signature is 16 hex characters (errors.json `fingerprint`); a "
+                   "problem id (p-...) is resolved with api/problem/resolve, a directive "
+                   "with api/ack"}]}, status=422)
+    if b.get("reopen"):
+        if not _errorlog.unack(hub_app.HUB_DIR, fingerprint):
+            return JsonResponse({"errors": [{"code": "not_acked", "msg":
+                "that signature is not acknowledged, so there was nothing to reopen"}]}, status=409)
+        hub_app.errors_changed()
+        return JsonResponse({"data": {"fingerprint": fingerprint, "reopened": True}})
+    entry = _errorlog.ack(hub_app.HUB_DIR, fingerprint,
+                          actor=b.get("agent") or request.hub_auth.subject or "",
+                          note=b.get("note") or "")
+    if not entry:
+        return JsonResponse({"errors": [{"code": "ack_failed"}]}, status=500)
+    hub_app.errors_changed()
+    return JsonResponse({"data": {"fingerprint": fingerprint, "acked": entry}}, status=201)
+
+
+@writer(scope="error:manage")
+def clear_errors(request, b):
+    """Clear resolved errors — by age, or by acknowledgement. Never 'everything': a clear
+    must never be the operation that destroys evidence of a failure nobody has looked at."""
+    from hub_core import errorlog as _errorlog
+    only_acked = bool(b.get("only_acked"))
+    before = b.get("older_than_hours")
+    before_epoch = None
+    if before not in (None, ""):
+        try:
+            before_epoch = time.time() - (float(before) * 3600.0)
+        except (TypeError, ValueError):
+            return JsonResponse({"errors": [{"code": "bad_older_than_hours"}]}, status=400)
+    if before_epoch is None and not only_acked:
+        return JsonResponse({"errors": [{"code": "need_bound",
+            "msg": "pass older_than_hours and/or only_acked; a clear is never unbounded"}]},
+            status=400)
+    result = _errorlog.clear(hub_app.HUB_DIR, before_epoch, only_acked)
+    hub_app.errors_changed()
+    return JsonResponse({"data": result})
+
+
+# ---- decisions: a person's call, never an agent's -------------------------------------------
+
+def _deciders():
+    """Who may decide: HUB_DECIDERS (comma list, settings or env), default the operator."""
+    raw = hub_app._dj_setting("HUB_DECIDERS") or os.environ.get("HUB_DECIDERS") or ""
+    names = {x.strip().lower() for x in str(raw).split(",") if x.strip()}
+    operator = str(hub_app._dj_setting("HUB_OPERATOR_AGENT") or os.environ.get("HUB_OPERATOR_AGENT")
+                   or "operator").strip().lower()
+    return names or {operator}
+
+
+def board_link(eid):
+    """A deep link that opens one task's detail on the board (the board's own #task-<local>)."""
+    return "/hub/#task-%s" % str(eid).rsplit(":", 1)[-1]
+
+
+@writer(scope="task:decide")
+def decide_task(request, b):
+    """Decide a decision task: ``{id, decision, then: file|close|reply}``.
+
+    A decision is a person's call, so an agent can never make one: the caller must hold a
+    scoped credential whose immutable subject is a named decider (HUB_DECIDERS, default the
+    operator). The shared-root token is refused — it is how automation writes, and a decision it
+    made would be indistinguishable from one a person made.
+
+    * ``file``  — mint the build task the decision leads to (its acceptance leads with the
+                  decision; unattended so the queue takes it) and close the decision naming it.
+    * ``close`` — record the decision with nothing to build.
+    * ``reply`` — a question or answer back, NOT a decision: it lands on the task's trail, the
+                  decision stays open (``decision`` stays absent), and the filer is messaged.
+
+    Closing goes through the one done path (a lease the decider holds for the moment of the
+    write, evidence = the board link). A second press returns the first result, never a second
+    build task: one lock, and the entity is re-read inside it."""
+    auth = request.hub_auth
+    if auth.mode != "scoped-agent" or auth.subject.lower() not in _deciders():
+        return JsonResponse({"errors": [{"code": "decision_needs_a_person",
+            "msg": "a decision is a person's call and an agent cannot make it: decide with a "
+                   "credential issued to a named decider (HUB_DECIDERS)"}]}, status=403)
+    person = auth.subject
+    eid = str(b.get("id") or "").strip()
+    text = " ".join(str(b.get("decision") or "").split())
+    then = str(b.get("then") or "").strip().lower()
+    if not eid:
+        return JsonResponse({"errors": [{"code": "need_id"}]}, status=400)
+    if len(text) < 3:
+        return JsonResponse({"errors": [{"code": "need_decision",
+                                         "msg": "say what was decided, or what you are asking"}]},
+                            status=422)
+    if then not in ("file", "close", "reply"):
+        return JsonResponse({"errors": [{"code": "need_then",
+            "msg": "then is 'file' (file the work this leads to), 'close' (nothing to build) or "
+                   "'reply' (a question or answer back; the decision stays open)"}]}, status=422)
+    with ProcessFileLock(hub_app.CLAIMS, name=".decide.lock", timeout=30):
+        ent = hub_app.current_state().get("entities", {}).get(eid)
+        if not ent or ent.get("type") != "task":
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        if str(ent.get("work_kind") or "").lower() != "decision":
+            return JsonResponse({"errors": [{"code": "not_a_decision",
+                "msg": "%s is build work, not a decision" % eid}]}, status=409)
+        made = ent.get("decision") if isinstance(ent.get("decision"), dict) else None
+        if made:
+            return JsonResponse({"data": dict(made, id=eid, status=ent.get("status"),
+                                              already_decided=True)})
+        if ent.get("status") not in ("todo", "blocked", "in_progress"):
+            return JsonResponse({"errors": [{"code": "not_open", "status": ent.get("status")}]},
+                                status=409)
+        expected = b.get("expected_version")
+        if expected is not None and expected != ent.get("version"):
+            return JsonResponse({"errors": [{"code": "conflict",
+                                             "current_version": ent.get("version")}]}, status=409)
+        when = _utc_now()
+        plan = [dict(x) for x in (ent.get("plan") or []) if isinstance(x, dict)]
+        if then == "reply":
+            plan.append({"step": "Reply", "done": True, "kind": "checkpoint",
+                         "note": ("Reply from %s on %s: %s" % (person, when, text))[:600],
+                         "note_at": when})
+            resp, status = _append("task", eid, {"type": "task", "plan": plan},
+                                   expected_version=ent.get("version"), agent=person, idem=None,
+                                   etype="task.updated")
+            if status != 200:
+                return JsonResponse(resp, status=status)
+            # The FILER is who created the decision (stamped once by the fold), never the last
+            # writer: an unrelated priority edit must not redirect the reply to its editor.
+            filer = str((ent.get("provenance") or {}).get("created_by") or "").strip().lower()
+            paged = ""
+            # The shared-root compatibility subject is not a seat anybody reads; a reply to a
+            # decision it filed has nobody to page, and says so (paged: "").
+            if filer and filer not in (person.lower(), "shared-root"):
+                state = hub_app.current_state()
+                did = ids.next_id(state["entities"], hub_app.PROJECT_KEY, "directive")
+                note = {"type": "directive", "status": "active", "targets": [filer],
+                        "title": ("Reply on %s: %s" % (eid, text))[:200],
+                        "body_md": ("%s replied on %s (%s) instead of deciding:\n\n%s\n\nAnswer on "
+                                    "the task (step it with your answer); once a checkpoint newer "
+                                    "than the reply is on its trail the decision reaches them "
+                                    "again: %s" % (person, eid, ent.get("title") or "", text,
+                                                   board_link(eid)))}
+                _r, nstatus = _append("directive", did, note, expected_version=None, agent=person,
+                                      idem="decision-reply:%s:%s" % (eid, when), etype="directive.issued")
+                paged = filer if nstatus == 200 else ""
+            return JsonResponse({"data": {"id": eid, "status": ent.get("status"), "replied": True,
+                                          "reply": {"text": text, "by": person, "at": when},
+                                          "paged": paged, "decision": None}})
+        stamp = "Decided by %s on %s: %s" % (person, when, text)
+        followup = ""
+        if then == "file":
+            priority = str(ent.get("priority") or "").upper()
+            subject = str(ent.get("title") or eid)
+            payload = {"type": "task", "status": "todo", "work_kind": "product",
+                       "unattended": True,
+                       "priority": priority if priority in ("P0", "P1", "P2") else "P2",
+                       "title": ("Build the decision: %s" % subject)[:200],
+                       "acceptance": ("DECIDED by %s on %s: %s\n\nThis task builds that decision. "
+                                      "It came from %s (%s). The question and its context: %s"
+                                      % (person, when[:10], text, eid, subject,
+                                         ent.get("acceptance") or ""))}
+            if ent.get("project"):
+                payload["project"] = ent["project"]
+            resp, status = _append_create("task", payload, agent=person,
+                                          idem="decision-file:%s" % eid, etype="task.created")
+            if status != 200:
+                return JsonResponse(resp, status=status)
+            followup = (resp.get("data") or {}).get("id") or ""
+            stamp += " Build task: %s." % (followup or "filed")
+        plan.append({"step": "Decided", "done": True, "kind": "checkpoint",
+                     "note": stamp[:600], "note_at": when})
+        record = {"text": text[:2000], "decided_by": person, "decided_at": when, "then": then}
+        if followup:
+            record["followup"] = followup
+        res = hub_app.claim(eid, person, ttl_s=_CLOSE_LEASE_TTL_S, auth_subject=auth.subject,
+                            credential_id=auth.credential_id, actor_kind=auth.actor_kind)
+        if not res.get("ok"):
+            return JsonResponse({"errors": [{"code": "held", "held_by": res.get("held_by"),
+                "msg": "someone holds this decision's lease; release it before deciding"}]},
+                status=409)
+        update = {"type": "task", "status": "done", "plan": plan, "unattended": False,
+                  "decision": record, "verified_by": [stamp[:600]],
+                  "evidence_uri": [board_link(followup or eid)]}
+        resp, status = _commit_done(eid, res["token"], person, update,
+                                    verified_version=ent.get("version"), auth=auth)
+        if status != 200:
+            if res.get("created"):
+                hub_app.release_lease(eid, res["token"])
+            return JsonResponse(resp, status=status)
+    return JsonResponse({"data": dict(record, id=eid, status="done", followup=followup,
+                                      followup_url=board_link(followup) if followup else "")})
+
+
+# ---- hand / unclaim: letting go of a task, including one an orphaned console holds -------------
+
+def _releasable_lease(request, b, eid):
+    """The lease on ``eid`` this caller may release: the one whose fencing token it presents, or
+    — the orphaned-lease remedy — one held by the SAME agent from a console that is no longer
+    live. A lease a live console of the same agent holds, or another agent's, is never touched.
+    Returns ``(lease_or_None, refusal_or_None)``."""
+    lease = next((row for row in hub_app.leases() if row.get("task") == eid), None)
+    if not lease:
+        return None, None
+    token = b.get("token") if isinstance(b.get("token"), str) else ""
+    if token:
+        if lease.get("token") != token or not hub_app.lease_authorized(
+                eid, token, request.hub_auth.subject, request.hub_auth.credential_id):
+            return None, JsonResponse({"errors": [{"code": "lease_mismatch"}]}, status=409)
+        return lease, None
+    agent = str(b.get("agent") or "")
+    if lease.get("agent") != agent:
+        return None, JsonResponse({"errors": [{"code": "held", "held_by": lease.get("agent"),
+            "msg": "another agent holds this task"}]}, status=409)
+    if lease.get("auth_subject") and lease.get("auth_subject") != request.hub_auth.subject:
+        return None, JsonResponse({"errors": [{"code": "lease_subject_mismatch"}]}, status=409)
+    sid = str(lease.get("session") or "")[:8]
+    live = {str(r.get("session") or "")[:8] for r in hub_app.live_sessions()
+            if not r.get("finished")}
+    if not sid or sid in live:
+        return None, JsonResponse({"errors": [{"code": "lease_live",
+            "msg": "the lease is held by a live console (%s); release it from there, or pass its "
+                   "token" % (sid or "unknown session")}]}, status=409)
+    return lease, None
+
+
+def _lifecycle_row(plan, kind, note, at):
+    """Append (or count up) a scheduler row. A recurring hand-back is ONE row counting itself,
+    never N rows that read as N checkpoints of work."""
+    plan = [dict(x) for x in (plan or []) if isinstance(x, dict)]
+    last = plan[-1] if plan else None
+    if last and last.get("kind") == kind and last.get("lifecycle"):
+        last["times"] = int(last.get("times") or 1) + 1
+        last["note"] = note[:600]
+        last["note_at"] = at
+        return plan
+    plan.append({"step": {"handed_back": "Handed back to the queue",
+                          "lease_released": "Lease released"}.get(kind, kind),
+                 "done": True, "kind": kind, "lifecycle": True, "note": note[:600],
+                 "note_at": at})
+    return plan
+
+
+def _let_go(request, b, *, kind):
+    eid = str(b.get("id") or "").strip()
+    agent = str(b.get("agent") or "").strip()
+    if not eid or not agent:
+        return JsonResponse({"errors": [{"code": "need_id_agent"}]}, status=400)
+    with ProcessFileLock(hub_app.CLAIMS, name=".claims.lock", timeout=30):
+        ent = hub_app.current_state().get("entities", {}).get(eid)
+        if not ent or ent.get("type") != "task":
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        if kind == "handed_back" and str(ent.get("work_kind") or "").lower() == "decision":
+            return JsonResponse({"errors": [{"code": "decision_not_unattended",
+                "msg": "a decision is a person's call and is never handed to an unattended worker"}]},
+                status=409)
+        if ent.get("status") in ("done", "dropped"):
+            return JsonResponse({"errors": [{"code": "closed", "status": ent.get("status")}]},
+                                status=409)
+        lease, refusal = _releasable_lease(request, b, eid)
+        if refusal is not None:
+            return refusal
+        if lease is None and kind == "lease_released" and ent.get("status") != "in_progress":
+            # Nothing is held and nothing is in flight: there is nothing to let go of, so write
+            # nothing — a scheduler row here would record an event that did not happen.
+            return JsonResponse({"data": {"id": eid, "task": eid, "version": ent.get("version"),
+                                          "released": False, "noop": True,
+                                          "status": ent.get("status"),
+                                          "unattended": ent.get("unattended")}})
+        at = _utc_now()
+        note = str(b.get("note") or "").strip() or (
+            "handed back by %s" % agent if kind == "handed_back" else "released by %s" % agent)
+        update = {"type": "task", "plan": _lifecycle_row(ent.get("plan"), kind, note, at)}
+        if ent.get("status") == "in_progress":
+            update["status"] = "todo"
+        if kind == "handed_back":
+            update["unattended"] = True
+        resp, status = _append("task", eid, update, expected_version=ent.get("version"),
+                               agent=agent, idem=b.get("idem_key"), etype="task.updated")
+        if status != 200:
+            return JsonResponse(resp, status=status)
+        released = hub_app.release_lease(eid, lease["token"]) if lease else False
+    return JsonResponse({"data": dict(resp["data"], task=eid, released=bool(released),
+                                      status=update.get("status", ent.get("status")),
+                                      unattended=update.get("unattended", ent.get("unattended")))})
+
+
+@writer(scope="task:release")
+def hand_to_queue(request, b):
+    """Put a task back on the queue FOR AN UNATTENDED WORKER: status todo, ``unattended: true``,
+    the lease released (the caller's own, or one an orphaned console of the same agent holds),
+    and one counted ``handed_back`` scheduler row on the plan — never a work checkpoint."""
+    return _let_go(request, b, kind="handed_back")
+
+
+@csrf_exempt
+def hand(request):
+    """``POST /hub/api/hand`` — one verb, two hand-offs, told apart by the body:
+
+    * with ``to``: GIVE the task to that named agent (``assign``, scope ``task:assign``);
+    * without it: hand it BACK to the queue for an unattended worker (``hand_to_queue``, scope
+      ``task:release``).
+
+    Each branch runs its own writer, so authentication, scope and every refusal are exactly
+    those of ``/api/assign`` and ``/api/hand-to-queue``. (``/api/hand-back`` is the run-ended
+    transition an unattended launcher writes: fenced lease proven, back to todo, one
+    self-counting row.)"""
+    try:
+        peek = json.loads((request.body or b"{}").decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        peek = None
+    if isinstance(peek, dict) and "to" in peek:
+        return assign(request)
+    return hand_to_queue(request)
+
+
+# The dispatcher itself authenticates nothing: each branch is a full @writer. It carries the
+# union of both branches' scopes so the route audit sees the gate the request will meet.
+hand._hub_token_gated = True
+hand._hub_required_scope = ("task:assign", "task:release")
+
+
+@writer(scope="task:release")
+def unclaim(request, b):
+    """Let go of a task without handing it anywhere: the lease released (own, or an orphaned
+    console's of the same agent), an in-progress task back to todo, ``unattended`` unchanged."""
+    return _let_go(request, b, kind="lease_released")
+
+
+# ── Problems: claim / resolve / release / escalate — the folded queue's four verbs ──
+
+def _problem_actor(request, b):
+    """(agent, machine, session, name) of the CONSOLE acting: a holder is a console, so the
+    X-Hub-* headers the client already sends identify it."""
+    agent = str(b.get("agent") or request.hub_auth.subject or "").strip().lower()
+    return (agent,
+            (request.headers.get("X-Hub-Machine") or b.get("machine") or "")[:60],
+            (request.headers.get("X-Hub-Session") or b.get("session") or "")[:64],
+            (request.headers.get("X-Hub-Console-Name") or b.get("name") or "")[:40])
+
+
+def _problem_or_404(pid):
+    from hub_core import problems as _problems
+    pid = str(pid or "").strip().lower()
+    if not _problems.PID_RE.fullmatch(pid):
+        return pid, None, JsonResponse({"errors": [{"code": "bad_problem_id",
+            "msg": "a problem id looks like p-<12 hex>; read /hub/problems.json"}]}, status=422)
+    found = _problems.find(hub_app.HUB_DIR, pid, hub_app.current_state())
+    if not found:
+        return pid, None, JsonResponse({"errors": [{"code": "no_such_problem", "id": pid}]}, status=404)
+    return pid, found, None
+
+
+def _operator_name():
+    return str(hub_app._dj_setting("HUB_OPERATOR_AGENT")
+               or os.environ.get("HUB_OPERATOR_AGENT") or "operator").strip().lower()
+
+
+@writer(scope="problem:claim")
+def problem_claim(request, b):
+    """Put this console's name on a problem for every other console. Another console's live
+    claim is refused (409 claimed_elsewhere, naming the holder and how long it has held it —
+    the refusal IS the coordination); `take:true` displaces it deliberately and the entry
+    records whom it displaced. A claim whose console has been provably gone for the grace
+    window frees itself."""
+    from hub_core import problems as _problems
+    pid, found, err = _problem_or_404(b.get("problem") or b.get("id"))
+    if err:
+        return err
+    agent, machine, session, name = _problem_actor(request, b)
+    entry, refusal = _problems.claim(hub_app.HUB_DIR, pid, agent=agent, machine=machine,
+                                     session=session, name=name, note=str(b.get("note") or ""),
+                                     take=bool(b.get("take")))
+    if refusal:
+        return JsonResponse({"errors": [refusal]}, status=409)
+    hub_app.errors_changed()
+    data = {"problem": pid, "claim": entry, "title": found.get("title"),
+            "rows": len(found.get("rows") or [])}
+    # What the board already knows about THIS failure, above the relevance cut-off.
+    try:
+        from .knowledge_api import event_knowledge
+        known = event_knowledge(" ".join(str(found.get(k) or "") for k in
+                                         ("title", "cause", "where", "code")))
+        if known:
+            data["knowledge"] = known
+    except Exception:                                        # noqa: BLE001
+        pass
+    # An app problem is also a board task its app's banner shows moving (hub/fix_tasks.py).
+    from . import fix_tasks as _fix_tasks
+    fix_task = _fix_tasks.sync_pid(pid)
+    if fix_task:
+        data["task"] = fix_task
+        data["task_hint"] = ("this problem is mirrored as %s; `step %s --note \"...\"` shows each "
+                             "checkpoint live in the app's Fixes panel" % (fix_task, fix_task))
+    return JsonResponse({"data": data}, status=201)
+
+
+@writer(scope="problem:resolve")
+def problem_resolve(request, b):
+    """Acknowledge EVERY row behind a problem at once and record the root cause where the next
+    person will look. A fix closes a problem whoever holds it; the note then names both. A
+    recurrence after this reopens it — the resolve covers what it saw."""
+    from hub_core import problems as _problems
+    pid, found, err = _problem_or_404(b.get("problem") or b.get("id"))
+    if err:
+        return err
+    note = str(b.get("note") or "").strip()
+    if not note:
+        return JsonResponse({"errors": [{"code": "need_note",
+            "msg": "resolve records the ROOT CAUSE; pass note (and evidence: a sha or URL)"}]},
+            status=422)
+    agent, _machine, session, name = _problem_actor(request, b)
+    entry = _problems.resolve(hub_app.HUB_DIR, pid, found.get("rows") or [], agent=agent,
+                              note=note, evidence=str(b.get("evidence") or ""),
+                              session=session, name=name)
+    hub_app.errors_changed()
+    from . import fix_tasks as _fix_tasks
+    return JsonResponse({"data": {"problem": pid, "resolved": entry,
+                                  "task": _fix_tasks.sync_pid(pid)}})
+
+
+@writer(scope="problem:claim")
+def problem_release(request, b):
+    """Hand a problem back: a live claim by its own agent (the operator may release any), or
+    a problem that reopened under the console that last resolved it. Releasing nothing is a
+    409, never a 200 over an untouched record."""
+    from hub_core import problems as _problems
+    pid, _found, err = _problem_or_404(b.get("problem") or b.get("id"))
+    if err:
+        return err
+    agent, _m, _s, _n = _problem_actor(request, b)
+    operator = request.hub_auth.mode != "scoped-agent" or agent == _operator_name()
+    if not _problems.release(hub_app.HUB_DIR, pid, agent=agent, operator=operator):
+        return JsonResponse({"errors": [{"code": "not_held",
+            "msg": "no claim (or presumed reopen) by %s to release" % agent}]}, status=409)
+    hub_app.errors_changed()
+    from . import fix_tasks as _fix_tasks
+    _fix_tasks.sync_pid(pid)
+    return JsonResponse({"data": {"problem": pid, "released": True}})
+
+
+@writer(scope="problem:escalate")
+def problem_escalate(request, b):
+    """Park a DIAGNOSED problem on the ask or task it is waiting for. It leaves the unclaimed
+    queue (state `escalated`) until that blocker closes — an answered ask or a done task
+    returns it at exactly the moment it became workable. The blocker must be an ask or task
+    that exists and is still open: free text cannot close, so it is refused."""
+    from hub_core import problems as _problems
+    pid, _found, err = _problem_or_404(b.get("problem") or b.get("id"))
+    if err:
+        return err
+    blocked_on = str(b.get("blocked_on") or "").strip()
+    if blocked_on and ":" not in blocked_on:
+        kind = "note" if blocked_on.startswith("q-") else "task"
+        local = blocked_on.zfill(4) if blocked_on.isdigit() else blocked_on
+        try:
+            blocked_on = ids.make_id(hub_app.PROJECT_KEY, kind, local)
+        except ValueError:
+            # Free text ("waiting for finance") is not a blocker: nothing can ever close it.
+            return JsonResponse({"errors": [{"code": "bad_blocker",
+                "msg": "blocked_on must name an open ask (q-...) or a task id; free text can "
+                       "never close, so it would keep a live failure off the queue forever",
+                "id": blocked_on}]}, status=422)
+    state = hub_app.current_state()
+    ent = (state.get("entities") or {}).get(blocked_on)
+    if not ent or ent.get("type") not in ("note", "task"):
+        return JsonResponse({"errors": [{"code": "bad_blocker",
+            "msg": "blocked_on must name an existing ask (question note) or task",
+            "id": blocked_on}]}, status=422)
+    if not _problems.blocker_open(blocked_on, state):
+        return JsonResponse({"errors": [{"code": "blocker_closed",
+            "msg": "that ask/task is already closed: the problem is workable now, claim it"}]},
+            status=409)
+    agent, machine, session, name = _problem_actor(request, b)
+    entry = _problems.escalate(hub_app.HUB_DIR, pid, agent=agent, blocked_on=blocked_on,
+                               note=str(b.get("note") or ""), machine=machine, session=session,
+                               name=name)
+    try:                                   # the escalation replaces this console's lease on it
+        _problems.release(hub_app.HUB_DIR, pid, agent=agent, claims_only=True)
+    except Exception:                                        # noqa: BLE001
+        pass
+    hub_app.errors_changed()
+    from . import fix_tasks as _fix_tasks
+    fix_task = _fix_tasks.sync_pid(pid)
+    return JsonResponse({"data": {"problem": pid, "escalation": entry, "task": fix_task}},
+                        status=201)
+
+
+@writer(scope="presence:write")
+def overlap_seen(request, b):
+    """Record that these crossover signals reached their console (sidecar only, never the
+    ledger), so each is announced once per side until it changes."""
+    from hub_core import overlap
+    ids_ = b.get("ids") if isinstance(b.get("ids"), list) else []
+    return JsonResponse({"data": {"marked": overlap.mark_seen(hub_app.HUB_DIR, ids_)}})
+
+
+# ── CI results: the one ingest whose sender is not an agent ──
+
+def _ci_secret():
+    return str(hub_app._dj_setting("HUB_CI_WEBHOOK_SECRET")
+               or os.environ.get("HUB_CI_WEBHOOK_SECRET") or "").strip()
+
+
+def webhook_secret_gated(fn):
+    """The gate for a sender that is NOT an agent: a CI system presents a shared webhook secret
+    (``X-Hub-Webhook-Token``, or GitLab's own ``X-Gitlab-Token``), never an agent credential.
+
+    A NAMED gate rather than an exception to the route audit: the view is marked
+    ``_hub_secret_gated``, refuses EVERY request while no secret is configured (an open ingest
+    that anyone can post rows to is worse than none), compares in constant time, and answers a
+    refusal 404 like the rest of the hub. The secret authorizes exactly one thing -- adding CI
+    rows to the operational stream and retiring the CI rows a later green supersedes."""
+    @csrf_exempt
+    @wraps(fn)
+    def w(request, *a, **k):
+        if request.method != "POST":
+            return HttpResponseNotAllowed(["POST"])
+        want = _ci_secret()
+        got = (request.headers.get("X-Hub-Webhook-Token")
+               or request.headers.get("X-Gitlab-Token") or "").strip()
+        if not want or not got or not hmac.compare_digest(got, want):
+            if want and got:
+                _record_refusal(request, "ci_secret_refused", "a CI delivery presented a wrong secret")
+            return JsonResponse({"errors": [{"code": "not_found"}]}, status=404)
+        return fn(request, *a, **k)
+    w._hub_secret_gated = True
+    return w
+
+
+@webhook_secret_gated
+def ci_event_webhook(request):
+    """POST /hub/api/ci-event — a CI pipeline/job/deploy result. Failures become rows on the
+    operational stream; a later green on the same job and ref retires them."""
+    from hub_core import ci_events
+
+    body = _body(request)
+    if not isinstance(body, dict):
+        return JsonResponse({"errors": [{"code": "bad_json"}]}, status=400)
+    ignore = hub_app._dj_setting("HUB_CI_IGNORE_JOBS") or os.environ.get("HUB_CI_IGNORE_JOBS") or ""
+    if isinstance(ignore, str):
+        ignore = [j for j in ignore.split(",") if j.strip()]
+    try:
+        out = ci_events.ingest(hub_app.HUB_DIR, body, record=hub_app.record_error,
+                               ignore_jobs=ignore)
+    except Exception as exc:                                 # noqa: BLE001
+        # An ingest that errors teaches the sender to disable the hook: answer 200 and make the
+        # parse failure the hub's own warning.
+        hub_app.record_error("hub.ci", "a CI delivery could not be interpreted", severity="warning",
+                             code="ci_event_unparsed", details=type(exc).__name__,
+                             context={"component": "ci"})
+        out = {"recorded": False, "reason": "unparsed"}
+    if out.get("superseded") or out.get("reopened"):
+        hub_app.errors_changed()                     # acks moved with no new row to announce
+    closes = _deploy_job_closes(body)
+    if closes:
+        out["deploy_close"] = closes
+    out.pop("event", None)
+    ci_events.retain(hub_app.HUB_DIR, body, out, record=hub_app.record_error)
+    return JsonResponse({"data": out})
+
+
+_DEFAULT_REFS = ("main", "master")
+
+
+def _deploy_job_closes(body) -> str:
+    """A green DEPLOY job on the default branch runs the deploy-close matcher as if a release
+    record had been posted -- for a project whose deploy never posts one (opt-in).
+
+    On the instance this was lifted from, one project's deploy script posted its release record
+    to a DIFFERENT hub, so this one held none of its records and no task of that project could
+    ever close from its own deploy. Its deploy job restarts the services and smoke-tests them
+    before it goes green, so its success was the verification the record would have claimed.
+    That equivalence is the adopter's to assert, so it is OFF unless HUB_CI_DEPLOY_JOB_CLOSES
+    names the job-name prefixes it trusts ("deploy" is typical). A sha that already has a
+    release record is left to it. Runs in a thread: the webhook answers at once. Never raises."""
+    try:
+        from hub_core import ci_events as _ci
+        prefixes = hub_app._dj_setting("HUB_CI_DEPLOY_JOB_CLOSES") or os.environ.get(
+            "HUB_CI_DEPLOY_JOB_CLOSES") or ""
+        if isinstance(prefixes, str):
+            prefixes = [p.strip().lower() for p in prefixes.split(",") if p.strip()]
+        if not prefixes:
+            return ""
+        ev = _ci.normalize(body)
+        if ev.get("kind") != "job" or ev.get("status") != "success":
+            return ""
+        name = str(ev.get("job") or "").lower()
+        if not any(name.startswith(p) for p in prefixes):
+            return ""
+        if str(ev.get("ref") or "") not in _DEFAULT_REFS:
+            return ""
+        sha = str(ev.get("sha") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{7,64}", sha):
+            return ""
+        entities = hub_app.current_state().get("entities") or {}
+        if any(isinstance(e, dict) and e.get("type") == "deploy"
+               and str(e.get("sha") or "").lower().startswith(sha[:12]) for e in entities.values()):
+            return ""                    # a verified release record exists; it closes its tasks
+        deploy_id = "ci-job:%s:%s" % (ev.get("project") or "project", sha[:12])
+
+        def _run():
+            try:
+                close_deployed_tasks(deploy_id, sha)
+            except Exception as exc:                         # noqa: BLE001
+                hub_app.record_error("hub.deploy-close", "deploy-job task closure failed: %s"
+                                     % type(exc).__name__, severity="error",
+                                     context={"component": "hub-write", "deploy": deploy_id})
+        import threading
+        threading.Thread(target=_run, name="hub-ci-deploy-close", daemon=True).start()
+        return deploy_id
+    except Exception:                                        # noqa: BLE001 - never break intake
+        return ""
+
+
+@writer(scope="enroll:leave")
+def leave(request, b):
+    """Un-enroll THIS machine: the presented scoped credential revokes ITSELF and the seat's
+    presence rows for this machine are dropped. Self-revocation only ever reduces authority,
+    so it needs no second party; the shared-root compatibility token is not a machine and
+    cannot leave. dry_run reports what would happen and changes nothing."""
+    from hub_core import presence as _presence
+    auth = request.hub_auth
+    if auth.mode != "scoped-agent":
+        return JsonResponse({"errors": [{"code": "not_a_machine_credential",
+            "msg": "only a scoped agent credential can un-enroll itself"}]}, status=409)
+    machine = (request.headers.get("X-Hub-Machine") or b.get("machine") or "").strip().lower()[:120]
+    plan = {"credential_id": auth.credential_id, "subject": auth.subject, "machine": machine}
+    if b.get("dry_run"):
+        return JsonResponse({"data": {"dry_run": True, "would": plan}})
+    try:
+        record = agent_auth.CredentialRegistry(hub_app.HUB_DIR).revoke(
+            auth.credential_id, revoked_by=auth.subject)
+    except agent_auth.CredentialError as exc:
+        return JsonResponse({"errors": [{"code": "credential", "msg": str(exc)}]}, status=422)
+    forgotten = _presence.forget(hub_app.HUB_DIR, machine=machine, agent=auth.subject) if machine else 0
+    try:
+        hub_app._publish_realtime("presence.observed")
+    except Exception:                                        # noqa: BLE001
+        pass
+    return JsonResponse({"data": {"left": True, "credential": record,
+                                  "presence_forgotten": forgotten, **plan}})
+
+
+@writer(scope="error:report")
+def ci_event_agent(request, b):
+    """One CI pipeline event in the neutral shape (hub_core.ci): {project, ref, sha, status:
+    failed|success, jobs: [{name, status, url}], url, actor, source, details}. An adopter's CI
+    adapter translates its own webhook into this. A failed job becomes a problem keyed on
+    (project, job); a pass is stamped per job and retires that job's earlier failures on the
+    same ref — only a pass of THAT job does, never a later green deploy."""
+    from hub_core import ci as _ci
+    result = _ci.ingest(hub_app.HUB_DIR, b, record=hub_app.record_error)
+    if not result.get("ok"):
+        return JsonResponse({"errors": [{"code": "bad_ci_event", "msg": result.get("error")}]},
+                            status=422)
+    if result.get("retired"):
+        hub_app.errors_changed()
+    return JsonResponse({"data": result}, status=201 if result.get("recorded") else 200)
+
+
+@csrf_exempt
+def ci_event(request):
+    """``POST /hub/api/ci-event`` — one route, two senders, told apart by the credential:
+
+    * a CI SYSTEM presents the shared webhook secret (``X-Hub-Webhook-Token`` or the forge's own
+      token header) and is answered by ``ci_event_webhook`` (hub_core.ci_events);
+    * an AGENT credential posts the neutral event shape and is answered by ``ci_event_agent``
+      (hub_core.ci; scope ``error:report``).
+
+    Each branch keeps its own gate and refusals; this dispatcher authenticates nothing."""
+    if request.headers.get("X-Hub-Webhook-Token") or request.headers.get("X-Gitlab-Token"):
+        return ci_event_webhook(request)
+    return ci_event_agent(request)
+
+
+ci_event._hub_token_gated = True
+ci_event._hub_secret_gated = True
+ci_event._hub_required_scope = "error:report"

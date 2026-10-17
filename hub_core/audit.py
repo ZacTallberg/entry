@@ -6,6 +6,7 @@ deploy), 3=WARN-only (amber), 1=internal-error (fail-closed RED). NEVER trusts a
 Stack-specific behavioral checks (route-introspection for unguarded mutations, AST settings safety,
 the out-of-band live probe) plug in as `adapters`: callables(state) -> list[violation].
 """
+from . import atomic
 from .store import EventStore
 
 
@@ -102,6 +103,13 @@ def _v(vid, severity, invariant, observed, expected, *, kind="logic", remediatio
 DEPLOY_BOOKKEEPING_PATHS = frozenset({"PROJECT/state.json"})
 
 
+# Only the most recent audit's per-entity schema results, keyed by the entity's canonical content
+# and the registry's. Never the audit VERDICT: chain checks, references, coherence and rulings all
+# still run on every audit — only re-validating a byte-identical entity against byte-identical
+# schemas is skipped. Concurrent audits can only lose hits, never borrow a result for other inputs.
+_VALIDATION_CACHE = {"schema": None, "entities": {}}
+
+
 def audit(state, registry, *, store: EventStore = None, coherence: dict = None, adapters=None,
           suppress=None, legacy_receipt_baseline=None,
           legacy_entity_schema_baseline=None) -> dict:
@@ -130,9 +138,20 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
             # not silently fall back to the older status-condition receipt exception.
             if legacy_entity_context is None:
                 legacy_context = None
+    global _VALIDATION_CACHE
+    from .canonical import content_hash as _content_hash
+    from .validate import _HAVE_JSONSCHEMA
+    schema_key = (_content_hash(registry.by_id), _HAVE_JSONSCHEMA) if entities else None
+    prior_checks = (_VALIDATION_CACHE["entities"]
+                    if _VALIDATION_CACHE["schema"] == schema_key else {})
+    checked = {}
     for eid, ent in entities.items():
         et = ent.get("type")
-        errors = _validate(ent, et, registry)
+        digest = _content_hash(ent)
+        cached = prior_checks.get(eid)
+        errors = (list(cached[1]) if cached is not None and cached[0] == digest
+                  else _validate(ent, et, registry))
+        checked[eid] = (digest, tuple(errors))
         if not errors:
             continue
 
@@ -198,6 +217,7 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
             violations.append(_v(f"schema:{eid}", "high", "entity validates against its schema",
                                  f"{eid}: {err}", "valid per hub:%s" % et, kind="schema",
                                  remediation="fix the entity payload", subject=eid))
+    _VALIDATION_CACHE = {"schema": schema_key, "entities": checked}
 
     # 2. referential integrity: no dangling idref
     for dgl in state.get("dangling", []):
@@ -235,8 +255,11 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
             # the range and the finding stands. A None delta means the range could not be read,
             # which is unknown, not empty — report it rather than assuming either way.
             delta = coherence.get("delta_paths")
-            bookkeeping_only = delta is not None and bool(delta) and set(delta).issubset(
-                DEPLOY_BOOKKEEPING_PATHS)
+            # An EMPTY delta is the BEST case - the deployed sha and HEAD are the same commit and
+            # nothing at all is unshipped - and `bool(delta)` was excluding it, so the one state
+            # this check exists to bless could never go green. Only `delta is None` (the range could
+            # not be read) is unknown; an empty set is issubset of anything, which is the right answer.
+            bookkeeping_only = delta is not None and set(delta).issubset(DEPLOY_BOOKKEEPING_PATHS)
             if not bookkeeping_only:
                 extra = ""
                 if delta is None:
@@ -344,6 +367,20 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
                                    "entity_type": gf.get("entity_type"),
                                    "signature": gf.get("signature")})
 
+    # 8. WHAT WAS ACTUALLY EVALUATED. An audit that examined nothing and found nothing prints the
+    #    same all-clear as one that examined everything and found nothing, and only the first is a
+    #    lie. The denominator rides on every result, and ZERO subjects (no entity, no adapter that
+    #    finished) is a named blocking finding rather than a PASS.
+    evaluated = {"entities": len(entities), "adapters_ran": len(adapter_report["ran"]),
+                 "adapters_requested": len(list(adapters or []))}
+    if not evaluated["entities"] and not evaluated["adapters_ran"]:
+        violations.append(_v(
+            "audit:nothing-evaluated", "high", "an audit evaluates at least one subject",
+            "0 entities and 0 of %d adapters evaluated" % evaluated["adapters_requested"],
+            "at least one entity or adapter evaluated", kind="probe",
+            remediation="seed the board (manage.py seedhub) or point the audit at the ledger that "
+                        "holds the project; an empty ledger has nothing to pass"))
+
     sev = {v["severity"] for v in violations}
     if "critical" in sev or "high" in sev:
         exit_code, ok = 2, False
@@ -355,12 +392,14 @@ def audit(state, registry, *, store: EventStore = None, coherence: dict = None, 
     # THREE answers, not two. A run that could not finish its checks is INCONCLUSIVE — blocking like
     # a FAIL, because an unfinished audit is no licence to release, but named differently so nobody
     # goes hunting for a defect that was never actually observed.
-    incomplete = adapter_report["timed_out"] + adapter_report["not_started"]
+    incomplete = (adapter_report["timed_out"] + adapter_report["not_started"]
+                  or not (evaluated["entities"] or evaluated["adapters_ran"]))
     verdict = "INCONCLUSIVE" if incomplete else ("PASS" if ok else "FAIL")
     return {
         "ok": ok,
         "exit_code": exit_code,
         "verdict": verdict,
+        "evaluated": evaluated,
         "adapters": adapter_report,
         "violations": violations,
         "grandfathered": ledger,
@@ -1148,9 +1187,7 @@ def oracle_tamper_adapter(state, repo_dir=".", git_diff=None, cache_dir=None):
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, path)
+            atomic.write_text(path, text, fsync=False)
         except OSError:
             pass
 

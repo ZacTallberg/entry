@@ -3,7 +3,7 @@ locals from a high-water mark; dotted types (feat/cap) use caller-supplied valid
 IDs are allocated once and never reused/renumbered."""
 import re
 
-_NUMERIC = {"task", "run", "adr", "gap", "deploy"}
+_NUMERIC = {"task", "run", "adr", "gap", "deploy", "directive"}
 _PAD = 4
 # The type set is CLOSED on purpose: an id whose type this regex does not know cannot be minted,
 # so adding an entity type means registering it in FIVE places: the entity schema, _KNOWN
@@ -11,11 +11,25 @@ _PAD = 4
 # PROJECT/schema/common.schema.json. Adding four of the five leaves a route and a schema that
 # both exist while every write 422s. Counted the hard way — the first version of this comment
 # said FOUR and was wrong within a minute.
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note):[a-z0-9][a-z0-9._-]*$")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*:(task|run|adr|feat|gap|cap|deploy|note|directive|ack|held):[a-z0-9][a-z0-9._-]*$")
 
 
 def valid_id(s) -> bool:
     return bool(ID_RE.match(s or ""))
+
+
+class InvalidId(ValueError):
+    """make_id refused: the composed id does not match ID_RE.
+
+    A ValueError SUBCLASS so every existing `except ValueError` around minting still catches
+    it, and a distinct TYPE so the write seam can answer 400 naming the offending id instead
+    of an empty-bodied 500. `local` is caller-supplied on several writers (a raw `local`, or a
+    slug of a caller-supplied name), so an unmintable id is a caller error, not a server one.
+    """
+
+    def __init__(self, cid):
+        super().__init__(f"invalid id {cid!r}")
+        self.id = cid
 
 
 def _local(entity_id: str) -> str:
@@ -43,5 +57,5 @@ def next_id(entities, project: str, type_: str) -> str:
 def make_id(project: str, type_: str, local: str) -> str:
     cid = f"{project}:{type_}:{local}"
     if not valid_id(cid):
-        raise ValueError(f"invalid id {cid!r}")
+        raise InvalidId(cid)
     return cid

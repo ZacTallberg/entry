@@ -7,11 +7,14 @@ from the JSONL on init, so a crash between the JSONL append and the index commit
 (the JSONL is the durable source). Stdlib only (works in Django and in single-file WSGI).
 """
 import os
+import random
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import atomic
 from .canonical import canonical, sha256_hex
 
 
@@ -23,6 +26,37 @@ class ConflictError(Exception):
         self.aggregate = aggregate
         self.expected = expected
         self.current = current
+
+
+class StoreBusy(TimeoutError):
+    """The ledger write lock could not be taken inside the wait budget. RETRYABLE.
+
+    A capacity condition, not a defect: the failure happens BEFORE any line is written, any index
+    row is inserted or any fsync runs, so the same call repeated a moment later succeeds and a
+    retry can never double-write. It has its own class so a caller can tell it apart from
+    ConflictError (a real disagreement about versions) and from a genuine sqlite fault. Left raw,
+    ``sqlite3.OperationalError: database is locked`` (or the ledger file lock's timeout) climbs out
+    of a view as an unhandled 500 and lands on the error queue as a defect somebody must pick up,
+    for a condition that is transient by construction. The adapter answers it 503 + Retry-After.
+
+    Subclasses TimeoutError so every existing ``except TimeoutError`` keeps working."""
+
+    def __init__(self, what, waited_s, cause=None):
+        super().__init__("ledger write lock unavailable during %s after %.1fs" % (what, waited_s))
+        self.what = what
+        self.waited_s = waited_s
+        self.cause = cause
+
+
+# THE SQLITE WAIT BUDGET IS SPLIT, NOT SHORTENED. SQLite's busy handler backs off on a fixed
+# schedule, so several writers waiting on one lock stay in step and one of them can be beaten on
+# every retry until its whole timeout is spent. Several shorter attempts separated by RANDOMISED
+# sleeps spend about the same wall clock while giving the waiter independent, de-synchronised
+# chances, so a convoy resolves instead of electing a loser.
+BEGIN_ATTEMPTS = 3
+BEGIN_TIMEOUT_MS = 5000
+BEGIN_BACKOFF_S = 0.05          # multiplied by the attempt number
+BEGIN_JITTER_S = 0.25           # the de-synchronising part; must not be zero
 
 
 def _now_iso() -> str:
@@ -40,7 +74,9 @@ def durable_replace(path: Path, text: str) -> None:
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # atomic.replace, not os.replace: on Windows any reader holding the ledger (a tailing
+    # request, an indexer, a scanner) makes the rename fail for a few microseconds.
+    atomic.replace(tmp, path)
     _fsync_dir(path.parent)
 
 
@@ -162,7 +198,7 @@ class LedgerLock:
                     if _t.time() > deadline:
                         os.close(fd)
                         self._rlock.release()
-                        raise TimeoutError(f"ledger lock busy: {self.path}")
+                        raise StoreBusy("ledger file lock", self.timeout)
                     self.attempts += 1
                     _t.sleep(0.002)
             try:      # for a human reading a wedged board; nothing ever reads it back. Byte 0 is
@@ -200,7 +236,7 @@ def jsonl_tail_hash(jsonl_path):
     import json as _json
     try:
         size = os.path.getsize(jsonl_path)
-        with open(jsonl_path, "rb") as f:
+        with atomic.open_read(jsonl_path, "rb") as f:
             f.seek(max(0, size - 65536))
             chunk = f.read().decode("utf-8", "replace")
     except OSError:
@@ -222,12 +258,21 @@ _HASH_FIELDS = (
 
 
 class EventStore:
-    def __init__(self, root):
+    def __init__(self, root, lock_timeout=None):
+        """``lock_timeout`` bounds how long THIS handle waits for the ledger lock before raising
+        StoreBusy. None keeps the far-off LedgerLock ceiling (offline tools, migrations); a
+        request-serving adapter passes its own budget so a lock burst answers 503 in seconds
+        instead of holding a request thread for a quarter of an hour."""
         self.root = Path(root)
+        self._lock_timeout = lock_timeout
         self.root.mkdir(parents=True, exist_ok=True)
         self.jsonl = self.root / "events.jsonl"
         self.db_path = self.root / "events.db"
-        self.jsonl.touch(exist_ok=True)
+        # CREATE, never touch. Path.touch(exist_ok=True) sets mtime to now on an EXISTING file,
+        # so every open (one per request) restamped the canonical ledger: a metadata write per
+        # read, and an mtime that no longer says when the ledger last changed.
+        if not self.jsonl.exists():
+            self.jsonl.touch()
         self._db = sqlite3.connect(str(self.db_path), isolation_level=None)
         self._db.row_factory = sqlite3.Row
         # SCHEMA SETUP HOLDS THE LEDGER LOCK, because `_init_db` ARMS the append-only trigger and
@@ -241,7 +286,7 @@ class EventStore:
         # path: an earlier attempt to remove the drop entirely (rebuild into side tables and swap by
         # DDL) lost an acked event, and serializing the window is worth far more than a cleverer
         # rebuild that cannot be trusted with the ledger.
-        with LedgerLock(self.root):
+        with LedgerLock(self.root, timeout=self._lock_timeout):
             self._init_db()
             self._reconcile()
 
@@ -251,7 +296,9 @@ class EventStore:
     def _init_db(self):
         c = self._db
         c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA busy_timeout=5000")
+        # The wait outlasts a worst-case index rebuild under contention (a restart forces one):
+        # BEGIN_TIMEOUT_MS is the ledger-lock budget, and a lock held past it answers 503 busy.
+        c.execute("PRAGMA busy_timeout=%d" % BEGIN_TIMEOUT_MS)
         c.execute(
             "CREATE TABLE IF NOT EXISTS events ("
             "seq INTEGER PRIMARY KEY, event_id TEXT, ts TEXT, aggregate TEXT, type TEXT,"
@@ -268,6 +315,12 @@ class EventStore:
             c.execute("CREATE TABLE idem (aggregate TEXT, idem_key TEXT, seq INTEGER, PRIMARY KEY(aggregate, idem_key))")
         c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_events_agg ON events(aggregate)")
+        # A scoped replay (idem_scope) looks a key up ACROSS aggregates; without this index that
+        # lookup is a table scan under the write lock on every retried create.
+        c.execute("CREATE INDEX IF NOT EXISTS ix_events_idem ON events(idem_key)")
+        # A CREATE has no aggregate until the server allocates one, so its replay is looked up by
+        # key across a type prefix (append(idem_scope=...)); this index keeps that a seek.
+        c.execute("CREATE INDEX IF NOT EXISTS ix_idem_key ON idem(idem_key)")
         self._install_trigger()
 
     def _install_trigger(self):
@@ -283,6 +336,26 @@ class EventStore:
         self._db.execute("DROP TRIGGER IF EXISTS events_no_update")
         self._db.execute("DROP TRIGGER IF EXISTS events_no_delete")
 
+    def _begin_immediate(self, what):
+        """Take the SQLite write lock, riding out contention; raise StoreBusy when the budget is
+        spent. Only CONTENTION is retryable — "cannot start a transaction within a transaction",
+        a corrupt file or a read-only volume keep their own message instead of being relabelled
+        as busy."""
+        started = time.monotonic()
+        cause = None
+        for attempt in range(BEGIN_ATTEMPTS):
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                return
+            except sqlite3.OperationalError as exc:
+                text = str(exc).lower()
+                if "locked" not in text and "busy" not in text:
+                    raise
+                cause = exc
+                if attempt < BEGIN_ATTEMPTS - 1:
+                    time.sleep(BEGIN_BACKOFF_S * (attempt + 1) + random.uniform(0, BEGIN_JITTER_S))
+        raise StoreBusy(what, time.monotonic() - started, cause)
+
     def _meta_get(self, key):
         r = self._db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return r["value"] if r else None
@@ -293,7 +366,7 @@ class EventStore:
 
     def _jsonl_lines(self):
         out = []
-        with open(self.jsonl, "r", encoding="utf-8") as f:
+        with atomic.open_read(self.jsonl, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -304,7 +377,7 @@ class EventStore:
         """The last non-empty line of the JSONL, reading only the file's tail bytes."""
         try:
             size = os.path.getsize(self.jsonl)
-            with open(self.jsonl, "rb") as f:
+            with atomic.open_read(self.jsonl, "rb") as f:
                 f.seek(max(0, size - 65536))
                 chunk = f.read().decode("utf-8", "replace")
         except OSError:
@@ -330,13 +403,25 @@ class EventStore:
         rewrites it would resurrect the very fork/lost-write class the lock closes."""
         if self._reconcile_current():
             return
-        with LedgerLock(self.root):
+        with LedgerLock(self.root, timeout=self._lock_timeout):
             if self._reconcile_current():
                 return
             self._reconcile_heal()
 
     def _reconcile_current(self):
-        """O(tail) currency check: True iff the index already reflects the file."""
+        """O(tail) currency check: True iff the index already reflects the file.
+
+        The size and chain-head meta live in the SHARED index and every append stamps them in
+        the same transaction as its row, so a log that another process merely GREW is still
+        current here -- no process-local cache of what was last verified is needed, and an
+        append by one worker never forces the next open elsewhere onto the full parse.
+
+        Four separate facts must agree, so that a corrupted meta row or a row missing from the
+        middle of the index still sends the open to the full path that repairs it: the file size
+        equals the stamped size, the file's last line hashes to the stamped chain head, the
+        index's own last row IS that head, and the index holds exactly as many rows as its tip
+        seq (seqs are contiguous from 1 after linearization). COUNT(*) is about a millisecond at
+        tens of thousands of rows -- far cheaper than parsing the log."""
         import json
         try:
             size = os.path.getsize(self.jsonl)
@@ -354,7 +439,10 @@ class EventStore:
             tail_hash = json.loads(tail).get("hash") or ""
         except ValueError:
             return False
-        return bool(head) and tail_hash == head
+        if not head or tail_hash != head:
+            return False
+        tip_seq, tip_hash = self._last_seq_and_hash()
+        return tip_hash == head and self._index_count() == tip_seq
 
     def _reconcile_heal(self):
         import json
@@ -376,6 +464,13 @@ class EventStore:
         if (not torn) and self._index_count() == len(events) and (self._meta_get("chain_head") or "") == jsonl_head:
             self._stamp_jsonl_size()   # legacy db without the size meta: stamp so the O(tail) path takes over
             return
+        # Named in the service log so the next lock burst is one grep from its trigger. reason:
+        # torn = quarantined final line, count = index row gap, head = chain-head mismatch.
+        # root names WHICH ledger, so a trace that also opens a copy never leaves that to guesswork.
+        import time as _time
+        rebuild_reason = ("torn" if torn else
+                          "count" if self._index_count() != len(events) else "head")
+        rebuild_t0 = _time.monotonic()
         c = self._db
         # BEGIN IMMEDIATE *before* the trigger drop, and the drop INSIDE that transaction.
         # The old shape dropped in autocommit and only then opened a DEFERRED transaction, which
@@ -395,7 +490,7 @@ class EventStore:
         trouble = None
         for attempt in range(2):
             try:
-                c.execute("BEGIN IMMEDIATE")
+                self._begin_immediate("reconcile")
                 self._drop_trigger()
                 armed = [r["name"] for r in c.execute(
                     "SELECT name FROM sqlite_master WHERE type='trigger' AND name IN "
@@ -409,11 +504,13 @@ class EventStore:
                     c.execute("DELETE FROM events")
                     c.execute("DELETE FROM heads")
                     c.execute("DELETE FROM idem")
-                    for ev in events:
-                        self._index_event(ev)
+                    self._index_events_batch(events)
                     self._stamp_jsonl_size()
                     self._install_trigger()
                     c.execute("COMMIT")
+                    print("LEDGER_INDEX_REBUILT events=%d took=%.3fs reason=%s root=%s"
+                          % (len(events), _time.monotonic() - rebuild_t0, rebuild_reason,
+                             self.root))
                     return
             except sqlite3.IntegrityError as e:
                 try:
@@ -509,6 +606,33 @@ class EventStore:
                              (ev["aggregate"], ev["idem_key"], ev["seq"]))
         self._db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('chain_head',?)", (ev["hash"],))
 
+    def _index_events_batch(self, events):
+        """Index a whole chain in a few bulk statements instead of ~4 per event.
+
+        The heal used to run _index_event per row inside BEGIN IMMEDIATE, so the write lock was
+        held for time proportional to the ledger (seconds at a few thousand events on a slow
+        disk) — long enough for concurrent writers to exhaust busy_timeout. Row order is
+        preserved, so `heads` (INSERT OR REPLACE in seq order) still ends on each aggregate's
+        latest version and chain_head names the final event, exactly as the per-row path
+        leaves them. append() keeps the per-event path."""
+        c = self._db
+        c.executemany(
+            "INSERT INTO events(seq,event_id,ts,aggregate,type,base_version,result_version,"
+            "hash,prev_hash,idem_key,raw) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [(ev["seq"], ev["event_id"], ev["ts"], ev["aggregate"], ev["type"],
+              ev["base_version"], ev["result_version"], ev["hash"], ev["prev_hash"],
+              ev.get("idem_key"), canonical(ev)) for ev in events])
+        c.executemany("INSERT OR REPLACE INTO heads(aggregate,version) VALUES(?,?)",
+                      [(ev["aggregate"], ev["result_version"]) for ev in events])
+        idem_rows = [(ev["aggregate"], ev["idem_key"], ev["seq"]) for ev in events
+                     if ev.get("idem_key")]
+        if idem_rows:
+            c.executemany("INSERT OR REPLACE INTO idem(aggregate,idem_key,seq) VALUES(?,?,?)",
+                          idem_rows)
+        if events:
+            c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('chain_head',?)",
+                      (events[-1]["hash"],))
+
     def head_version(self, aggregate) -> int:
         r = self._db.execute("SELECT version FROM heads WHERE aggregate=?", (aggregate,)).fetchone()
         return r["version"] if r else 0
@@ -535,6 +659,26 @@ class EventStore:
         trusts the stale index mints a duplicate seq straight into the canonical log (the
         2026-08-02 fleet-outage fork)."""
         import json
+        # The last parsable line is almost always inside the final 64 KiB; reading the whole
+        # log on every append made each write O(ledger). Fall back to the full scan only when
+        # the tail window holds no parsable line at all (a single enormous torn line).
+        try:
+            size = os.path.getsize(self.jsonl)
+            with atomic.open_read(self.jsonl, "rb") as f:
+                f.seek(max(0, size - 65536))
+                chunk = f.read().decode("utf-8", "replace")
+        except OSError:
+            return 0
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        if size > 65536 and lines:
+            lines = lines[1:]          # the first line of a mid-file window may be cut
+        for line in reversed(lines):
+            try:
+                return json.loads(line)["seq"]
+            except Exception:
+                continue
+        if size <= 65536:
+            return 0
         for line in reversed(self._jsonl_lines()):
             try:
                 return json.loads(line)["seq"]
@@ -544,11 +688,26 @@ class EventStore:
 
     def append(self, *, aggregate, type, payload, expected_version=None, agent_id=None,
                session_id=None, parent_event_id=None, actor_kind="agent", model_version=None,
-               repo_build=None, git_sha=None, idem_key=None) -> dict:
+               repo_build=None, git_sha=None, idem_key=None, idem_scope=None,
+               allocate=None) -> dict:
         """Append one event with OCC + idempotency + hash-chain. Returns the stored event.
 
         Raises ConflictError if expected_version != current head for the aggregate.
         Replaying the same idem_key is a safe no-op that returns the original event.
+
+        ``idem_scope`` is for a CREATE, whose aggregate the server allocates per attempt: a retry
+        of the same create arrives with a NEW aggregate, so the per-aggregate check can never see
+        its first attempt and the retry would land as a second record. With a scope (an id prefix
+        such as ``"<project>:task:"``) the key is looked up across that prefix under the same
+        write lock, so a retry racing its own first attempt waits and then replays it. The
+        returned event's ``aggregate`` is then the ORIGINAL one, not the id the retry allocated.
+
+        ``allocate`` is for a create whose id the SERVER numbers: a callable
+        ``allocate(taken) -> aggregate`` invoked INSIDE the write transaction, where ``taken(agg)``
+        answers whether the index already holds that aggregate. An id derived from a read taken
+        before the lock can be beaten by any concurrent create; an id chosen under the lock
+        cannot, so N simultaneous creates land N distinct records instead of N-1 conflicts.
+        ``aggregate`` is then only the caller's first guess, and the event names the real one.
 
         Runs under LedgerLock (serialize-ledger-file-rewrites): the sqlite BEGIN IMMEDIATE
         serializes appenders against each other, but only the file lock serializes them against
@@ -557,13 +716,13 @@ class EventStore:
         allocated against a SQLite head the file has already moved past.
         """
         import json
-        with LedgerLock(self.root):
+        with LedgerLock(self.root, timeout=self._lock_timeout):
             return self._append_locked(
                 aggregate=aggregate, type=type, payload=payload,
                 expected_version=expected_version, agent_id=agent_id, session_id=session_id,
                 parent_event_id=parent_event_id, actor_kind=actor_kind,
                 model_version=model_version, repo_build=repo_build, git_sha=git_sha,
-                idem_key=idem_key)
+                idem_key=idem_key, idem_scope=idem_scope, allocate=allocate)
 
     def append_batch(self, operations) -> list[dict]:
         """Commit multiple aggregate events at one canonical-file boundary.
@@ -584,16 +743,16 @@ class EventStore:
         ops = [dict(op) for op in (operations or [])]
         if not ops:
             return []
-        with LedgerLock(self.root):
+        with LedgerLock(self.root, timeout=self._lock_timeout):
             head_hash = self._meta_get("chain_head") or ""
             if jsonl_tail_hash(self.jsonl) != head_hash:
                 self._reconcile_heal()
             c = self._db
-            c.execute("BEGIN IMMEDIATE")
+            self._begin_immediate("append_batch")
             if self._jsonl_tail_seq() > self._last_seq_and_hash()[0]:
                 c.execute("ROLLBACK")
                 self._reconcile()
-                c.execute("BEGIN IMMEDIATE")
+                self._begin_immediate("append_batch")
             try:
                 replay = []
                 for op in ops:
@@ -685,7 +844,7 @@ class EventStore:
 
     def _append_locked(self, *, aggregate, type, payload, expected_version, agent_id,
                        session_id, parent_event_id, actor_kind, model_version, repo_build,
-                       git_sha, idem_key):
+                       git_sha, idem_key, idem_scope=None, allocate=None):
         import json
         # Tail-consistency guard: a crashed sync/heal can leave the FILE ahead of this handle's
         # SQLite view (the lock died with the crasher). Re-heal before allocating seq/prev_hash
@@ -695,7 +854,7 @@ class EventStore:
         if tail != head_hash:
             self._reconcile_heal()
         c = self._db
-        c.execute("BEGIN IMMEDIATE")  # serialize writers
+        self._begin_immediate("append")  # serialize writers
         # ALLOCATE FROM THE CANONICAL SOURCE: with the write lock held, the index must agree with
         # the jsonl tail before any seq is minted. If the file is ahead (an earlier append's index
         # commit failed or crashed after the fsync), re-sync the index from the file and retake
@@ -703,14 +862,22 @@ class EventStore:
         if self._jsonl_tail_seq() > self._last_seq_and_hash()[0]:
             c.execute("ROLLBACK")
             self._reconcile()
-            c.execute("BEGIN IMMEDIATE")
+            self._begin_immediate("append")
         try:
             if idem_key:
                 r = c.execute("SELECT raw FROM events WHERE aggregate=? AND idem_key=?",
                               (aggregate, idem_key)).fetchone()
+                if not r and idem_scope:
+                    r = c.execute(
+                        "SELECT e.raw FROM idem i JOIN events e ON e.seq = i.seq "
+                        "WHERE i.idem_key = ? AND substr(i.aggregate, 1, ?) = ? "
+                        "ORDER BY i.seq LIMIT 1",
+                        (idem_key, len(idem_scope), idem_scope)).fetchone()
                 if r:
                     c.execute("COMMIT")
                     return json.loads(r["raw"])
+            if allocate is not None:
+                aggregate = allocate(lambda agg: self.head_version(agg) > 0)
             head = self.head_version(aggregate)
             if expected_version is not None and expected_version != head:
                 c.execute("ROLLBACK")
@@ -736,19 +903,30 @@ class EventStore:
                 "prev_hash": prev_hash,
             }
             ev["hash"] = sha256_hex(prev_hash + canonical({k: ev[k] for k in _HASH_FIELDS}))
-            # durable append to the canonical log FIRST (fsync), then index within the txn
-            with open(self.jsonl, "a", encoding="utf-8") as f:
-                f.write(canonical(ev) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+            # INDEX FIRST, then durably append the canonical line, then COMMIT.
+            #
+            # An fsync cannot be rolled back, and the next seq is read from the INDEX. When the
+            # line was fsync'd before the row was inserted, any insert failure (a UNIQUE(seq)
+            # collision, the append-only trigger, a disk or lock error) left a canonical line no
+            # row backed, and the caller could be told the write FAILED although it had landed.
+            # Indexing first makes the common failure clean: the insert raises, ROLLBACK undoes
+            # the row, and no line was ever written. A failure in the write itself rolls the row
+            # back and can leave at most a partial FINAL line, which reconcile quarantines.
+            # Durability is unchanged: the fsync still happens BEFORE the COMMIT, so an event
+            # that committed is always in the log.
+            self._index_event(ev)
+            # atomic.append_line, not a bare open: on Windows the open itself loses to a reader
+            # or scanner holding the ledger for a few microseconds. Only the OPEN is retried,
+            # never a partial write.
+            atomic.append_line(self.jsonl, canonical(ev) + "\n")
             try:
-                self._index_event(ev)
                 self._stamp_jsonl_size()
                 c.execute("COMMIT")
             except Exception:
-                # The event IS durable in the canonical log; forgetting it here is what turns the
-                # next allocation into a duplicate-seq fork. Re-sync the index from the file and
-                # return the event as it now stands (reconcile may have re-chained it).
+                # The one window left: the line is durable but its row did not commit. That is a
+                # line without a row, never a lost event -- re-sync the index from the file and
+                # return the event as it now stands (reconcile may have re-chained it). The
+                # allocator's tail guard above keeps the next append off the stale head.
                 try:
                     c.execute("ROLLBACK")
                 except Exception:

@@ -51,6 +51,10 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Early, before any read gate: a busy ledger answers 503 + Retry-After on every hub
+    # path (reads included) and per-route latency feeds /hub/perf.json and the rail.
+    "hub.middleware.RouteTimingMiddleware",
+    "hub.middleware.LedgerBusyMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -59,6 +63,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # The visibility veil: a no-op until PROJECT/facets.json declares hidden facets.
+    "hub.veil.VeilMiddleware",
 ]
 
 ROOT_URLCONF = "project_site.urls"
@@ -131,6 +137,11 @@ WHITENOISE_AUTOREFRESH = DEBUG
 
 # Token for hub writes (X-Write-Token). Public reads, token-gated writes (keeps a public Plot safe).
 HUB_WRITE_TOKEN = os.environ.get("HUB_WRITE_TOKEN", "")
+# Board reads are authenticated by default in the canonical hub; THIS board is deliberately
+# public (its whole content is publishable) and the audit keeps that decision visible as
+# routes:public-read. Set HUB_READ_AUTH=required and mount a sign-in to close it.
+HUB_READ_AUTH = os.environ.get("HUB_READ_AUTH", "public")
+
 
 # The Entry carries the canonical Hub cockpit as a first-class operational surface. The build
 # stamp is the same artifact exposed by the public front door, keeping delivery truth coherent.
@@ -143,3 +154,15 @@ HUB_WORKER_LAUNCH_ENABLED = False
 # The Hub's default realtime bus is deliberately process-local. Entry runs one async process so
 # every connected cockpit observes every durable mutation immediately; scale-out must first bind
 # HUB_REALTIME_BROKER to shared pub/sub rather than silently fragmenting the live signal plane.
+
+# The host app's own 5xx reach the hub's operational stream (the "Host app 5xx" channel on
+# the board's coverage strip). The handler writes to the same runtime directory the hub uses.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"hub_errors": {"()": "hub_core.errorlog.HubErrorHandler",
+                                "hub_dir": os.environ.get("HUB_DIR") or str(BASE_DIR / "PROJECT" / ".hub"),
+                                "level": "ERROR"}},
+    "loggers": {"django.request": {"handlers": ["hub_errors"], "level": "ERROR",
+                                   "propagate": True}},
+}

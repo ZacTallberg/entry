@@ -1,5 +1,5 @@
 """Shared hub SHELL renderer — fills hub_core/frontend/hub_shell.html with the inlined kit
-(tokens.css + shell.css + print.css + hub.js + palette.js) and the snapshot as the #hub-data JSON
+(tokens.css + shell.css + print.css + surfaces.js + hub.js + palette.js) and the snapshot as the #hub-data JSON
 island. Built ONCE here so every stack's human view (Django or single-file WSGI) renders the SAME
 client-rendered tabbed app — no per-stack template duplication. hub.js builds the tabs/tables/modals
 client-side from the island (UI == API by construction; each active view owns a bounded native
@@ -28,9 +28,10 @@ def _asset(name):
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def render(snap, brand, csrf_token=""):
+def render(snap, brand, csrf_token="", viewer_caps=(), csrf_cookie=""):
     """Return the full single-file HTML for the hub. `snap` = the /hub.json snapshot dict; `brand`
-    = the navbar title (e.g. 'Project · Hub'). Escapes the JSON island (< -> \\u003c so a stray
+    = the navbar title (e.g. 'Project · Hub'); `viewer_caps` = the gated surfaces THIS request may
+    see (e.g. ("history",)), decided server-side and published as a meta tag. Escapes the JSON island (< -> \\u003c so a stray
     </script in any field can't close it) and inlined JS (</script -> <\\/script)."""
     snap_json = json.dumps(snap, separators=(",", ":")).replace("<", "\\u003c")
     ident = _identity.load()
@@ -43,6 +44,9 @@ def render(snap, brand, csrf_token=""):
     repl = {
         "brand": _html.escape(str(brand)),
         "csrf_token": _html.escape(str(csrf_token or ""), quote=True),
+        "viewer_caps": _html.escape(" ".join(sorted({str(c) for c in (viewer_caps or ()) if re.fullmatch(r"[a-z][a-z0-9-]{0,31}", str(c))})), quote=True),
+        # The cookie NAME the board reads its token from at send time (settings-rendered).
+        "csrf_cookie": _html.escape(str(csrf_cookie or ""), quote=True),
         "project_key": ident["key"],
         "visual_mark": visual["mark"],
         "accent_h": str(visual["accent_h"]),
@@ -59,6 +63,7 @@ def render(snap, brand, csrf_token=""):
         "print_css": _asset("print.css"),
         "snapshot_json": snap_json,
         "theme_js": _asset("theme.js").replace("</script", "<\\/script"),
+        "surfaces_js": _asset("surfaces.js").replace("</script", "<\\/script"),
         "hub_js": _asset("hub.js").replace("</script", "<\\/script"),
         "palette_js": _asset("palette.js").replace("</script", "<\\/script"),
     }
