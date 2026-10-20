@@ -2300,6 +2300,7 @@ const diag = (() => {
     } catch (_e) {}
   };
   const log = (type, data) => {
+    if (navigator.webdriver === true) console.log('diag', type, JSON.stringify(data || {}));
     buf.push({ ms: Math.round(performance.now()), type, ...(data || {}) });
     if (buf.length >= 40) flush();
   };
@@ -3495,7 +3496,11 @@ async function loadStreamingOnce() {
       body.dataset.voice = 'ready';
       window.setTimeout(() => { if (body.dataset.voice === 'ready') delete body.dataset.voice; }, 1200);
     }
-    diag('rung-a-ready', { sec: Math.round((performance.now() - t0) / 100) / 10 });
+    const st = window.__stt || {};
+    diag('rung-a-ready', {
+      sec: Math.round((performance.now() - t0) / 100) / 10,
+      tier: st.tier || '', pool: st.pool || 0, single: !!st.single,
+    });
     return true;
   } catch (err) {
     streamFailed = true;
@@ -3557,6 +3562,7 @@ function openStreamSession() {
       field?.setVoiceLevel(0.1);
     },
     onLag: (ms) => diag('rung-a-lag', { ms: Math.round(ms) }),
+    onSlow: (info) => diag('rung-a-slow', { tier: info.tier, next: info.next, ms: Math.round(info.medianMs) }),
     onError: (msg) => {
       diag('rung-a-error', { msg: String(msg).slice(0, 160) });
       streamFailed = true;

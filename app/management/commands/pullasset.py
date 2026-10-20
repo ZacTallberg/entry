@@ -51,8 +51,15 @@ _RUNTIME_FILES = (
     "voice-clone.js",
 )
 
+def _streaming_set(tier):
+    base = f"https://download.moonshine.ai/model/{tier}-streaming-en/quantized_26_07_30/"
+    return [(base + n, f"models/{tier}-streaming-en/" + n) for n in _MODEL_FILES]
+
+
 ASSETS = {
     "streaming-model": [(_MS_MODEL + n, _MS_DIR + n) for n in _MODEL_FILES],
+    "streaming-small": _streaming_set("small"),
+    "streaming-medium": _streaming_set("medium"),
     "streaming-runtime": [(_MS_CDN + n, _MS_VENDOR + n) for n in _RUNTIME_FILES],
     "base-q4": [(
         "https://huggingface.co/onnx-community/moonshine-base-ONNX/resolve/main/onnx/decoder_model_merged_q4.onnx",

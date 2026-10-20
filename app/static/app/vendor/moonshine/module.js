@@ -66,6 +66,15 @@ async function emscriptenModuleArgs(options) {
     if (options.locateFile) {
         moduleArgs.locateFile = options.locateFile;
     }
+    // Local additions to the vendored runtime: the thread pool is otherwise sized to every
+    // core on the device, and the engine's environment (e.g. MOONSHINE_ORT_SINGLE_THREAD)
+    // is otherwise unreachable from a page.
+    if (options.pthreadPoolSize) {
+        moduleArgs.pthreadPoolSize = options.pthreadPoolSize;
+    }
+    if (options.env) {
+        moduleArgs.env = options.env;
+    }
     if (isCrossOrigin(mjsUrl)) {
         const response = await fetch(mjsUrl);
         if (!response.ok) {
