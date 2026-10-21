@@ -42,8 +42,10 @@ function remember(tier) {
 }
 
 // The device's class decides the opening tier. A desktop with cores to spare carries the
-// medium model; a current phone the small one; anything thinner starts on tiny. A forced
-// ?stt= wins, then a tier the previous visit stepped down to.
+// small model; everything else, phones included, starts on tiny until a device measurement
+// says otherwise. Medium is never chosen on its own: on a 13th-gen laptop core it ran a
+// second and a half behind the voice. A forced ?stt= wins, then a tier the previous visit
+// stepped down to.
 export function chooseTier() {
   const forced = param('stt');
   if (forced && TIERS[forced]) return forced;
@@ -51,8 +53,7 @@ export function chooseTier() {
   const mem = navigator.deviceMemory || 4;
   const fine = typeof matchMedia === 'function' && matchMedia('(pointer: fine)').matches;
   let tier = 'tiny';
-  if (fine && cores >= 8 && mem >= 8) tier = 'medium';
-  else if (cores >= 6 && mem >= 6) tier = 'small';
+  if (fine && cores >= 8 && mem >= 8) tier = 'small';
   const past = remembered();
   if (past && TIERS[past] && ORDER.indexOf(past) < ORDER.indexOf(tier)) tier = past;
   return tier;

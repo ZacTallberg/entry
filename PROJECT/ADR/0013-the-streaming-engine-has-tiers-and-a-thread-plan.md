@@ -31,8 +31,10 @@ Speech is desktop-only; Nemotron/Parakeet streaming ports need WebGPU and 680 MB
 
 - `stream-stt.js` carries **three tiers** of the same engine — tiny (51 MB), small (165 MB),
   medium (305 MB) — self-hosted on the assets mount under `models/<tier>-streaming-en/`.
-  The opening tier is chosen from the device (fine pointer + ≥8 cores + ≥8 GB → medium;
-  ≥6 cores + ≥6 GB → small; else tiny), `?stt=` forces one, and a session whose first passes
+  The opening tier is chosen from the device (fine pointer + ≥8 cores + ≥8 GB → small;
+  else tiny — medium only by `?stt=medium`, amended 2026-10-21 from the prod rows below:
+  medium ran 1.0–1.5 s behind the voice on a 13th-gen laptop core, and no phone has been
+  measured on small yet), `?stt=` forces one, and a session whose first passes
   measurably cannot keep pace (median engine latency over 800 ms) remembers one tier down for
   the next visit (`entry:stt-tier`), never below tiny, never overriding a forced tier.
 - The vendored runtime is **patched** (see `vendor/moonshine/PATCHES.md`) so the page sets the
@@ -44,8 +46,10 @@ Speech is desktop-only; Nemotron/Parakeet streaming ports need WebGPU and 680 MB
 
 ## Consequences
 
-- The default phone path is small-streaming at ~165 MB: three times the download of tiny,
-  held behind the same filling dial and the same held-audio cold start (ADR 0009).
+- The default phone path stays tiny-streaming (51 MB) until a Pixel session measures small
+  there (`?stt=small` on the device; the pace judge then decides the remembered tier); a
+  desktop opens on small at ~165 MB behind the same filling dial and held-audio cold start
+  (ADR 0009).
 - The measured table below is the acceptance record; a change to any tier threshold must come
   with a new row from the same probe (`scratchpad voice/probe.py`, fake-microphone clips with
   scripted references).
@@ -59,5 +63,22 @@ Speech is desktop-only; Nemotron/Parakeet streaming ports need WebGPU and 680 MB
 | tiny · default threads (before) | 5.3 s | — | — | 1.4% |
 | tiny · single, pool 2 | 4.5 s | 85 · 240 ms | 377 ms | 1.4% |
 | tiny · multi, pool 8 | 4.6 s | 79 · 341 ms | 665 ms | 1.4% |
+
+### Live at entry.zacoberg.com, build 7f6091a (2026-10-21, quiet CPU, single · pool 2)
+
+The same probe against production, two clips each (a callback and a handyman rounds script;
+the rounds clip carries the number-heavy ledger talk that every tier mis-hears at ~13–15%).
+Headless Chromium crashes on this page's scene before the engine loads, so these rows come
+from a headed window.
+
+| tier | first text after tap | passes · median lag | p90 lag | max lag | WER | pace judge |
+|---|---|---|---|---|---|---|
+| tiny | 3.6 s · 3.7 s | 81 · 305 ms · 103 · 236 ms | 526 · 370 ms | — | 2.7% · 15.3% | keeps |
+| small | 3.3 s · 3.7 s | 81 · 395 ms · 98 · 419 ms | 558 · 628 ms | 845 · 993 ms | 0.0% · 12.9% | keeps |
+| medium | 4.6 s · 4.2 s | 46 · 1051 ms · 40 · 1498 ms | 1828 · 2404 ms | 2283 · 2560 ms | 0.0% · 12.9% | steps down |
+
+Under a concurrent build on the same machine small's median rose to 612–1003 ms and the judge
+stepped it down once — the threshold bites where it should, and a loaded desktop is a tiny
+desktop for the next visit.
 
 (amendments append the small and medium rows and the phone session)
