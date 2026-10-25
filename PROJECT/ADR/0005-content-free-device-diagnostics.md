@@ -30,3 +30,8 @@ A diagnostic channel that logs the machinery, never the words:
 - The front-door promise stays true in substance: what a visitor says never leaves the page.
 - Logs are ephemeral (/tmp, rotated, container-lifetime) — this is a debugging surface, not a
   record. Anything worth keeping must be moved into a task or ADR by the agent who reads it.
+
+**Amendment (2026-10-24):** the log lives on the mount (`device-log.jsonl`), not in `/tmp`, so it
+survives a deploy. The "forbidden forever" clause binds untagged devices: a device whose holder
+tagged it with `?report=<name>` sends its words under ADR 0014, into `report-log.jsonl` beside
+this one, and the page says so on that device.

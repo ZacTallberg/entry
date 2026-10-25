@@ -28,6 +28,10 @@ def _debug_log_path():
 
 _DEBUG_LOG_PATH = _debug_log_path()
 _DEBUG_LOG_MAX_BYTES = 4 * 1024 * 1024
+# A tagged device's words (ADR 0014) live beside the device log in their own file: the device log
+# turns over in days under lag rows, and a report is worth nothing if it is gone before it is read.
+_REPORT_LOG_PATH = os.path.join(os.path.dirname(_DEBUG_LOG_PATH), "report-log.jsonl")
+_REPORT_LOG_MAX_BYTES = 16 * 1024 * 1024
 _DEBUG_BODY_CAP = 32 * 1024
 _DEBUG_EVENTS_CAP = 60
 
@@ -213,15 +217,15 @@ def serve_asset(request, kind, path):
     return response
 
 
-def _rotate_debug_log():
+def _rotate_log(path, max_bytes):
     try:
-        if os.path.getsize(_DEBUG_LOG_PATH) <= _DEBUG_LOG_MAX_BYTES:
+        if os.path.getsize(path) <= max_bytes:
             return
-        with open(_DEBUG_LOG_PATH, "rb") as f:
-            f.seek(-_DEBUG_LOG_MAX_BYTES // 2, os.SEEK_END)
+        with open(path, "rb") as f:
+            f.seek(-max_bytes // 2, os.SEEK_END)
             tail = f.read()
         tail = tail[tail.find(b"\n") + 1:]
-        with open(_DEBUG_LOG_PATH, "wb") as f:
+        with open(path, "wb") as f:
             f.write(tail)
     except OSError:
         pass
@@ -241,13 +245,18 @@ def debug_log(request):
             "sid": str(payload.get("sid", ""))[:16],
             "build": str(payload.get("build", ""))[:24],
             "probe": bool(payload.get("probe")),
+            "reporter": str(payload.get("reporter", ""))[:24],
             "ua": request.headers.get("User-Agent", "")[:200],
             "events": events[:_DEBUG_EVENTS_CAP],
         }
         line = json.dumps(record, separators=(",", ":"))[:_DEBUG_BODY_CAP] + "\n"
         with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line)
-        _rotate_debug_log()
+        _rotate_log(_DEBUG_LOG_PATH, _DEBUG_LOG_MAX_BYTES)
+        if record["reporter"]:
+            with open(_REPORT_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+            _rotate_log(_REPORT_LOG_PATH, _REPORT_LOG_MAX_BYTES)
     except (ValueError, OSError, UnicodeDecodeError):
         pass
     response = HttpResponse(status=204)
@@ -265,9 +274,10 @@ def debug_tail(request):
         n = max(1, min(1000, int(request.GET.get("n", 200))))
     except ValueError:
         n = 200
+    path = _REPORT_LOG_PATH if request.GET.get("src") == "report" else _DEBUG_LOG_PATH
     lines = []
     try:
-        with open(_DEBUG_LOG_PATH, encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()[-n:]
     except OSError:
         pass

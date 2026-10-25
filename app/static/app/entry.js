@@ -2285,6 +2285,32 @@ class ParticleField {
   }
 }
 
+// ── a tagged device (ADR 0014): the holder opened ?report=<name> once, and from then on this
+// browser sends what it hears and what it releases, under that name, so the maker can read it.
+// ?report=off forgets the tag. Any other device stays under ADR 0003: words never leave the page.
+const REPORTER = (() => {
+  const key = 'entry:reporter';
+  const asked = new URLSearchParams(window.location.search).get('report');
+  let tag = null;
+  try { tag = window.localStorage.getItem(key); } catch (_e) { tag = null; }
+  if (asked !== null) {
+    const clean = asked.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 24);
+    if (!clean || clean === 'off' || clean === '0' || clean === 'no') {
+      tag = null;
+      try { window.localStorage.removeItem(key); } catch (_e) { /* private mode */ }
+    } else {
+      tag = clean === '1' || clean === 'on' || clean === 'yes' ? (tag || 'phone') : clean;
+      try { window.localStorage.setItem(key, tag); } catch (_e) { /* private mode */ }
+    }
+  }
+  if (tag) {
+    document.body.dataset.reporter = tag;
+    const mark = document.getElementById('reporter-mark');
+    if (mark) { mark.textContent = 'this device reports what it hears to the maker, as ' + tag; mark.hidden = false; }
+  }
+  return tag;
+})();
+
 // ── content-free device diagnostics (ADR 0005): the machinery's health, never the words ─────────
 const diag = (() => {
   const sid = Math.random().toString(36).slice(2, 10);
@@ -2292,7 +2318,7 @@ const diag = (() => {
   let buf = [];
   const flush = () => {
     if (!buf.length) return;
-    const body = JSON.stringify({ sid, build, probe: navigator.webdriver === true, events: buf.splice(0, 60) });
+    const body = JSON.stringify({ sid, build, probe: navigator.webdriver === true, reporter: REPORTER || '', events: buf.splice(0, 60) });
     try {
       if (!(navigator.sendBeacon && navigator.sendBeacon('/api/debug-log', new Blob([body], { type: 'application/json' })))) {
         fetch('/api/debug-log', { method: 'POST', body, keepalive: true }).catch(() => {});
@@ -2319,7 +2345,9 @@ const diag = (() => {
     h: window.innerHeight,
     touch: navigator.maxTouchPoints > 0,
     lang: (navigator.language || '').slice(0, 12),
+    reporter: !!REPORTER,
   });
+  log.flush = flush;
   return log;
 })();
 
@@ -2543,7 +2571,7 @@ function beginRelease() {
   releaseButton.setAttribute('aria-busy', 'true');
   setState('releasing', '');
   if (listening) stopListening();
-  if (reportMode) diag('report-release', { text: raw.slice(0, 300) });
+  if (reportMode) { diag('report-release', { text: raw.slice(0, 360), typed: !voiceBase && !streamBase }); diag.flush(); }
   // the dark answers with a different gesture depending on what was said: it erupts from a
   // compressed core, gathers inward from beyond the frame, or settles in place
   const arrival = arrivalFor(chosen.hash);
@@ -2989,7 +3017,7 @@ function flushChunk(atCap) {
   if (serverCopy) refineViaServer(id, serverCopy, !sttWorker || sttFailed);
 }
 
-const reportMode = new URLSearchParams(window.location.search).has('report');
+const reportMode = !!REPORTER;
 let serverSttOk = !(navigator.mediaDevices && window.Worker && window.AudioWorkletNode);
 let bufferGen = 0;
 let interimTrack = { gen: -1, text: '', committed: 0, fullest: '' };
@@ -3009,7 +3037,7 @@ function applyFinal(id, transcript, src) {
   const st = chunkStates.get(id);
   if (!st || st.applied) return;
   st.applied = true;
-  if (reportMode && transcript) diag('report-text', { src, text: transcript.slice(0, 300) });
+  if (reportMode && transcript) diag('report-text', { src, text: transcript.slice(0, 360) });
   if (locked || !transcript) return;
   st.baseBefore = voiceBase;
   feedVoice(transcript, true);
@@ -3248,6 +3276,9 @@ function stopListening() {
   // is counted from there rather than from whenever the text finally appears
   if (wasListening && !spokenTextAt) spokenTextAt = performance.now();
   listening = false;
+  if (reportMode && wasListening && text.value.trim()) {
+    diag('report-said', { src: streamSession ? 'stream' : nativeRecognizer ? 'native' : 'chunk', text: text.value.slice(0, 360) });
+  }
   body.dataset.voiceOn = 'false';
   if (text.value.trim()) scheduleWarm();
   if (field) field.listening = false;

@@ -235,6 +235,17 @@ body[data-state="holding"] .invitation {
 }
 
 body[data-state="releasing"] .invitation { opacity: 0; }
+
+.reporter-mark {
+  margin: 10px 0 0;
+  color: rgba(232, 235, 248, .38);
+  font-size: clamp(.58rem, .52rem + .18vw, .68rem);
+  font-weight: 340;
+  letter-spacing: .18em;
+  text-align: center;
+  text-transform: lowercase;
+}
+.reporter-mark[hidden] { display: none; }
 body[data-state="releasing"] #entry-text::placeholder,
 body[data-state="returned"] #entry-text::placeholder { opacity: 0; }
 
