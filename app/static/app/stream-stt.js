@@ -28,6 +28,20 @@ const SLOW_RATIO = 1.6;
 const SLOW_SAMPLE = 8;
 // The first passes of a session carry the runtime's warm-up and are not the pace it will hold.
 const SLOW_SKIP = 3;
+// A pass this cheap leaves room for the next tier up: a phone that decodes tiny in 99 ms a
+// pass carries small, which costs three to four times as much, well inside the slow line.
+// Promotion stops at small; medium is only ever asked for.
+const FAST_MS = 150;
+const TOP_AUTO = 'small';
+// A tier the judge once stepped down from is this device's ceiling until a forced ?stt=
+// clears it, so a promotion can never climb back into a pace that already failed.
+const CEILING_KEY = 'entry:stt-ceiling';
+// Seconds of new audio the stream collects before it runs another pass. The runtime's own
+// default is half a second; the library already stretches the gate to whatever a pass
+// costs, so a shorter one only runs more often where the device can afford it. The
+// encoder itself looks 1.28 s ahead (total_lookahead 16 frames of 80 ms), which is the
+// floor under any first word and is not ours to move. ?sttint= overrides.
+const DEFAULT_INTERVAL = 0.25;
 
 function param(name) {
   try { return new URLSearchParams(window.location.search).get(name); } catch (_e) { return null; }
@@ -41,21 +55,50 @@ function remember(tier) {
   try { localStorage.setItem(TIER_KEY, tier); } catch (_e) {}
 }
 
+function ceiling() {
+  try { return localStorage.getItem(CEILING_KEY); } catch (_e) { return null; }
+}
+
+function setCeiling(tier) {
+  try { localStorage.setItem(CEILING_KEY, tier); } catch (_e) {}
+}
+
+export function updateInterval() {
+  const asked = Number(param('sttint') || 0);
+  return asked > 0 ? asked : DEFAULT_INTERVAL;
+}
+
+export function supportReasons() {
+  return {
+    sab: typeof SharedArrayBuffer === 'function',
+    iso: typeof crossOriginIsolated !== 'undefined' && !!crossOriginIsolated,
+    worker: typeof Worker === 'function',
+  };
+}
+
 // The device's class decides the opening tier. A desktop with cores to spare carries the
-// small model; everything else, phones included, starts on tiny until a device measurement
-// says otherwise. Medium is never chosen on its own: on a 13th-gen laptop core it ran a
-// second and a half behind the voice. A forced ?stt= wins, then a tier the previous visit
-// stepped down to.
+// small model; everything else, phones included, starts on tiny. Medium is never chosen on
+// its own: on a 13th-gen laptop core it ran a second and a half behind the voice. A forced
+// ?stt= wins and clears what the device remembered about itself; otherwise the tier a
+// previous visit measured its way to, down or up, outranks the class guess, as long as it
+// stays under the ceiling the judge once set.
 export function chooseTier() {
   const forced = param('stt');
-  if (forced && TIERS[forced]) return forced;
+  if (forced && TIERS[forced]) {
+    try { localStorage.removeItem(TIER_KEY); localStorage.removeItem(CEILING_KEY); } catch (_e) {}
+    return forced;
+  }
   const cores = navigator.hardwareConcurrency || 4;
   const mem = navigator.deviceMemory || 4;
   const fine = typeof matchMedia === 'function' && matchMedia('(pointer: fine)').matches;
   let tier = 'tiny';
   if (fine && cores >= 8 && mem >= 8) tier = 'small';
   const past = remembered();
-  if (past && TIERS[past] && ORDER.indexOf(past) < ORDER.indexOf(tier)) tier = past;
+  if (past && TIERS[past]) tier = past;
+  const cap = ceiling();
+  if (cap && TIERS[cap] && ORDER.indexOf(cap) > 0 && ORDER.indexOf(tier) >= ORDER.indexOf(cap)) {
+    tier = ORDER[ORDER.indexOf(cap) - 1];
+  }
   return tier;
 }
 
@@ -102,15 +145,11 @@ let loading = null;
 let fetchIssue = '';
 let tier = null;
 let plan = null;
-const stats = { tier: null, pool: 0, single: true, loadMs: 0, lags: [], passes: 0, slow: false };
+const stats = { tier: null, pool: 0, single: true, loadMs: 0, lags: [], passes: 0, slow: false, fast: false, interval: 0 };
 window.__stt = stats;
 
 export function lastFetchIssue() { return fetchIssue; }
 export function activeTier() { return tier; }
-// The engine keeps its lines across sessions; ids retired with a session must never
-// reappear in the next one, or a second utterance inherits the first one's words.
-const retiredIds = new Set();
-
 export function streamingSupported() {
   return typeof SharedArrayBuffer === 'function'
     && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated
@@ -175,17 +214,28 @@ export async function loadStreaming(onProgress) {
 // than the audio they cover, the next visit opens one tier down. A device is never pushed
 // below tiny, and a forced ?stt= is never overruled.
 function judgePace(listener) {
-  if (stats.slow || stats.lags.length < SLOW_SKIP + SLOW_SAMPLE) return;
+  if (stats.slow || stats.fast || stats.lags.length < SLOW_SKIP + SLOW_SAMPLE) return;
   const sorted = stats.lags.slice(SLOW_SKIP, SLOW_SKIP + SLOW_SAMPLE).sort((a, b) => a - b);
   const median = sorted[sorted.length >> 1];
-  if (median <= 500 * SLOW_RATIO) return;
-  stats.slow = true;
   const at = ORDER.indexOf(tier);
-  if (at > 0 && !param('stt')) {
-    remember(ORDER[at - 1]);
-    if (listener.onSlow) listener.onSlow({ tier, next: ORDER[at - 1], medianMs: median });
-  } else if (listener.onSlow) {
-    listener.onSlow({ tier, next: tier, medianMs: median });
+  if (median > 500 * SLOW_RATIO) {
+    stats.slow = true;
+    if (at > 0 && !param('stt')) {
+      remember(ORDER[at - 1]);
+      setCeiling(tier);
+      if (listener.onSlow) listener.onSlow({ tier, next: ORDER[at - 1], medianMs: median });
+    } else if (listener.onSlow) {
+      listener.onSlow({ tier, next: tier, medianMs: median });
+    }
+    return;
+  }
+  if (median <= FAST_MS && at < ORDER.indexOf(TOP_AUTO) && !param('stt')) {
+    const next = ORDER[at + 1];
+    const cap = ceiling();
+    if (cap && TIERS[cap] && ORDER.indexOf(next) >= ORDER.indexOf(cap)) return;
+    stats.fast = true;
+    remember(next);
+    if (listener.onFast) listener.onFast({ tier, next, medianMs: median });
   }
 }
 
@@ -205,7 +255,6 @@ export function openStream(listener) {
   const upsert = (line, complete) => {
     if (!line || typeof line.text !== 'string') return;
     const id = String(line.id);
-    if (retiredIds.has(id)) return;
     lines.set(id, { text: line.text.trim(), complete: complete || !!line.isComplete });
     emit();
     if (typeof line.lastTranscriptionLatencyMs === 'number' && line.lastTranscriptionLatencyMs > 0) {
@@ -215,27 +264,33 @@ export function openStream(listener) {
       judgePace(listener);
     }
   };
-  transcriber.createStream({});
-  transcriber.addListener({
+  // One stream per session, closed with it. The runtime's convenience methods all drive a
+  // single default stream that keeps its lines and is never released; a stream of our own
+  // starts empty, carries the pass gate, and frees its engine state when the microphone
+  // closes, so a second utterance can never inherit the first one's words.
+  stats.interval = updateInterval();
+  const stream = transcriber.createStream({ updateInterval: stats.interval });
+  stream.addListener({
     onLineStarted: (e) => upsert(e.line, false),
     onLineUpdated: (e) => upsert(e.line, false),
     onLineTextChanged: (e) => upsert(e.line, false),
     onLineCompleted: (e) => upsert(e.line, true),
     onError: (e) => listener.onError && listener.onError(String((e && e.error) || e)),
   });
-  transcriber.start();
+  stream.start();
   return {
     addAudio(samples, sampleRate) {
       try {
-        transcriber.addAudio(samples, sampleRate);
+        stream.addAudio(samples, sampleRate);
+        stream.transcribe();
       } catch (err) {
         listener.onError && listener.onError(String((err && err.message) || err));
       }
     },
     stop() {
-      try { transcriber.stop(); } catch (_e) {}
-      try { transcriber.removeAllListeners(); } catch (_e) {}
-      for (const id of lines.keys()) retiredIds.add(id);
+      try { stream.stop(); } catch (_e) {}
+      try { stream.removeAllListeners(); } catch (_e) {}
+      try { stream.close(); } catch (_e) {}
       lines.clear();
     },
   };

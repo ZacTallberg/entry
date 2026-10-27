@@ -3507,7 +3507,7 @@ async function loadStreamingOnce() {
     streamMod = await import('./stream-stt.js?v=' + assetVersion);
     if (!streamMod.streamingSupported()) {
       streamFailed = true;
-      diag('rung-a-unsupported');
+      diag('rung-a-unsupported', streamMod.supportReasons ? streamMod.supportReasons() : {});
       return false;
     }
     diag('rung-a-load');
@@ -3531,6 +3531,7 @@ async function loadStreamingOnce() {
     diag('rung-a-ready', {
       sec: Math.round((performance.now() - t0) / 100) / 10,
       tier: st.tier || '', pool: st.pool || 0, single: !!st.single,
+      interval: streamMod.updateInterval ? streamMod.updateInterval() : 0,
     });
     return true;
   } catch (err) {
@@ -3594,6 +3595,7 @@ function openStreamSession() {
     },
     onLag: (ms) => diag('rung-a-lag', { ms: Math.round(ms) }),
     onSlow: (info) => diag('rung-a-slow', { tier: info.tier, next: info.next, ms: Math.round(info.medianMs) }),
+    onFast: (info) => diag('rung-a-fast', { tier: info.tier, next: info.next, ms: Math.round(info.medianMs) }),
     onError: (msg) => {
       diag('rung-a-error', { msg: String(msg).slice(0, 160) });
       streamFailed = true;

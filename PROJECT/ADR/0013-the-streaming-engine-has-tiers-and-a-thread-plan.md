@@ -82,3 +82,46 @@ stepped it down once — the threshold bites where it should, and a loaded deskt
 desktop for the next visit.
 
 (amendments append the small and medium rows and the phone session)
+
+## Amendment 2026-10-27 — the engine follows the device both ways, and owns its stream
+
+What the device log showed after a week live: the operator's phone (8 cores, 8 GB) ran tiny at a
+99 ms median pass with nothing in the code that could ever offer it small; a 32-core desktop took
+3 to 5 s from tap to first text; a 16-core desktop was told streaming was unsupported and the row
+said nothing about why.
+
+- **Promotion on proof.** After the warm-up passes, a session whose median pass is at or under
+  150 ms writes the next tier up for the next visit (`rung-a-fast`). Promotion stops at small;
+  medium stays a `?stt=medium` matter. A step-down now also records the tier it stepped down from
+  as the device's **ceiling** (`entry:stt-ceiling`); a promotion never climbs to or past it. A
+  forced `?stt=` clears both memories. `chooseTier` applies a remembered tier in either direction.
+- **One stream per session.** The runtime's convenience calls all drive a single default stream
+  that keeps its lines and is never released, which is why a retired-id set had to guard the
+  next utterance. `openStream` now creates its own stream, closes it when the microphone shuts,
+  and drops the retired-id guard. Proven: two sessions in one visit on a looping microphone both
+  transcribe and the second does not inherit the first's words.
+- **The pass gate is 0.25 s** of new audio (`DEFAULT_INTERVAL`, `?sttint=` overrides), down from
+  the runtime's 0.5 s. The library already stretches the gate to whatever a pass costs, so it
+  only runs more often where the device can afford it.
+- `rung-a-unsupported` now carries `sab`, `iso`, `worker`.
+- Not ours to move: the streaming encoder looks 1.28 s ahead (`total_lookahead` 16 frames of
+  80 ms in every tier's `streaming_config.json`). That is the floor under any first word.
+
+### Measured 2026-10-27, i5-1340P quiet (load under 5% at start), local server, headed Chromium, single-thread, pool 2, estimate-5 corpus
+
+| run | first text after tap | median / p90 / max pass | passes | WER |
+|---|---|---|---|---|
+| tiny 0.5 s | 3.1 s | 213 / 328 / 434 ms | 93 | 15.7% |
+| tiny 0.25 s | 3.4 s | 210 / 368 / 518 ms | 87 | 10.0% |
+| tiny 0.125 s | 2.8 s | 214 / 344 / 427 ms | 96 | 12.9% |
+| small 0.5 s | 2.9 s | 433 / 833 / 1094 ms | 87 | 14.3% |
+| small 0.25 s | 3.5 s | 473 / 827 / 930 ms | 78 | 10.0% |
+| small 0.125 s | 3.1 s | 429 / 691 / 779 ms | 87 | 7.1% |
+
+On this machine the gate is never the floor: the pass count is the same at every setting because
+a pass costs more than 0.25 s of audio, and first text and WER move inside run-to-run noise. The
+gate matters on a device whose pass is cheaper than the gate, which the phone on tiny is: there
+0.25 s halves the audio-to-text delay against 0.5 s, and 0.125 s would only double the pass
+overhead for a tenth of a second. An earlier, ungated run of the same matrix under host memory
+pressure produced medians over 2 s and 97 s listens on a 30 s clip; it is discarded, and the
+runbook (`PROJECT/ops/local-dev.md`) now gates each run on the host's load.
