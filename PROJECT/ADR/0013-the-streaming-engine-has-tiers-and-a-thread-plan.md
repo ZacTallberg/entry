@@ -196,3 +196,12 @@ the halved gate changed nothing measurable (tiny: 90 passes, WER 15.7%, first te
 the expected result on a device whose pass exceeds the gate; the phone's rows decide. A release also
 now waits while a closing session's final pass is on its way (two seconds at most), so the dark
 answers the words as finally heard.
+
+**Amendment 2026-10-28 (goal loop, unit 4, the art seen):** frames of the live piece on a phone
+viewport showed a hard-edged, blown-out white rectangle over the newest words during dictation. The
+dust drew every condensing letter's breath additively ('lighter'); a revision sets twenty letters
+condensing at once and their stacked puffs clipped to a plateau whose edges were the puffs' shared
+extents. The smoke and the letter breaths now composite with 'screen', so stacked vapour approaches
+white along its own gradients, and a run of fresh letters shares one breath (alpha scaled by
+1/sqrt(0.8 n)). Verified on the same frames locally: soft vapour, no block. The invitation line is
+hidden outright while dictating; its ghost sat over the vapour above the first line.

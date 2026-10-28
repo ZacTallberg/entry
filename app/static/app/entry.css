@@ -235,6 +235,10 @@ body[data-state="holding"] .invitation {
 }
 
 body[data-state="releasing"] .invitation { opacity: 0; }
+/* while the words are being spoken the invitation has been answered; a ghost of it sat
+   over the vapour above the first line and read as clutter on a phone */
+body[data-dictating="true"] .invitation,
+body[data-voice-on="true"] .invitation { opacity: 0; }
 
 .reporter-mark {
   margin: 10px 0 0;

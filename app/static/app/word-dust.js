@@ -237,8 +237,10 @@ export function createWordDust(host) {
     const t = now * 0.001;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // smoke first, beneath the writing
-    ctx.globalCompositeOperation = 'lighter';
+    // smoke first, beneath the writing. Screen, not additive: a dozen puffs over one spot
+    // approach white along their own gradients instead of clipping to a hard-edged plateau,
+    // which on a phone was a white rectangle sitting over the newest words.
+    ctx.globalCompositeOperation = 'screen';
     for (let i = puffs.length - 1; i >= 0; i -= 1) {
       const h = puffs[i];
       h.life += dt;
@@ -268,6 +270,7 @@ export function createWordDust(host) {
 
     // then the letters, each one condensing in its turn
     let pending = false;
+    let fresh = 0;
     const buckets = [];
     ctx.textBaseline = 'alphabetic';
     for (const word of words) {
@@ -287,14 +290,18 @@ export function createWordDust(host) {
           ? Math.sin(c.seed * 9.1 + t * 26.0) * hand.shiver * (1 - a) * dpr
           : 0;
         const x = word.x + c.dx + shake;
-        // the letter's own breath, thinning as it condenses
+        // the letter's own breath, thinning as it condenses. A revision can set twenty
+        // letters condensing at once; their breaths share the air rather than each adding a
+        // whole one, or the line vanishes under its own vapour.
         if (a < 1) {
+          fresh += 1;
+          const share = 1 / Math.sqrt(Math.max(1, fresh * 0.8));
           ctx.save();
-          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalCompositeOperation = 'screen';
           for (let q = 0; q < hand.puffs; q += 1) {
             const spread = (1 - a) * (hand.spread + q * 9) * dpr;
             const puffR = (18 + q * 12 + hand.puffR * (1 - a)) * dpr;
-            ctx.globalAlpha = (hand.puffAlpha - q * 0.08) * (1 - a * 0.85);
+            ctx.globalAlpha = (hand.puffAlpha - q * 0.08) * (1 - a * 0.85) * share;
             if (ctx.globalAlpha <= 0.004) continue;
             ctx.save();
             ctx.translate(
