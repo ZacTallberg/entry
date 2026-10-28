@@ -125,3 +125,41 @@ gate matters on a device whose pass is cheaper than the gate, which the phone on
 overhead for a tenth of a second. An earlier, ungated run of the same matrix under host memory
 pressure produced medians over 2 s and 97 s listens on a 30 s clip; it is discarded, and the
 runbook (`PROJECT/ops/local-dev.md`) now gates each run on the host's load.
+
+## Amendment 2026-10-28 — the engine leaves the page thread
+
+The first words through the feedback channel (ADR 0014), from the operator's phone on build
+0a8cea0, tiny at a 100 ms median pass: "things slightly freeze at the moment a word plips into
+existence" and "a slight bit of lag any time a word pops into existence". The runtime's own
+protocol notes say why: a synchronous `Stream.transcribe` runs on whichever thread calls it, and
+`stream-stt.js` called it from the page, the thread that draws the field. Every pass was that many
+dropped frames, and the promotion the same visit earned (tiny to small) would have made each
+stall three to four times longer.
+
+- The engine now loads inside the runtime's `SttWorkerHost` (a module worker, `stt-worker.js`),
+  with the page's thread plan forwarded into it (vendored patch 4: the worker otherwise boots a
+  pool the size of every core and multi-threaded onnxruntime). Audio is posted in 64 ms spans;
+  the worker coalesces passes; line events come back as plain objects. Audio that arrives before
+  the worker acknowledges `start` waits in the session and is flushed on the acknowledgement.
+- The in-page transcriber remains as the fallback when the host cannot be built (no nested
+  workers), and `?sttplace=page` forces it for a comparison. `rung-a-ready` carries `place`.
+- The thread plan is unchanged: single-thread onnxruntime, pool 2. In the worker, four engine
+  threads bought small 18% on this laptop and tiny nothing; not worth four threads of a phone's
+  battery before the phone has reported its own numbers.
+
+### Measured 2026-10-28, i5-1340P, local server, headed Chromium, estimate-5 corpus; the probe's own page load (the field) is ~55% of the box in every run, both places alike
+
+| run | worst frame while listening | first text | median / p90 pass | WER |
+|---|---|---|---|---|
+| tiny, page | 125 ms | 3.1 s | 167 / 246 ms | 17.1% |
+| tiny, worker | 83 ms | 3.1 s | 204 / 323 ms | 17.1% |
+| small, page | 372 ms | 3.1 s | 351 / 603 ms | 4.3% |
+| small, worker | 73 ms | 3.3 s | 695 / 1122 ms | 5.7% |
+| small, worker, 4 threads | 23 ms | 3.5 s | 567 / 735 ms | 4.3% |
+| tiny, worker, 2 threads | 84 ms | 3.3 s | 207 / 328 ms | 15.7% |
+
+The field stops stalling in both tiers. The pass costs more off the page thread, by a fifth on
+tiny and by two on small: Chrome schedules a dedicated worker below the page thread, and on this
+hybrid part that is an efficiency core. That is a laptop fact; the phone's big and little cores
+will tell their own story through the device log, and the pace judge and the ceiling already
+govern the outcome either way. Two sessions in one visit on the worker path both transcribe.

@@ -141,14 +141,22 @@ async function auditDelivery(dir) {
 }
 
 let transcriber = null;
+// The engine's home. The runtime's worker host keeps every pass off the page thread, which
+// is where the field draws; the in-page transcriber stays as the fallback for a browser
+// that cannot nest workers. ?sttplace=page forces the fallback for a comparison.
+let host = null;
+let streamSeq = 0;
+let workerIssue = '';
 let loading = null;
 let fetchIssue = '';
 let tier = null;
 let plan = null;
-const stats = { tier: null, pool: 0, single: true, loadMs: 0, lags: [], passes: 0, slow: false, fast: false, interval: 0 };
+const stats = { tier: null, pool: 0, single: true, loadMs: 0, lags: [], passes: 0, slow: false, fast: false, interval: 0, place: '' };
 window.__stt = stats;
 
 export function lastFetchIssue() { return fetchIssue; }
+export function enginePlace() { return stats.place; }
+export function lastWorkerIssue() { return workerIssue; }
 export function activeTier() { return tier; }
 export function streamingSupported() {
   return typeof SharedArrayBuffer === 'function'
@@ -157,7 +165,7 @@ export function streamingSupported() {
 }
 
 export async function loadStreaming(onProgress) {
-  if (transcriber) return transcriber;
+  if (host || transcriber) return host || transcriber;
   if (loading) return loading;
   loading = (async () => {
     const t0 = performance.now();
@@ -192,16 +200,40 @@ export async function loadStreaming(onProgress) {
         onProgress(Math.max(0, Math.min(0.995, seen)));
       };
     }
-    try {
-      transcriber = await mod.Transcriber.loadFromUrls(files, opts);
-    } catch (err) {
-      // The engine stores its weights in Cache Storage, so it must fetch the real URLs
-      // itself. Verify what the network actually delivered before blaming the model.
-      fetchIssue = await auditDelivery(dir);
-      throw err;
+    if (param('sttplace') !== 'page') {
+      let h = null;
+      try {
+        const hostMod = await import(RUNTIME + 'stt-worker-host.js');
+        if (!hostMod.sttWorkerSupported()) throw new Error('no worker here');
+        h = new hostMod.SttWorkerHost();
+        if (opts.onProgress) h.onProgress = (_id, loaded, total) => opts.onProgress(loaded, total);
+        await h.loadTranscriber({
+          transcriberId: 'entry',
+          modelArch: opts.modelArch,
+          source: { kind: 'urls', files },
+          pthreadPoolSize: plan.pool,
+          env: opts.moduleOptions.env,
+        });
+        host = h;
+        stats.place = 'worker';
+      } catch (err) {
+        workerIssue = String((err && err.message) || err).slice(0, 160);
+        try { if (h) h.close(); } catch (_e) {}
+      }
+    }
+    if (!host) {
+      try {
+        transcriber = await mod.Transcriber.loadFromUrls(files, opts);
+        stats.place = 'page';
+      } catch (err) {
+        // The engine stores its weights in Cache Storage, so it must fetch the real URLs
+        // itself. Verify what the network actually delivered before blaming the model.
+        fetchIssue = await auditDelivery(dir);
+        throw err;
+      }
     }
     stats.loadMs = Math.round(performance.now() - t0);
-    return transcriber;
+    return host || transcriber;
   })();
   try {
     return await loading;
@@ -241,7 +273,7 @@ function judgePace(listener) {
 
 // The listener receives every revision of the in-flight line plus each committed line.
 export function openStream(listener) {
-  if (!transcriber) throw new Error('not loaded');
+  if (!host && !transcriber) throw new Error('not loaded');
   const lines = new Map();
   const emit = () => {
     let committed = '';
@@ -269,14 +301,43 @@ export function openStream(listener) {
   // starts empty, carries the pass gate, and frees its engine state when the microphone
   // closes, so a second utterance can never inherit the first one's words.
   stats.interval = updateInterval();
-  const stream = transcriber.createStream({ updateInterval: stats.interval });
-  stream.addListener({
+  const events = {
     onLineStarted: (e) => upsert(e.line, false),
     onLineUpdated: (e) => upsert(e.line, false),
     onLineTextChanged: (e) => upsert(e.line, false),
     onLineCompleted: (e) => upsert(e.line, true),
     onError: (e) => listener.onError && listener.onError(String((e && e.error) || e)),
-  });
+  };
+  if (host) {
+    // The worker answers create and start in order; audio that arrives before the start
+    // is acknowledged waits here, because the worker ingests audio the moment it lands
+    // and would not yet know the stream.
+    const id = 's' + (streamSeq += 1);
+    const fail = (err) => listener.onError && listener.onError(String((err && err.message) || err));
+    host.setListener(id, events);
+    let queued = [];
+    let live = false;
+    const ready = host.createStream('entry', id, { updateInterval: stats.interval })
+      .then(() => host.start(id))
+      .then(() => {
+        live = true;
+        for (const [s, r] of queued) host.addAudio(id, s, r);
+        queued = [];
+      })
+      .catch(fail);
+    return {
+      addAudio(samples, sampleRate) {
+        if (!live) { queued.push([samples.slice(0), sampleRate]); return; }
+        try { host.addAudio(id, samples, sampleRate); } catch (err) { fail(err); }
+      },
+      stop() {
+        ready.then(() => host.stop(id)).then(() => host.closeStream(id)).catch(() => {});
+        lines.clear();
+      },
+    };
+  }
+  const stream = transcriber.createStream({ updateInterval: stats.interval });
+  stream.addListener(events);
   stream.start();
   return {
     addAudio(samples, sampleRate) {

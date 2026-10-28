@@ -123,6 +123,8 @@ export class SttWorkerHost {
             optionValues,
             source: config.source,
             wasmBaseUrl: this.wasmBaseUrl,
+            pthreadPoolSize: config.pthreadPoolSize,
+            env: config.env,
         });
         if (response.type !== 'ok') {
             throw new Error('Unexpected STT worker response to loadTranscriber.');

@@ -3532,6 +3532,8 @@ async function loadStreamingOnce() {
       sec: Math.round((performance.now() - t0) / 100) / 10,
       tier: st.tier || '', pool: st.pool || 0, single: !!st.single,
       interval: streamMod.updateInterval ? streamMod.updateInterval() : 0,
+      place: streamMod.enginePlace ? streamMod.enginePlace() : '',
+      workerIssue: (streamMod.lastWorkerIssue && streamMod.lastWorkerIssue()) || '',
     });
     return true;
   } catch (err) {

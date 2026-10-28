@@ -13,4 +13,10 @@ Re-apply after any re-vendor (the files are otherwise verbatim from the npm `dis
 3. `module.js` `emscriptenModuleArgs`: forwards `options.pthreadPoolSize` and `options.env` from
    `loadFromUrls(..., { moduleOptions })` into the module constructor.
 
+4. `stt-worker-host.js` `loadTranscriber` forwards `config.pthreadPoolSize` and `config.env` in the
+   `loadTranscriber` message, and `stt-worker.js` `loadTranscriber` copies them into the
+   `moduleOptions` it hands `Transcriber.loadFromUrls`. Without this the worker's engine would
+   boot with a pool the size of every core and multi-threaded onnxruntime, the two things
+   patches 1 and 2 exist to prevent.
+
 `stream-stt.js` is the only caller; its `threadPlan()` decides both knobs.

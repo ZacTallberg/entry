@@ -54,6 +54,11 @@ async function loadTranscriber(msg) {
     const moduleOptions = {
         locateFile: (path) => new URL(path, msg.wasmBaseUrl).href,
     };
+    // Local addition: the page's thread plan reaches the engine inside the worker too.
+    if (msg.pthreadPoolSize)
+        moduleOptions.pthreadPoolSize = msg.pthreadPoolSize;
+    if (msg.env)
+        moduleOptions.env = msg.env;
     const onProgress = (loaded, total, file) => {
         reply({
             type: 'progress',
