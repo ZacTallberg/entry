@@ -102,10 +102,14 @@ def main():
             seen.add(k)
             fresh.append(r)
         if first:
-            # the first pass only seeds the cursor: everything already on the server is old news
+            # the first pass only seeds the cursor: everything already on the server is old news.
+            # It always prints, with the newest row's age, so an armed watch is proven to see.
             first = False
             save_cursor(seen)
-            sys.stdout.write("watch armed: %d prior real rows seeded, polling every %ds\n" % (len(seen), INTERVAL))
+            newest = max((r.get("at", 0) for r in rows), default=0)
+            age = "%dm" % ((time.time() - newest) / 60) if newest else "none fetched"
+            sys.stdout.write("watch armed: %d rows fetched, %d new seeded, newest server row %s ago, polling every %ds\n" % (
+                len(rows), len(fresh), age, INTERVAL))
             sys.stdout.flush()
         else:
             fresh.sort(key=lambda r: r.get("at", 0))
