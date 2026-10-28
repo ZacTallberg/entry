@@ -163,3 +163,9 @@ tiny and by two on small: Chrome schedules a dedicated worker below the page thr
 hybrid part that is an efficiency core. That is a laptop fact; the phone's big and little cores
 will tell their own story through the device log, and the pace judge and the ceiling already
 govern the outcome either way. Two sessions in one visit on the worker path both transcribe.
+
+**Live (2026-10-28, build 69fe6a5, prod, same i5 and probe):** `place: worker` on both tiers; worst
+frame while listening 95 ms on tiny and 99 ms on small, against 160 and 405 ms measured in-page on
+prod the same day; first text 4.3 / 4.1 s; median pass 274 / 730 ms; WER unchanged. The phone's
+01:27Z visit on the previous build, after its promotion to small, had measured a 469 ms median pass
+and a 337 ms worst frame, and said so in words.
