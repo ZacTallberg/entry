@@ -162,3 +162,7 @@ Hands framed at 5 and 10 s of dictation (local, forced): all five condense the w
 error and read as distinct casts in the ink (neon cool-white, silt warm pink, ultraviolet
 lavender); their breaths are quieter than the first five's by design, since the stacked vapour
 was the dust's one proven defect.
+
+**Dreams (2026-10-28):** the sleeping dark dreamed in fourteen of its quiet selves; it now has
+thirty-two, every calm non-glyph form whose gesture does not erupt. A tab left open is rarely in
+the same place twice.

@@ -458,8 +458,13 @@ function primeInto(out, values, i, seedHash, arrival) {
 
 // While it sleeps the dark dreams: every so often it becomes another of its quiet selves,
 // with no flash and no announcement, so a tab left open is somewhere else when you return.
+// Thirty-two quiet selves to dream in (was fourteen): every calm, non-glyph form whose
+// gesture does not erupt. A tab left open for an hour is now rarely in the same place twice.
 const DREAM_FORMS = ['nebula', 'darkflow', 'fog', 'breath', 'smoke', 'silk', 'tidepool',
-  'jellyfish', 'mycelium', 'snowfall', 'halo', 'whalefall', 'inkwater', 'pillars'];
+  'jellyfish', 'mycelium', 'snowfall', 'halo', 'whalefall', 'inkwater', 'pillars',
+  'river', 'aurora', 'ripples', 'bioluminescence', 'candle', 'estuary', 'roots', 'tide',
+  'caustics', 'coral', 'settling', 'undertow', 'web', 'crepuscular', 'kelvinhelmholtz',
+  'accretion', 'galaxy', 'standingwaves'];
 
 // ─────────────────────────────────────── origin layouts ────────────────────────────────────────
 const ORIGIN_GENERATORS = {
