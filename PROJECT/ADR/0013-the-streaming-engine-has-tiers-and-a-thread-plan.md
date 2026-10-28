@@ -169,3 +169,21 @@ frame while listening 95 ms on tiny and 99 ms on small, against 160 and 405 ms m
 prod the same day; first text 4.3 / 4.1 s; median pass 274 / 730 ms; WER unchanged. The phone's
 01:27Z visit on the previous build, after its promotion to small, had measured a 469 ms median pass
 and a 337 ms worst frame, and said so in words.
+
+## Amendment 2026-10-28 (goal loop) — the last words land, and the words move the field
+
+- **The tail lands.** `onText` refused every event once `listening` was false, and `listening`
+  went false before the session's stop; with the engine in a worker the forced final pass always
+  arrives after that, so a tap-to-stop mid-sentence left the uncorrected partial standing. A
+  session now carries a token: its words are taken while it is live and for as long as the engine
+  takes to answer its stop (two seconds at most), and a session replaced by a newer one can never
+  write again. The spoken report is taken after the tail. Measured locally, tap-to-stop mid-sentence:
+  "…and the press and the" became "…and the pressure back there is terrible." within 1.5 s, twice;
+  the natural-pause probe unchanged (WER 15.7%, first text 3.4 s).
+- **Words move the field, revisions do not.** Every engine revision was replayed into `onInput`
+  as a typed space, so for the whole time a visitor spoke the field took an orbit pulse at 1.45×
+  energy from the box centre, a pop, and a hand-urgency font change, four times a second. While
+  dictating, `onInput` now skips the typed pulse and the cadence; `wordsMoveField` excites the
+  field outward once per newly arrived word, anchored at the newest word in the mirror, and
+  inward once per completed line. On the 30 s clip: 41 revisions, 32 word pulses, 8 line pulses,
+  worst frame 31 ms (was 60 in the same place), WER 7.1%, first text 3.8 s.

@@ -331,8 +331,10 @@ export function openStream(listener) {
         try { host.addAudio(id, samples, sampleRate); } catch (err) { fail(err); }
       },
       stop() {
-        ready.then(() => host.stop(id)).then(() => host.closeStream(id)).catch(() => {});
-        lines.clear();
+        // The worker's forced final pass answers after this returns; the caller keeps
+        // listening to this session's events until the stream is closed.
+        const done = ready.then(() => host.stop(id)).then(() => host.closeStream(id)).catch(() => {});
+        return done.then(() => { lines.clear(); });
       },
     };
   }
@@ -353,6 +355,7 @@ export function openStream(listener) {
       try { stream.removeAllListeners(); } catch (_e) {}
       try { stream.close(); } catch (_e) {}
       lines.clear();
+      return Promise.resolve();
     },
   };
 }

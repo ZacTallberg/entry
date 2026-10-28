@@ -2516,7 +2516,7 @@ function onInput(event) {
   if (body.dataset.dictating === 'true' && event && event.isTrusted) paintMirror(text.value);
   const now = performance.now();
   if (!voiceWriting) spokenTextAt = 0;
-  if (lastInputAt) cadence = cadence * 0.72 + clamp(now - lastInputAt, 45, 1100) * 0.28;
+  if (!voiceWriting && lastInputAt) cadence = cadence * 0.72 + clamp(now - lastInputAt, 45, 1100) * 0.28;
   // The face carries the hand: written quickly the letters gather weight and narrow,
   // written slowly they open out and thin. The variable font was loaded and never varied.
   const urgency = clamp((900 - cadence) / 820, 0, 1);
@@ -2535,7 +2535,11 @@ function onInput(event) {
     return;
   }
   setState('writing', '');
-  if (field) {
+  // The engine revises the spoken line several times a second. Each revision used to
+  // arrive here as a typed space: an orbit pulse and a hand-urgency change four times a
+  // second for the whole time the visitor spoke. Spoken words excite the field from
+  // where they land instead (see the stream session), so a revision passes quietly.
+  if (field && !voiceWriting) {
     const box = text.getBoundingClientRect();
     const kind = classifyInput(event);
     const seedChar = (event.data || ' ').charCodeAt(0) || 32;
@@ -3277,8 +3281,8 @@ function stopListening() {
   // is counted from there rather than from whenever the text finally appears
   if (wasListening && !spokenTextAt) spokenTextAt = performance.now();
   listening = false;
-  if (reportMode && wasListening && text.value.trim()) {
-    diag('report-said', { src: streamSession ? 'stream' : nativeRecognizer ? 'native' : 'chunk', text: text.value.slice(0, 360) });
+  if (reportMode && wasListening && !streamSession && text.value.trim()) {
+    diag('report-said', { src: nativeRecognizer ? 'native' : 'chunk', text: text.value.slice(0, 360) });
     diag.flush();
   }
   body.dataset.voiceOn = 'false';
@@ -3297,6 +3301,9 @@ function stopListening() {
   if (streamSession) {
     const sess = streamSession;
     streamSession = null;
+    const token = streamToken;
+    closingToken = token;
+    streamToken = null;
     if (streamBatchLen) {
       const merged = new Float32Array(streamBatchLen);
       let at = 0;
@@ -3305,9 +3312,22 @@ function stopListening() {
     }
     streamBatch.length = 0;
     streamBatchLen = 0;
-    sess.stop();
-    body.dataset.voicePartial = 'false';
-    window.setTimeout(clearMirror, 700);
+    const closed = sess.stop();
+    const settle = () => {
+      if (closingToken === token) closingToken = null;
+      body.dataset.voicePartial = 'false';
+      window.setTimeout(clearMirror, 700);
+      if (reportMode && wasListening && text.value.trim()) {
+        diag('report-said', { src: 'stream', text: text.value.slice(0, 360) });
+        diag.flush();
+      }
+    };
+    // The engine answers a stop within one pass; a worker that never answers must not
+    // hold the session open, so the grace ends on its own after two seconds either way.
+    let settled = false;
+    const once = () => { if (!settled) { settled = true; settle(); } };
+    Promise.resolve(closed).then(once, once);
+    window.setTimeout(once, 2000);
   }
   if (voiceCapture) {
     if (wasListening && !streamReady) flushChunk();
@@ -3347,6 +3367,50 @@ let streamMod = null;
 let streamReady = false;
 let streamFailed = false;
 let streamSession = null;
+// Each session carries a token. Its words are taken while it is the live session, and for
+// as long as the engine takes to answer its stop: the forced final pass that corrects the
+// last words arrives after the microphone has closed, and used to be thrown away with it.
+// A session that has been replaced by a newer one is never allowed to write again.
+let streamToken = null;
+let closingToken = null;
+// How often the words moved the field this session: read by the probe.
+const fx = { wordPulses: 0, linePulses: 0, revisions: 0 };
+window.__fx = fx;
+let spokenWords = 0;
+let spokenLines = 0;
+
+// Where the newest spoken word sits, in the field's anchor space.
+function newestWordAnchor() {
+  const spans = mirror ? mirror.querySelectorAll('.w') : [];
+  const el = spans.length ? spans[spans.length - 1] : text;
+  const r = el.getBoundingClientRect();
+  const ax = ((r.left + r.width / 2) / window.innerWidth - .5) * 2.2;
+  const ay = (.5 - (r.top + r.height / 2) / window.innerHeight) * 1.45;
+  return new THREE.Vector2(ax, ay);
+}
+
+// A word that has just arrived moves the field once, from where it landed; a completed
+// line draws the field inward once, like a breath taken at the end of a sentence. A
+// revision that only re-spells what was already there moves nothing.
+function wordsMoveField(joined, committed) {
+  if (!field) return;
+  fx.revisions += 1;
+  const words = joined.trim() ? joined.trim().split(/\s+/).length : 0;
+  const lines = committed ? committed.split(/[.!?]+\s|\n/).filter((s) => s.trim()).length : 0;
+  if (words > spokenWords) {
+    const fresh = words - spokenWords;
+    field.excite('outward', clamp(0.7 + fresh * 0.18, 0.7, 1.4), newestWordAnchor());
+    field.pop(0.06);
+    fx.wordPulses += 1;
+  }
+  if (lines > spokenLines) {
+    field.excite('inward', 1.15, newestWordAnchor());
+    fx.linePulses += 1;
+  }
+  spokenWords = words;
+  spokenLines = lines;
+  field.setTypingEnergy(0.75);
+}
 let streamLoading = false;
 let streamPending = null;
 const streamingPossible = typeof SharedArrayBuffer === 'function' && typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
@@ -3576,9 +3640,15 @@ function enterDictation() {
 function openStreamSession() {
   let firstAt = 0;
   const startedAt = performance.now();
+  const token = {};
+  streamToken = token;
+  spokenWords = streamBase.trim() ? streamBase.trim().split(/\s+/).length : 0;
+  spokenLines = 0;
   streamSession = streamMod.openStream({
     onText: (committed, partial) => {
-      if (!listening || locked) return;
+      if (locked) return;
+      const live = listening && streamToken === token;
+      if (!live && closingToken !== token) return;
       if (!firstAt && (committed || partial)) {
         firstAt = performance.now();
         diag('rung-a-first', { ms: Math.round(firstAt - startedAt) });
@@ -3593,6 +3663,7 @@ function openStreamSession() {
         voiceWriting = true;
         try { onInput(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' ' })); }
         finally { voiceWriting = false; }
+        wordsMoveField(joined, committed);
       }
       if (committed) voiceBase = (streamBase + committed).endsWith(' ') ? streamBase + committed : streamBase + committed + ' ';
       field?.setVoiceLevel(0.1);
