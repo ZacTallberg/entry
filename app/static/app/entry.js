@@ -2332,7 +2332,8 @@ const diag = (() => {
   };
   window.addEventListener('pagehide', flush);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
-  setInterval(flush, 12000);
+  // A tagged device is being watched live (ADR 0014): its rows leave every three seconds, not twelve.
+  setInterval(flush, REPORTER ? 3000 : 12000);
   window.addEventListener('error', (e) => log('jserror', { msg: String(e.message || '').slice(0, 300), src: String(e.filename || '').slice(-80), line: e.lineno || 0 }));
   window.addEventListener('unhandledrejection', (e) => log('rejection', { msg: String((e.reason && e.reason.message) || e.reason || '').slice(0, 300) }));
   document.addEventListener('securitypolicyviolation', (e) => log('csp', { dir: e.violatedDirective, uri: String(e.blockedURI || '').slice(0, 100) }));
@@ -3278,6 +3279,7 @@ function stopListening() {
   listening = false;
   if (reportMode && wasListening && text.value.trim()) {
     diag('report-said', { src: streamSession ? 'stream' : nativeRecognizer ? 'native' : 'chunk', text: text.value.slice(0, 360) });
+    diag.flush();
   }
   body.dataset.voiceOn = 'false';
   if (text.value.trim()) scheduleWarm();

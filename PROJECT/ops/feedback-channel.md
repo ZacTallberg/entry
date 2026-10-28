@@ -21,3 +21,15 @@ rotates at 16 MB.
 
 ## Start of every entry session
 Tail the report log first. If the phone said something since the last read, that is the work.
+
+## Watch it live (the operator expects this, not a tail after the fact)
+At the start of every entry session arm a persistent watch on both tails so each new beacon from
+the phone reaches the agent as it lands, with the spoken reports in full:
+```
+PYTHONIOENCODING=utf-8 python -u <scratchpad>/voice/watch-entry.py     # under the Monitor tool, 30 min, re-arm on expiry
+```
+The script polls `/api/debug-log/tail` and `?src=report` every 5 s, skips probe traffic, seeds its
+cursor from what is already on the server, and prints one line per new real-device beacon. A tagged
+device beacons every 3 s (untagged every 12 s), and `report-said` / `report-release` flush at once,
+so a spoken report is in the session within a few seconds of the words. A copy of the script lives
+in `tools/watch-entry.py` once committed; the scratchpad copy is the one armed today.
