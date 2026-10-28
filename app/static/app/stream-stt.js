@@ -38,10 +38,13 @@ const TOP_AUTO = 'small';
 const CEILING_KEY = 'entry:stt-ceiling';
 // Seconds of new audio the stream collects before it runs another pass. The runtime's own
 // default is half a second; the library already stretches the gate to whatever a pass
-// costs, so a shorter one only runs more often where the device can afford it. The
-// encoder itself looks 1.28 s ahead (total_lookahead 16 frames of 80 ms), which is the
-// floor under any first word and is not ours to move. ?sttint= overrides.
-const DEFAULT_INTERVAL = 0.25;
+// costs, so a shorter one only runs more often where the device can afford it. On tiny a
+// pass is cheaper than the gate on every device measured (100 ms on the operator's phone,
+// 210 ms on an i5), so the gate itself was the lag there and is halved; on small and medium
+// the pass is the floor and the gate is moot. The encoder itself looks 1.28 s ahead
+// (total_lookahead 16 frames of 80 ms), which is the floor under any first word and is not
+// ours to move. ?sttint= overrides.
+const INTERVALS = { tiny: 0.125, small: 0.25, medium: 0.5 };
 
 function param(name) {
   try { return new URLSearchParams(window.location.search).get(name); } catch (_e) { return null; }
@@ -65,7 +68,7 @@ function setCeiling(tier) {
 
 export function updateInterval() {
   const asked = Number(param('sttint') || 0);
-  return asked > 0 ? asked : DEFAULT_INTERVAL;
+  return asked > 0 ? asked : (INTERVALS[tier] || INTERVALS.small);
 }
 
 export function supportReasons() {

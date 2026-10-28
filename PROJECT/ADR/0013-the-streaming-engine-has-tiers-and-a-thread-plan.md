@@ -187,3 +187,12 @@ and a 337 ms worst frame, and said so in words.
   field outward once per newly arrived word, anchored at the newest word in the mirror, and
   inward once per completed line. On the 30 s clip: 41 revisions, 32 word pulses, 8 line pulses,
   worst frame 31 ms (was 60 in the same place), WER 7.1%, first text 3.8 s.
+
+**Amendment 2026-10-28 (goal loop, unit 3):** the pass gate is per tier: tiny 0.125 s, small 0.25 s,
+medium 0.5 s. On tiny the pass is cheaper than the gate on every device measured (100 ms on the
+operator's phone, 210 ms on the i5), so there the gate itself was the lag between voice and text and
+is halved; on small and medium the pass is the floor and the gate is moot. On the i5 under a build
+the halved gate changed nothing measurable (tiny: 90 passes, WER 15.7%, first text 3.6 s), which is
+the expected result on a device whose pass exceeds the gate; the phone's rows decide. A release also
+now waits while a closing session's final pass is on its way (two seconds at most), so the dark
+answers the words as finally heard.

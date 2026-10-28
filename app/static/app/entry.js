@@ -2558,6 +2558,9 @@ function onInput(event) {
 
 function beginRelease() {
   if (locked || composing || !text.value.trim()) return;
+  // The engine's final pass over a session that has just closed is still on its way: the
+  // dark answers the words as finally heard, so the release waits that beat (two seconds at most).
+  if (closingToken) { releaseTimer = window.setTimeout(beginRelease, 200); return; }
   locked = true;
   cancelReleaseSchedule();
   const raw = text.value;
