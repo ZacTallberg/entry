@@ -94,3 +94,24 @@ coming through in bars, something enormous going down, a shape that turns all at
 cracked as it dried, a shoal turning through a shaft of light, and lines drawn by something already
 gone. All sixteen photographed and measured; one (`crepuscular`, 1.0% of frame lit) was retuned to
 42.4%.
+
+## Amendment 2026-10-28 — more variance (operator directive)
+
+Measured first. Over the 54 releases real devices had logged, `dense` rode along in 28, `trails`
+in 26, `octave` in 23; over twenty thousand hashes the picker gave dense 54%, octave 50%, trails
+45%, ring 40%, and fog 5%, shimmer 4%, size-wave 3%, beat 3%, because every effect was rolled at
+its own odds and the cap of three then dropped the ambient ones first in a fixed order. Combo
+entropy 6.88 bits; the single most common answer was dense-trails-octave at 7.5%. The arrival
+table gave bloom, gather, fog and words half of every answer between them.
+
+- Every effect now rolls at near-even odds, and when more than three are up the hash shuffles
+  the active set and lets the overflow go from the end. Measured: every token between 19% and
+  23%, 8.74 bits, the most common combination 0.4%.
+- The hue shift opens to a third of a turn either way (was a sixth); the authored palette keeps
+  its identity, the room it is seen in does not repeat.
+- The form's breath is paced by the hash: inhale 0.78 to 1.28 of the form's own, exhale and
+  peak the inverse, so two answers in one form do not arrive at one pace.
+- Fourteen arrivals at nearly even odds, words a little more often.
+
+What stays: one form per utterance chosen by its structure, no form twice in a session, the
+whisper of the name.

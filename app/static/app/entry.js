@@ -360,8 +360,10 @@ function wordPrime(length, utterance, seedHash) {
 }
 
 // weighted so the classic gestures still lead, but a third of releases arrive some other way
+// Fourteen gestures at nearly even odds; the words arrive as words a little more often. The
+// old table gave bloom, gather, fog and words half of every answer between them.
 const ARRIVAL_TABLE = [
-  [12, 0], [22, 1], [28, 2], [36, 3], [42, 4], [48, 5], [53, 6], [59, 7], [64, 8], [72, 9], [77, 10], [81, 11], [84, 12], [100, 13],
+  [7, 0], [14, 1], [21, 2], [28, 3], [35, 4], [42, 5], [49, 6], [56, 7], [63, 8], [70, 9], [77, 10], [84, 11], [90, 12], [100, 13],
 ];
 let forcedArrival = -1;
 function arrivalFor(hash) {
@@ -1570,7 +1572,11 @@ class ParticleField {
     this.renderMaterial = renderMaterial;
     this.formJs = js;
     this.formDef = formDef;
-    this.envelope = formDef.envelope || { inhale: 0.48, exhale: 2.35, peak: 2.35 };
+    // the breath of the answer is the form's own, stretched or quickened by the hash so two
+    // answers in the same form do not arrive at the same pace
+    const breath = formDef.envelope || { inhale: 0.48, exhale: 2.35, peak: 2.35 };
+    const pace = 0.78 + (((seedHash >>> 26) % 100) / 100) * 0.5;
+    this.envelope = { inhale: breath.inhale * pace, exhale: breath.exhale * (1.4 - pace * 0.5), peak: breath.peak * (1.4 - pace * 0.5) };
     this.simMaterial.uniforms.tOrigin.value = this.origin;
     this.renderMaterial.uniforms.tOrigin.value = this.origin;
     this.simMaterial.uniforms.uSeed.value = ((seedHash >>> 0) % 997) * 0.37;
@@ -1582,21 +1588,25 @@ class ParticleField {
     const v2 = ((seedHash >>> 13) % 1000) / 1000;
     const v3 = ((seedHash >>> 18) % 1000) / 1000;
     const roll = (salt, chance) => ((Math.imul(seedHash ^ salt, 2654435761) >>> 0) % 1000) / 1000 < chance;
+    // Every effect is rolled at the same odds. The old odds favoured the structural four
+    // (dense, octave, trails, ring) and the cap below then dropped the ambient ones first, so
+    // half of every answer was dense-and-trails and fog, shimmer, beat and size-wave survived
+    // one release in thirty: measured over the real releases and over twenty thousand hashes.
     const fx = {
-      trails: roll(0x9e3779b9, 0.45),
-      ignite: roll(0x85ebca6b, 0.4),
-      hueDrift: roll(0xc2b2ae35, 0.3),
-      turb: roll(0x27d4eb2f, 0.35),
-      shimmer: roll(0x165667b1, 0.28),
-      fog: roll(0xd3a2646c, 0.3),
-      beat: roll(0xfd7046c5, 0.3),
-      sizeWave: roll(0xb55a4f09, 0.28),
-      dense: roll(0x94d049bb, 0.55),
-      octave: roll(0xbf58476d, 0.5),
-      ring: roll(0x2545f491, 0.4),
-      bands: roll(0x7f4a7c15, 0.32),
-      drift: roll(0xe6546b64, 0.3),
-      zones: roll(0xcc9e2d51, 0.32),
+      trails: roll(0x9e3779b9, 0.36),
+      ignite: roll(0x85ebca6b, 0.36),
+      hueDrift: roll(0xc2b2ae35, 0.36),
+      turb: roll(0x27d4eb2f, 0.34),
+      shimmer: roll(0x165667b1, 0.34),
+      fog: roll(0xd3a2646c, 0.34),
+      beat: roll(0xfd7046c5, 0.32),
+      sizeWave: roll(0xb55a4f09, 0.32),
+      dense: roll(0x94d049bb, 0.38),
+      octave: roll(0xbf58476d, 0.36),
+      ring: roll(0x2545f491, 0.36),
+      bands: roll(0x7f4a7c15, 0.34),
+      drift: roll(0xe6546b64, 0.32),
+      zones: roll(0xcc9e2d51, 0.34),
     };
     // Glyph forms are the words: the density self-repulsion, the turbulence and the octave
     // noise blur a compact line of letters into a grid-aligned spray (under the speed limit the
@@ -1605,19 +1615,22 @@ class ParticleField {
     if (formDef.origin === 'glyph') {
       fx.dense = false; fx.turb = false; fx.octave = false; fx.ring = false; fx.drift = false; fx.zones = false;
     }
-    if (!Object.values(fx).some(Boolean)) fx.shimmer = true;
-    const cosmeticDropOrder = ['beat', 'sizeWave', 'shimmer', 'fog', 'turb', 'bands', 'zones', 'drift', 'hueDrift', 'ignite'];
-    let activeCount = Object.values(fx).filter(Boolean).length;
-    for (const k of cosmeticDropOrder) {
-      if (activeCount <= 3) break;
-      if (fx[k]) {
-        fx[k] = false;
-        activeCount -= 1;
-      }
+    if (!Object.values(fx).some(Boolean)) {
+      const names = Object.keys(fx);
+      fx[names[(seedHash >>> 5) % names.length]] = true;
+    }
+    // At most three effects, and which three is the hash's choice rather than a fixed order:
+    // the active ones are shuffled by the seed and the overflow is let go from the end.
+    const active = Object.keys(fx).filter((k) => fx[k]);
+    if (active.length > 3) {
+      const rank = (k, i) => (Math.imul(seedHash ^ (i + 1) * 0x9e3779b1, 2654435761) >>> 0);
+      active.map((k, i) => [rank(k, i), k]).sort((a, b) => a[0] - b[0]).slice(3).forEach(([, k]) => { fx[k] = false; });
     }
     this.effects = fx;
     const ru2 = this.renderMaterial.uniforms;
-    this.baseHueShift = (v1 - 0.5) * 0.34;
+    // the whole wheel is open to a third of a turn either way; the authored palette keeps
+    // its identity, the room it is seen in does not repeat
+    this.baseHueShift = (v1 - 0.5) * 0.62;
     this.hueDriftRate = fx.hueDrift ? 0.04 + v2 * 0.05 : 0;
     ru2.uHueShift.value = this.baseHueShift;
     // the room behind the field takes its colour from the same shift the form does
