@@ -101,6 +101,18 @@ const buildSimFragment = (formDef) => `
   uniform float uVoice;
   uniform vec2 uDriftDir;
   uniform float uFxDrift;
+  uniform float uFxKaleido;
+  uniform float uKaleidoN;
+  uniform float uFxTide;
+  uniform float uTidePhase;
+  uniform float uFxWell;
+  uniform float uWellPhase;
+  uniform float uFxLattice;
+  uniform float uLatticeStep;
+  uniform float uFxGravity;
+  uniform vec2 uGravityDir;
+  uniform float uFxTwin;
+  uniform float uTwinSep;
 
   void main() {
     vec3 pos = texture2D(tPositions, vUv).xyz;
@@ -128,6 +140,51 @@ const buildSimFragment = (formDef) => `
 
     velocity += normalize(pos + vec3(0.0001)) * uVoice * (0.032 + 0.022 * sin(uTime * 2.6));
     velocity.xy += uDriftDir * uFxDrift * 0.015 * (1.0 - uHold);
+    // kaleido: the field gathers onto N spokes, a snowflake symmetry it did not have
+    if (uFxKaleido > 0.001 && uHold < 0.02) {
+      float r = max(length(pos.xy), 0.08);
+      float a = atan(pos.y, pos.x);
+      float k = 6.2831853 / uKaleidoN;
+      float d = mod(a + k * 0.5, k) - k * 0.5;
+      velocity.xy += vec2(-pos.y, pos.x) / r * (-d) * uFxKaleido * 0.07 * min(1.0, r);
+    }
+    // tide: the whole form breathes in and out on a slow swell of its own phase
+    if (uFxTide > 0.001 && uHold < 0.02) {
+      velocity.xy += normalize(pos.xy + vec2(0.0001, 0.0)) * sin(uTime * 0.55 + uTidePhase) * uFxTide * 0.032;
+    }
+    // well: a wandering gathering point drags the dark after it and lets go
+    if (uFxWell > 0.001 && uHold < 0.02) {
+      vec2 well = vec2(sin(uTime * 0.21 + uWellPhase), cos(uTime * 0.13 + uWellPhase * 1.7)) * 1.7;
+      vec2 toWell = well - pos.xy;
+      float wd = length(toWell) + 0.35;
+      // a soft core: the well leans the dark toward itself, it never swallows the form
+      velocity.xy += toWell / wd * (uFxWell * 0.008 / (wd * wd + 1.0));
+      velocity.xy += vec2(-toWell.y, toWell.x) / wd * (uFxWell * 0.009 / (wd + 0.6));
+    }
+    // lattice: the dark settles toward a crystal of points and the form shows through it
+    if (uFxLattice > 0.001 && uHold < 0.02) {
+      vec2 cell = (floor(pos.xy * uLatticeStep + 0.5)) / uLatticeStep;
+      velocity.xy += (cell - pos.xy) * uFxLattice * 0.06;
+    }
+    // gravity: the dark leans one way and pools against a soft floor, and the form's own
+    // homing keeps lifting it back, like sand in a wind
+    if (uFxGravity > 0.001 && uHold < 0.02) {
+      velocity.xy += uGravityDir * uFxGravity * 0.0025;
+      float along = dot(pos.xy, uGravityDir);
+      // a soft floor: the lean piles up gently, it never pins the form into a wedge
+      if (along > 2.6) velocity.xy -= uGravityDir * (along - 2.6) * 0.03;
+    }
+    // twin: two vortices turning against each other, one each side of the centre
+    if (uFxTwin > 0.001 && uHold < 0.02) {
+      vec2 c1 = vec2(uTwinSep, 0.0);
+      vec2 c2 = vec2(-uTwinSep, 0.0);
+      vec2 d1 = pos.xy - c1;
+      vec2 d2 = pos.xy - c2;
+      float l1 = length(d1) + 0.5;
+      float l2 = length(d2) + 0.5;
+      velocity.xy += vec2(-d1.y, d1.x) / (l1 * l1) * uFxTwin * 0.03;
+      velocity.xy -= vec2(-d2.y, d2.x) / (l2 * l2) * uFxTwin * 0.03;
+    }
 
     vec2 pointerDelta = pos.xy - uPointer;
     float pointerDistance = max(length(pointerDelta), 0.12);
@@ -223,6 +280,10 @@ const buildRenderVertex = (formDef) => `
   uniform float uFxZones;
   uniform vec2 uZoneDir;
   uniform float uZoneHue;
+  uniform float uFxPrism;
+  uniform float uFxEmber;
+  uniform float uFxVeil;
+  uniform vec2 uVeilDir;
   varying float vDepthA;
   varying float vSoftK;
   void main() {
@@ -239,9 +300,20 @@ const buildRenderVertex = (formDef) => `
     base *= 1.0 - uFxBands * 0.32 + uFxBands * 0.64 * (0.5 + 0.5 * sin(length(p) * 5.5 - uTime * 0.35 + uSeed));
     float zone = smoothstep(-0.7, 0.7, dot(p.xy, uZoneDir));
     base = mix(base, hueRotate(base, uZoneHue), zone * uFxZones);
+    // prism: the hue walks once around the wheel with the angle around the centre, and the
+    // whole wheel turns slowly, so the form is a slow rainbow that never sits still
+    if (uFxPrism > 0.001) {
+      float ang = atan(p.y, p.x) / 6.2831853 + uTime * 0.03;
+      base = mix(base, hueRotate(base, ang * 6.2831853), uFxPrism);
+    }
     float speed = length(p - prev);
     float ignite = smoothstep(0.02, 0.12, speed) * uIgnite;
     vColor = mix(base, vec3(1.0, 0.97, 0.9) * (1.0 + ignite * 1.6), ignite * 0.7);
+    // veil: a slow curtain of shadow crosses the form and comes round again
+    base *= 1.0 - uFxVeil * 0.62 * smoothstep(-0.3, 0.3, sin(dot(p.xy, uVeilDir) * 1.4 - uTime * 0.3));
+    // ember: now and then a particle flares hot and dies back, each on its own clock
+    float flare = pow(0.5 + 0.5 * sin(uTime * 1.3 + id * 97.0 + uSeed), 10.0) * uFxEmber;
+    vColor = mix(vColor, vec3(1.0, 0.72, 0.38) * 2.6, flare * 0.9);
     vDepthA = 1.0 - uFxFog * smoothstep(0.2, 1.6, abs(p.z));
     // a lens has a plane it is sharp on; everything else swells and softens, and dims as it
     // spreads, so the field reads as depth rather than as a flat sheet of dots
@@ -259,6 +331,7 @@ const buildRenderVertex = (formDef) => `
     size *= 1.0 + defocus * 0.95;
     size *= 1.0 + uFxSizeWave * 0.4 * sin(uTime * 1.9 + id * TAU);
     size *= 1.0 + uForm * 0.45 + uVoice * 0.3;
+    size *= 1.0 + flare * 0.9;
     gl_PointSize = size;
     gl_Position = projectionMatrix * mvPosition;
   }
@@ -1367,6 +1440,18 @@ class ParticleField {
         uVoice: { value: 0 },
         uDriftDir: { value: new THREE.Vector2(0, 0) },
         uFxDrift: { value: 0 },
+        uFxKaleido: { value: 0 },
+        uKaleidoN: { value: 5 },
+        uFxTide: { value: 0 },
+        uTidePhase: { value: 0 },
+        uFxWell: { value: 0 },
+        uWellPhase: { value: 0 },
+        uFxLattice: { value: 0 },
+        uLatticeStep: { value: 4 },
+        uFxGravity: { value: 0 },
+        uGravityDir: { value: new THREE.Vector2(0, -1) },
+        uFxTwin: { value: 0 },
+        uTwinSep: { value: 1.2 },
         uPulseCenter: { value: new THREE.Vector2(0, 0) },
         uStir: { value: new THREE.Vector2(0, 0) },
         tNoise: { value: this.noiseTexture },
@@ -1412,6 +1497,10 @@ class ParticleField {
         uFxZones: { value: 0 },
         uZoneDir: { value: new THREE.Vector2(1, 0) },
         uZoneHue: { value: 0 },
+        uFxPrism: { value: 0 },
+        uFxEmber: { value: 0 },
+        uFxVeil: { value: 0 },
+        uVeilDir: { value: new THREE.Vector2(1, 0) },
         uForm: { value: 0 },
         uNoiseOff: { value: new THREE.Vector3(0, 0, 0) },
         uOctave: { value: 0 },
@@ -1607,6 +1696,16 @@ class ParticleField {
       bands: roll(0x7f4a7c15, 0.34),
       drift: roll(0xe6546b64, 0.32),
       zones: roll(0xcc9e2d51, 0.34),
+      kaleido: roll(0x3c6ef372, 0.3),
+      tide: roll(0xa54ff53a, 0.32),
+      well: roll(0x510e527f, 0.3),
+      lattice: roll(0x9b05688c, 0.26),
+      prism: roll(0x1f83d9ab, 0.32),
+      ember: roll(0x5be0cd19, 0.32),
+      constellation: roll(0x71374491, 0.26),
+      gravity: roll(0xb5c0fbcf, 0.28),
+      twin: roll(0xe9b5dba5, 0.3),
+      veil: roll(0x3956c25b, 0.3),
     };
     // Glyph forms are the words: the density self-repulsion, the turbulence and the octave
     // noise blur a compact line of letters into a grid-aligned spray (under the speed limit the
@@ -1614,6 +1713,7 @@ class ParticleField {
     // keep only the effects that do not move them: hue, shimmer, fog, bands, trails.
     if (formDef.origin === 'glyph') {
       fx.dense = false; fx.turb = false; fx.octave = false; fx.ring = false; fx.drift = false; fx.zones = false;
+      fx.kaleido = false; fx.tide = false; fx.well = false; fx.lattice = false; fx.gravity = false; fx.twin = false;
     }
     if (!Object.values(fx).some(Boolean)) {
       const names = Object.keys(fx);
@@ -1625,6 +1725,12 @@ class ParticleField {
     if (active.length > 3) {
       const rank = (k, i) => (Math.imul(seedHash ^ (i + 1) * 0x9e3779b1, 2654435761) >>> 0);
       active.map((k, i) => [rank(k, i), k]).sort((a, b) => a[0] - b[0]).slice(3).forEach(([, k]) => { fx[k] = false; });
+    }
+    // ?fx=kaleido,prism forces exactly those effects on, for looking at one at a time
+    const forcedFx = new URLSearchParams(window.location.search).get('fx');
+    if (forcedFx !== null) {
+      const want = new Set(forcedFx.split(',').map((k) => k.trim()).filter(Boolean));
+      for (const k of Object.keys(fx)) fx[k] = want.has(k);
     }
     this.effects = fx;
     const ru2 = this.renderMaterial.uniforms;
@@ -1695,6 +1801,33 @@ class ParticleField {
     su2.uFxDrift.value = fx.drift ? 0.6 + v2 * 0.5 : 0;
     const driftA = (((seedHash >>> 21) % 1000) / 1000) * Math.PI * 2;
     su2.uDriftDir.value.set(Math.cos(driftA), Math.sin(driftA));
+    su2.uFxKaleido.value = fx.kaleido ? 0.6 + v1 * 0.6 : 0;
+    su2.uKaleidoN.value = 3 + ((seedHash >>> 27) % 5);
+    su2.uFxTide.value = fx.tide ? 0.7 + v2 * 0.6 : 0;
+    su2.uTidePhase.value = v3 * Math.PI * 2;
+    su2.uFxWell.value = fx.well ? 0.7 + v3 * 0.6 : 0;
+    su2.uWellPhase.value = v1 * Math.PI * 2;
+    su2.uFxLattice.value = fx.lattice ? 0.5 + v2 * 0.5 : 0;
+    su2.uLatticeStep.value = 2.5 + ((seedHash >>> 7) % 4) * 1.5;
+    ru2.uFxPrism.value = fx.prism ? 0.55 + v1 * 0.4 : 0;
+    ru2.uFxEmber.value = fx.ember ? 0.6 + v2 * 0.6 : 0;
+    su2.uFxGravity.value = fx.gravity ? 0.6 + v3 * 0.6 : 0;
+    const gA = (((seedHash >>> 15) % 1000) / 1000) * Math.PI * 2;
+    su2.uGravityDir.value.set(Math.cos(gA), Math.sin(gA));
+    su2.uFxTwin.value = fx.twin ? 0.7 + v1 * 0.6 : 0;
+    su2.uTwinSep.value = 0.9 + v2 * 0.9;
+    ru2.uFxVeil.value = fx.veil ? 0.6 + v3 * 0.4 : 0;
+    const vA = (((seedHash >>> 19) % 1000) / 1000) * Math.PI * 2;
+    ru2.uVeilDir.value.set(Math.cos(vA), Math.sin(vA));
+    // constellation: the sleeping dark's figure of stars surfaces over the answer for a while,
+    // drawn a new way from this hash, and sinks back as the form settles
+    if (fx.constellation && this.starGeometry) {
+      this.drawConstellation(seedHash);
+      this.constellationFrom = performance.now();
+      this.constellationSpan = 9000 + v1 * 6000;
+    } else {
+      this.constellationFrom = 0;
+    }
     this.trailPersist = fx.trails ? Math.min(0.9, Math.max(0.35, (js.trail ?? 0.5) + (v2 - 0.5) * 0.14)) : 0.08;
     this.particles.material = this.renderMaterial;
 
@@ -2078,10 +2211,17 @@ class ParticleField {
     exposure *= (1 - this.drowse * 0.55) * (this.hourLight || 1);
     if (this.starMaterial) {
       const deep = Math.max(0, (this.drowse - 0.55) / 0.45);
-      this.starMaterial.opacity = deep * 0.55;
-      this.lineMaterial.opacity = deep * 0.14;
-      this.stars.visible = deep > 0.001;
-      this.starLines.visible = deep > 0.001;
+      let con = 0;
+      if (this.constellationFrom) {
+        const u = (now - this.constellationFrom) / (this.constellationSpan || 9000);
+        con = u >= 1 ? 0 : Math.sin(Math.min(1, u) * Math.PI) * 0.8;
+        if (u >= 1) this.constellationFrom = 0;
+      }
+      const show = Math.max(deep, con);
+      this.starMaterial.opacity = show * 0.55;
+      this.lineMaterial.opacity = show * 0.14;
+      this.stars.visible = show > 0.001;
+      this.starLines.visible = show > 0.001;
     }
     exposure += this.lean * 0.16;
     if (this.voiceLevel > 0.012) {

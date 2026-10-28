@@ -115,3 +115,40 @@ table gave bloom, gather, fog and words half of every answer between them.
 
 What stays: one form per utterance chosen by its structure, no form twice in a session, the
 whisper of the name.
+
+## Amendment 2026-10-28 — more effects (operator directive: "more effects, get creative")
+
+Ten effects join the fourteen, each a hashed-amplitude uniform gated by `uHold` like the
+others, all entering the even-odds picker under the cap of three. The six that move particles
+are withheld from glyph forms, where motion would scatter the words.
+
+| effect | where | what it does |
+|---|---|---|
+| kaleido | simulation | the field gathers onto N spokes (3 to 7, by the hash): a snowflake symmetry the form did not have |
+| tide | simulation | the whole form breathes in and out on a slow swell with a phase of its own |
+| well | simulation | a wandering gathering point on a Lissajous path drags the dark after it and lets go |
+| lattice | simulation | the dark settles toward a crystal of points (step 2.5 to 7 by the hash) and the form shows through it |
+| prism | render | hue walks half a turn around the wheel with the angle around the centre, and the wheel turns slowly |
+| ember | render | each particle flares hot and dies back on its own clock, brighter and larger for the beat |
+| constellation | render | the sleeping dark's figure of twenty-six stars, drawn anew from the hash, surfaces over the answer for nine to fifteen seconds |
+| gravity | simulation | the dark leans one way (a hashed direction) and pools against a soft floor while the form's homing keeps lifting it back, like sand in a wind |
+| twin | simulation | two vortices turning against each other, one each side of the centre, 0.9 to 1.8 apart |
+| veil | render | a slow curtain of shadow crosses the form along a hashed direction and comes round again |
+
+`?fx=kaleido,prism` forces exactly that set, for looking at one at a time. Frames of each,
+forced, at release+3 s and +9 s are the acceptance; the verdicts are appended below.
+
+**Verdicts from the frames (local, headed, phone viewport, each effect forced alone):**
+lattice reads at once, a crystal dotting across whatever form carries it; prism reads as a slow
+rainbow once it walks the full wheel (a half turn was too gentle); constellation surfaces its
+star figure over the answer and sinks back; ember reads as golden grain once the flare is wide
+enough (an exponent of 10, not 28); twin reads as two curling lobes; veil as a curtain of shadow
+splitting the form. Kaleido needed six times its first force to be seen at all and then took the
+whole form into its rays, so it sits between (0.07). Well and gravity both began far too strong,
+each pulling an entire form into one clump; both now lean the dark rather than own it (well
+0.008 over a soft core, gravity 0.0025 with a floor at 2.6). Tide is motion and shows only in
+motion; its frames are not evidence either way.
+Like for like on one pinned form (nebula, `window.entryExperience.force`): the well leans the
+arms toward its wandering point without swallowing them; gravity draws the nebula into a column
+that pools at one end; kaleido folds it into a four-winged cross with the form still legible.
+Twenty-four effects in the picker, cap of three, even odds.
