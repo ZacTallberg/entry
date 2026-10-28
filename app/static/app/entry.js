@@ -1946,10 +1946,13 @@ class ParticleField {
     this.animatedUntil = Math.max(this.animatedUntil, performance.now() + 1400);
   }
 
-  release(length, energy) {
+  release(length, energy, seedHash = 0) {
     this.releaseStarted = performance.now();
     this.releaseEnergy = clamp(0.7 + Math.log2(Math.max(2, length)) * 0.12, 0.85, 1.65) * (energy || 1);
-    this.excite('inward', 2.2);
+    // the gesture of letting go is the hash's too: it used to be one inward draw every time
+    const kinds = ['inward', 'inward', 'outward', 'orbit', 'scatter'];
+    const pick = kinds[(seedHash >>> 29) % kinds.length];
+    this.excite(pick, 1.7 + (((seedHash >>> 24) % 32) / 32) * 1.0);
   }
 
   settle() {
@@ -2597,7 +2600,7 @@ function beginRelease() {
   // compressed core, gathers inward from beyond the frame, or settles in place
   const arrival = arrivalFor(chosen.hash);
   const ready = field ? field.prepare(chosen.form, raw, chosen.hash, arrival) : Promise.resolve();
-  field?.release(length, energy);
+  field?.release(length, energy, chosen.hash);
 
   const inhaleMs = field ? field.envelope.inhale * 1000 : 480;
   const swapAt = reducedMotion.matches ? 200 : Math.max(360, inhaleMs);
