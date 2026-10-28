@@ -152,3 +152,13 @@ Like for like on one pinned form (nebula, `window.entryExperience.force`): the w
 arms toward its wandering point without swallowing them; gravity draws the nebula into a column
 that pools at one end; kaleido folds it into a four-winged cross with the form still legible.
 Twenty-four effects in the picker, cap of three, even odds.
+
+**Hands (2026-10-28):** the dust condensed every utterance in one of five hands (vapour, ember,
+frost, ink, static), drawn from the well. Five more join them: moss (slow, lichen-green, barely
+any breath), neon (fast, hot magenta cooling to white), silt (settling, warm sand, wide breath),
+ultraviolet (a shiver of violet), tide (a wide slow sea-green wash). `?hand=` forces one; frames
+at 5 and 10 s of speaking are the acceptance.
+Hands framed at 5 and 10 s of dictation (local, forced): all five condense the words without
+error and read as distinct casts in the ink (neon cool-white, silt warm pink, ultraviolet
+lavender); their breaths are quieter than the first five's by design, since the stacked vapour
+was the dust's one proven defect.

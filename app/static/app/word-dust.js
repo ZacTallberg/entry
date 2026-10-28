@@ -224,6 +224,27 @@ export function createWordDust(host) {
       fade: 520, blur: 5, lift: 0, shiver: 0.9, puffs: 5, puffAlpha: 0.28, puffR: 22, spread: 20,
       ink: [244, 248, 255], glow: null,
     },
+    // five more hands (2026-10-28): the words are drawn from the well in more ways
+    moss: {
+      fade: 1400, blur: 4, lift: 0, shiver: 0, puffs: 2, puffAlpha: 0.22, puffR: 26, spread: 8,
+      ink: [222, 242, 226], glow: [120, 200, 150],
+    },
+    neon: {
+      fade: 420, blur: 3, lift: 0, shiver: 0.15, puffs: 2, puffAlpha: 0.3, puffR: 18, spread: 9,
+      ink: [255, 240, 250], glow: [255, 90, 200],
+    },
+    silt: {
+      fade: 980, blur: 12, lift: -5, shiver: 0, puffs: 4, puffAlpha: 0.3, puffR: 46, spread: 22,
+      ink: [238, 232, 220], glow: [200, 170, 130],
+    },
+    ultraviolet: {
+      fade: 760, blur: 7, lift: 1, shiver: 0.5, puffs: 3, puffAlpha: 0.34, puffR: 28, spread: 14,
+      ink: [236, 230, 255], glow: [150, 110, 255],
+    },
+    tide: {
+      fade: 1200, blur: 9, lift: 0, shiver: 0.1, puffs: 5, puffAlpha: 0.26, puffR: 40, spread: 26,
+      ink: [226, 244, 250], glow: [90, 190, 210],
+    },
   };
   const HAND_NAMES = Object.keys(HANDS);
   let hand = HANDS.vapour;
