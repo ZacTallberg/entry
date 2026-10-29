@@ -84,7 +84,11 @@ def summarize(r):
 
 def main():
     seen = load_cursor()
-    first = not seen
+    # A fresh cursor seeds silently (everything on the server is old news); a re-arm with a
+    # cursor emits whatever landed since it was saved. Either way the first pass prints its
+    # proof, so an armed watch is never mistaken for a dead one.
+    fresh_cursor = not seen
+    first = True
     while True:
         rows = []
         for path in ("/api/debug-log/tail?n=120", "/api/debug-log/tail?src=report&n=60"):
@@ -102,16 +106,16 @@ def main():
             seen.add(k)
             fresh.append(r)
         if first:
-            # the first pass only seeds the cursor: everything already on the server is old news.
-            # It always prints, with the newest row's age, so an armed watch is proven to see.
             first = False
-            save_cursor(seen)
             newest = max((r.get("at", 0) for r in rows), default=0)
             age = "%dm" % ((time.time() - newest) / 60) if newest else "none fetched"
-            sys.stdout.write("watch armed: %d rows fetched, %d new seeded, newest server row %s ago, polling every %ds\n" % (
+            sys.stdout.write("watch armed: %d rows fetched, %d new since the cursor, newest server row %s ago, polling every %ds\n" % (
                 len(rows), len(fresh), age, INTERVAL))
             sys.stdout.flush()
-        else:
+            if fresh_cursor:
+                save_cursor(seen)
+                fresh = []
+        if True:
             fresh.sort(key=lambda r: r.get("at", 0))
             for r in fresh:
                 who = r.get("reporter") or "untagged"
