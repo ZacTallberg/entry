@@ -222,3 +222,11 @@ the engine in the worker the page's main thread is clean: zero tasks of 30 ms or
 tasks and 22 s of dictation, zero rAF gaps over 40 ms, worst frame 25 ms, where the page-thread
 engine had 160 and 405 ms. What remains of the frame time on this box (21 ms a frame) is the GPU's;
 the phone's own perf rows on the worker build are the evidence still owed.
+
+With passes sampled once, the thread plan was re-measured inside the worker on the i5 (tiny, the
+27 s clip, three rounds in alternating order, median of passes after the first three): single-thread
+with a pool of two (the plan) 273, 258 and 424 ms; single-thread pool of four 272, 259 and 250 ms;
+multi-threaded onnxruntime pool of four 284, 266 and 349 ms; multi-threaded pool of two 290, 276 and
+291 ms. The spread between plans is inside the spread between rounds of the same plan, and the words
+were identical across all twelve sittings; the plan stands, and `?sttsingle=` / `?sttpool=` remain
+the way to ask the phone the same question.
