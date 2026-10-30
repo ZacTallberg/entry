@@ -287,16 +287,28 @@ export function openStream(listener) {
     }
     listener.onText(committed.trim(), partial.trim());
   };
+  // One pass of the engine is diffed into up to three events per line (text changed, updated,
+  // completed), and a transcript with a settled line and a live one is diffed line by line.
+  // Read off the line events, a single pass was being counted two to four times: the judge's
+  // eleven samples covered four real passes, and the channel carried every pass in triplicate.
+  // A pass is sampled once, from the worker's own pass receipt, or in the in-page fallback
+  // from the first line event of the synchronous burst that one pass produces.
+  const samplePass = (ms) => {
+    stats.lags.push(ms);
+    stats.passes += 1;
+    if (listener.onLag) listener.onLag(ms);
+    judgePace(listener);
+  };
+  let burst = false;
   const upsert = (line, complete) => {
     if (!line || typeof line.text !== 'string') return;
     const id = String(line.id);
     lines.set(id, { text: line.text.trim(), complete: complete || !!line.isComplete });
     emit();
-    if (typeof line.lastTranscriptionLatencyMs === 'number' && line.lastTranscriptionLatencyMs > 0) {
-      stats.lags.push(line.lastTranscriptionLatencyMs);
-      stats.passes += 1;
-      if (listener.onLag) listener.onLag(line.lastTranscriptionLatencyMs);
-      judgePace(listener);
+    if (!host && !burst && typeof line.lastTranscriptionLatencyMs === 'number' && line.lastTranscriptionLatencyMs > 0) {
+      burst = true;
+      queueMicrotask(() => { burst = false; });
+      samplePass(line.lastTranscriptionLatencyMs);
     }
   };
   // One stream per session, closed with it. The runtime's convenience methods all drive a
@@ -318,6 +330,9 @@ export function openStream(listener) {
     const id = 's' + (streamSeq += 1);
     const fail = (err) => listener.onError && listener.onError(String((err && err.message) || err));
     host.setListener(id, events);
+    // The worker reports every call into the stream's transcribe, including the ones the pass
+    // gate turned away in under a millisecond; only a call that entered the engine is a pass.
+    host.onPass = (sid, ms) => { if (sid === id && ms >= 5) samplePass(ms); };
     let queued = [];
     let live = false;
     const ready = host.createStream('entry', id, { updateInterval: stats.interval })

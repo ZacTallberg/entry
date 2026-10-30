@@ -205,3 +205,20 @@ extents. The smoke and the letter breaths now composite with 'screen', so stacke
 white along its own gradients, and a run of fresh letters shares one breath (alpha scaled by
 1/sqrt(0.8 n)). Verified on the same frames locally: soft vapour, no block. The invitation line is
 hidden outright while dictating; its ghost sat over the vapour above the first line.
+
+**Amendment 2026-10-29 (goal loop, unit 5, the pass counted once):** the pace judge read the
+engine's pass cost off the line events, and one pass of the engine is diffed into up to three
+events per line (text changed, updated, completed) across every line in the transcript. A single
+pass was counted two to four times: the judge's eleven samples covered about four real passes, and
+the channel carried every pass in triplicate. Measured on the i5 over the 27 s clip: 72 and 68 lag
+rows a dictation with 35 and 33 consecutive duplicates; after the change 40 rows, no duplicates,
+`__stt.passes` equal to `__stt.lags.length`. A pass is now sampled once from the worker's own pass
+receipt (calls the gate turned away in under five milliseconds are not passes); the in-page
+fallback samples the first line event of the synchronous burst one pass produces.
+
+The same sitting was run under a Chrome trace (`tools/trace-probe.py`: every main-thread task over
+a threshold attributed to script, layout, paint and GC, with the page's own marks inside it). With
+the engine in the worker the page's main thread is clean: zero tasks of 30 ms or more across 34 000
+tasks and 22 s of dictation, zero rAF gaps over 40 ms, worst frame 25 ms, where the page-thread
+engine had 160 and 405 ms. What remains of the frame time on this box (21 ms a frame) is the GPU's;
+the phone's own perf rows on the worker build are the evidence still owed.
