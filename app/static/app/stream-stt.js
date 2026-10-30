@@ -154,7 +154,7 @@ let loading = null;
 let fetchIssue = '';
 let tier = null;
 let plan = null;
-const stats = { tier: null, pool: 0, single: true, loadMs: 0, lags: [], passes: 0, slow: false, fast: false, interval: 0, place: '' };
+const stats = { tier: null, pool: 0, single: true, loadMs: 0, lags: [], engine: [], passes: 0, slow: false, fast: false, interval: 0, place: '' };
 window.__stt = stats;
 
 export function lastFetchIssue() { return fetchIssue; }
@@ -305,10 +305,14 @@ export function openStream(listener) {
     const id = String(line.id);
     lines.set(id, { text: line.text.trim(), complete: complete || !!line.isComplete });
     emit();
-    if (!host && !burst && typeof line.lastTranscriptionLatencyMs === 'number' && line.lastTranscriptionLatencyMs > 0) {
-      burst = true;
-      queueMicrotask(() => { burst = false; });
-      samplePass(line.lastTranscriptionLatencyMs);
+    if (typeof line.lastTranscriptionLatencyMs === 'number' && line.lastTranscriptionLatencyMs > 0) {
+      // the engine's own clock for the same pass, kept beside the receipt so the two can be compared
+      if (stats.engine[stats.engine.length - 1] !== line.lastTranscriptionLatencyMs) stats.engine.push(line.lastTranscriptionLatencyMs);
+      if (!host && !burst) {
+        burst = true;
+        queueMicrotask(() => { burst = false; });
+        samplePass(line.lastTranscriptionLatencyMs);
+      }
     }
   };
   // One stream per session, closed with it. The runtime's convenience methods all drive a

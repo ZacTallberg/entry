@@ -230,3 +230,11 @@ multi-threaded onnxruntime pool of four 284, 266 and 349 ms; multi-threaded pool
 291 ms. The spread between plans is inside the spread between rounds of the same plan, and the words
 were identical across all twelve sittings; the plan stands, and `?sttsingle=` / `?sttpool=` remain
 the way to ask the phone the same question.
+
+The receipt and the engine's own clock were kept side by side (`__stt.engine`) and compared on the
+i5: receipt medians 267 and 255 ms against engine medians 235 and 224 ms, the receipt some 30 ms
+(13%) above the engine on this box, and four passes a sitting that changed no line and so had no
+engine row at all. The receipt is the clock the judge keeps: it is the same wall clock the runtime's
+own pass gate paces on (`needed = max(updateInterval, lastPass)`), so the judge and the gate now
+agree on what a pass costs. The thresholds stand (fast 150 ms, slow 800 ms); the phone's rows on
+this build say whether its tiny passes still clear the fast line on the receipt.
