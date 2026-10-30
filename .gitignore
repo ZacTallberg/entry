@@ -8,3 +8,4 @@ app/build_sha.txt
 .hub_write_token.local
 app/static/app/models/
 app/static/app/vendor/transformers/
+tools/watch-entry.cursor.json
