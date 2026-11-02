@@ -358,7 +358,17 @@ const buildRenderFragment = () => `
 // cloud is stretched along one axis, sheared, and twisted with depth — all decided by the
 // utterance. A glyph origin is spared everything but a whisper of rotation; it is your words,
 // and it has to stay readable.
-function orientOrigins(values, seedHash, originKind) {
+// One frame, or 60 ms if the page is hidden and frames are not coming.
+function nextFrame() {
+  return new Promise((resolve) => {
+    let done = false;
+    const go = () => { if (!done) { done = true; resolve(); } };
+    requestAnimationFrame(go);
+    setTimeout(go, 60);
+  });
+}
+
+function orientOrigins(values, seedHash, originKind, start = 0, end = values.length) {
   const glyph = originKind === 'glyph';
   const q = (shift) => (((seedHash >>> shift) % 1000) / 1000);
   const a = (q(5) - 0.5) * (glyph ? 0.24 : Math.PI * 2);
@@ -367,7 +377,7 @@ function orientOrigins(values, seedHash, originKind) {
   const squash = glyph ? 1 : 1 / Math.sqrt(stretch);
   const shear = glyph ? 0 : (q(13) - 0.5) * 0.5;
   const twist = glyph ? 0 : (q(21) - 0.5) * 0.55;
-  for (let i = 0; i < values.length; i += 4) {
+  for (let i = start; i < end; i += 4) {
     let x = values[i] * mirror * stretch;
     let y = values[i + 1] * squash;
     const z = values[i + 2];
@@ -1385,10 +1395,22 @@ class ParticleField {
 
   // The bake, during the warm: origins and words scattered into their targets, the prime into
   // spareA, and one sim step into spareB — so the swap only exchanges references.
-  prebake(record) {
+  // Two uploads of 200k points and a sim pass; traced as the GPU's longest waits of a typing
+  // session (87 and 126 ms on the i5's command buffer). Left to itself the bake takes one
+  // stage a frame, the origins first and the prime and sim pass the frame after; a release
+  // that finds it unfinished asks for the rest at once.
+  prebake(record, all = false) {
     if (this.disposed || !record || this.prepared !== record || record.baked) return;
     const t0 = performance.now();
-    this.scatterInto(this.originRT[record.slot], record.values);
+    if (!record.stage) {
+      this.scatterInto(this.originRT[record.slot], record.values);
+      record.stage = 1;
+      if (!all) {
+        this.lastBakeMs = performance.now() - t0;
+        requestAnimationFrame(() => this.prebake(record));
+        return;
+      }
+    }
     if (record.wordIdx >= 0) this.scatterInto(this.wordRT[record.wordIdx], record.wordSrc);
     this.scatterInto(this.spareA, record.primeVals);
     const { simMaterial } = this.materialsFor(record.formDef);
@@ -1529,37 +1551,75 @@ class ParticleField {
       rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
       return rngState / 0x100000000;
     };
+    // The warm did all of this in one task: generating, orienting and priming a 448-square of
+    // origins took 31 to 95 ms on an i5 (traced: generator 22, orient 9, prime 26, plus GC), and
+    // because the warm fires 800 ms after every pause it read on the operator's phone as the
+    // animation jumping while they typed. The generator still runs whole (each form owns its
+    // loop); the two passes that are ours are cut into slices of 24 000 particles with a frame
+    // between each, so no slice outlasts a frame. A release waits on the promise as before, and
+    // a newer prepare abandons an older one mid-slice.
+    const gen = (this.prepareGen = (this.prepareGen || 0) + 1);
+    const current = () => !this.disposed && gen === this.prepareGen;
     const values = new Float32Array(size * size * 4);
     const generator = ORIGIN_GENERATORS[formDef.origin] || ORIGIN_GENERATORS.nebula;
+    const prepT0 = performance.now();
     generator(values, rng, utterance);
-    orientOrigins(values, seedHash, formDef.origin);
-    // Float32, not half: the half-float pack cost a full pass over 800k values on the main
-    // thread, and the driver's first sample of a half-float texture was the expensive path.
-    const primeVals = new Float32Array(values.length);
-    const pt = [0, 0, 0];
-    const spoken = (utterance || '').trim();
-    const wordSrc = (arrival === WORDS_ARRIVAL && spoken.length >= 3) ? wordPrime(values.length, spoken, seedHash) : null;
-    const primeArrival = (arrival === WORDS_ARRIVAL && !wordSrc) ? 0 : arrival;
-    for (let i = 0; i < values.length; i += 4) {
-      if (wordSrc) { pt[0] = wordSrc[i] + (Math.random() - 0.5) * 0.05; pt[1] = wordSrc[i + 1] + (Math.random() - 0.5) * 0.05; pt[2] = wordSrc[i + 2]; }
-      else primeInto(pt, values, i, seedHash, primeArrival);
-      primeVals[i] = pt[0]; primeVals[i + 1] = pt[1]; primeVals[i + 2] = pt[2]; primeVals[i + 3] = values[i + 3];
-    }
-    const slot = this.poolNext;
-    let wordIdx = -1;
-    if (wordSrc) { wordIdx = this.wordIdx; this.wordIdx ^= 1; }
-    this.prepared = {
-      formDef, values, primeVals, wordSrc, slot, wordIdx,
-      texture: this.originRT[slot].texture,
-      wordTexture: wordIdx >= 0 ? this.wordRT[wordIdx].texture : null,
-      baked: false,
-    };
+    const prepT1 = performance.now();
+    this.prepared = null;
     this.preparedKey = key;
-    const warmT0 = performance.now();
-    const preparedRecord = this.prepared;
-    this.preparedPromise = this.warmForm(formDef)
-      .then(() => { this.lastWarmMs = performance.now() - warmT0; requestAnimationFrame(() => this.prebake(preparedRecord)); })
-      .catch(() => {});
+    const slice = 24000 * 4;
+    this.preparedPromise = (async () => {
+      let orientMs = 0;
+      for (let at = 0; at < values.length; at += slice) {
+        await nextFrame();
+        if (!current()) return;
+        const t = performance.now();
+        orientOrigins(values, seedHash, formDef.origin, at, Math.min(values.length, at + slice));
+        orientMs += performance.now() - t;
+      }
+      // Float32, not half: the half-float pack cost a full pass over 800k values on the main
+      // thread, and the driver's first sample of a half-float texture was the expensive path.
+      const primeVals = new Float32Array(values.length);
+      const pt = [0, 0, 0];
+      const spoken = (utterance || '').trim();
+      const wordSrc = (arrival === WORDS_ARRIVAL && spoken.length >= 3) ? wordPrime(values.length, spoken, seedHash) : null;
+      const primeArrival = (arrival === WORDS_ARRIVAL && !wordSrc) ? 0 : arrival;
+      let primeMs = 0;
+      for (let at = 0; at < values.length; at += slice) {
+        await nextFrame();
+        if (!current()) return;
+        const t = performance.now();
+        const end = Math.min(values.length, at + slice);
+        for (let i = at; i < end; i += 4) {
+          if (wordSrc) { pt[0] = wordSrc[i] + (Math.random() - 0.5) * 0.05; pt[1] = wordSrc[i + 1] + (Math.random() - 0.5) * 0.05; pt[2] = wordSrc[i + 2]; }
+          else primeInto(pt, values, i, seedHash, primeArrival);
+          primeVals[i] = pt[0]; primeVals[i + 1] = pt[1]; primeVals[i + 2] = pt[2]; primeVals[i + 3] = values[i + 3];
+        }
+        primeMs += performance.now() - t;
+      }
+      this.lastPrepare = {
+        form: formDef.slug, gen: Math.round(prepT1 - prepT0), orient: Math.round(orientMs),
+        prime: Math.round(primeMs), total: Math.round(performance.now() - prepT0),
+        slices: Math.ceil(values.length / slice) * 2,
+      };
+      const slot = this.poolNext;
+      let wordIdx = -1;
+      if (wordSrc) { wordIdx = this.wordIdx; this.wordIdx ^= 1; }
+      const record = {
+        formDef, values, primeVals, wordSrc, slot, wordIdx,
+        texture: this.originRT[slot].texture,
+        wordTexture: wordIdx >= 0 ? this.wordRT[wordIdx].texture : null,
+        baked: false,
+      };
+      this.prepared = record;
+      const warmT0 = performance.now();
+      try {
+        await this.warmForm(formDef);
+        if (!current()) return;
+        this.lastWarmMs = performance.now() - warmT0;
+        requestAnimationFrame(() => this.prebake(record));
+      } catch (_e) {}
+    })();
     return this.preparedPromise;
   }
 
@@ -1633,7 +1693,7 @@ class ParticleField {
     let preparedBaked = false;
     if (this.preparedKey === key && this.prepared) {
       // a fast typist can outrun the warm: bake now, the same way, before the exchange
-      if (!this.prepared.baked) this.prebake(this.prepared);
+      if (!this.prepared.baked) this.prebake(this.prepared, true);
       this.origin = this.prepared.texture;
       this.poolLive = this.prepared.slot;
       this.poolNext = (this.prepared.slot + 1) % 3;
@@ -2147,7 +2207,9 @@ class ParticleField {
     // many consecutive frames, each of which still counts up to the clamp.
     const steady = Math.min(frameGap, 50);
     this.frameEma = this.frameEma ? this.frameEma * 0.92 + steady * 0.08 : steady;
-    this.frameWorst = Math.max(this.frameWorst || 0, frameGap) * 0.995;
+    // a window, not a decaying max: it is read and reset by the perf rows, so a stall while
+    // composing reaches the row sent at the release instead of decaying away before it
+    this.frameWorst = Math.max(this.frameWorst || 0, frameGap);
     this.governFidelity(now, interacting);
     const time = this.clock.getElapsedTime();
     this.pointer.lerp(this.pointerTarget, 0.055);
@@ -2741,6 +2803,12 @@ function beginRelease() {
   setState('releasing', '');
   if (listening) stopListening();
   if (reportMode) { diag('report-release', { text: raw.slice(0, 360), typed: !voiceBase && !streamBase }); diag.flush(); }
+  // the frames of the composing itself: the worst frame decays per frame, so a stall while
+  // typing a minute ago was gone from the row sent after the release; this row is its window
+  if (field) {
+    diag('perf', { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Math.round((field.renderScale || 1) * 100) / 100, phase: 'composing', prepare: field.lastPrepare || null });
+    field.frameWorst = 0;
+  }
   // the dark answers with a different gesture depending on what was said: it erupts from a
   // compressed core, gathers inward from beyond the frame, or settles in place
   const arrival = arrivalFor(chosen.hash);
@@ -2764,7 +2832,10 @@ function beginRelease() {
         swapMs: field ? Math.round(field.lastSwapMs || 0) : -1,
       });
       window.setTimeout(() => {
-        if (field) diag('perf', { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Math.round((field.renderScale || 1) * 100) / 100 });
+        if (field) {
+          diag('perf', { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Math.round((field.renderScale || 1) * 100) / 100, phase: 'answer' });
+          field.frameWorst = 0;
+        }
       }, 3000);
     });
   }, swapAt);
@@ -3313,15 +3384,21 @@ function onVoiceFrame(frame) {
   // itself creeps up toward the gate after speech ends, and a gate-only test can sit
   // just above "quiet" forever — the session that never finishes. A frame counts as
   // voice only if it also clears a fifth of the speaker's own recent peak.
-  const voiceBar = Math.max(gate, speechPeak * 0.2);
+  // A fifth of the peak was too high a bar and the peak forgot too slowly: on the operator's
+  // phone one loud word (peak 0.65) set a bar of 0.13 that the softer sentences after it
+  // (0.11 to 0.15) never cleared, so twenty seconds of talking counted as 3.5 s of voice, the
+  // trailing-quiet clock ran through the speech, and the microphone closed mid-thought. The
+  // bar is a twelfth of the peak, and the peak halves every 1.5 s of audio whatever the frame.
+  const voiceBar = Math.max(gate, speechPeak * 0.085);
+  const forget = Math.pow(0.5, frame.length / (rate * 1.5));
   if (rms > voiceBar) {
     voicedLen += frame.length;
     silenceLen = 0;
-    speechPeak = Math.max(speechPeak * 0.995, rms);
+    speechPeak = Math.max(speechPeak * forget, rms);
     speechAt = performance.now();
   } else {
     silenceLen += frame.length;
-    speechPeak *= 0.9995;
+    speechPeak *= forget;
   }
   statSamples += frame.length;
   statPeak = Math.max(statPeak, rms);
@@ -3344,7 +3421,8 @@ function onVoiceFrame(frame) {
     // the release countdown now runs THROUGH this silence rather than after it, so the mic
     // can afford to confirm a little sooner without the two waits stacking
     const quietLimit = voicedLen ? rate * 3.4 : rate * 9;
-    if (idleSilence > quietLimit) { stopListening(); return; }
+    // and never while the engine is still writing: words landing late are words, not quiet
+    if (idleSilence > quietLimit && performance.now() - streamTextAt > 1500) { stopListening(); return; }
     // Second clock: the transcript itself. If words were spoken but the engine has
     // written nothing new for a while, the utterance is over no matter what the
     // microphone thinks it hears — this is the clock that cannot be fooled by a
@@ -3468,6 +3546,7 @@ function stopListening() {
     const token = streamToken;
     closingToken = token;
     streamToken = null;
+    if (field) field.decodeBusy = false;
     if (streamBatchLen) {
       const merged = new Float32Array(streamBatchLen);
       let at = 0;
@@ -3832,7 +3911,15 @@ function openStreamSession() {
       if (committed) voiceBase = (streamBase + committed).endsWith(' ') ? streamBase + committed : streamBase + committed + ' ';
       field?.setVoiceLevel(0.1);
     },
-    onLag: (ms) => diag('rung-a-lag', { ms: Math.round(ms) }),
+    onLag: (ms) => {
+      diag('rung-a-lag', { ms: Math.round(ms) });
+      // With the engine off the page thread the field ran at full rate through every pass and
+      // the engine starved for it: on the operator's phone small's passes went from 300-600 ms
+      // on the page thread to 450-900 ms in the worker, and the words fell a second behind the
+      // voice. A pass that costs more than twice the gate is the engine asking for the CPU
+      // back, and the field answers by drawing at 30 until the passes catch up.
+      if (field) field.decodeBusy = listening && streamToken === token && ms > streamMod.updateInterval() * 2000;
+    },
     onSlow: (info) => diag('rung-a-slow', { tier: info.tier, next: info.next, ms: Math.round(info.medianMs) }),
     onFast: (info) => diag('rung-a-fast', { tier: info.tier, next: info.next, ms: Math.round(info.medianMs) }),
     onError: (msg) => {
@@ -4128,7 +4215,7 @@ window.entryExperience = Object.freeze({
   } : null,
   lastRelease: () => lastRelease,
   lastEffects: () => field?.effects || null,
-  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0), bakeMs: Math.round(field.lastBakeMs || 0), warmDraw: field.lastWarmDraw || null, swap: field.lastSwapPhases || null } : null,
+  perf: () => field ? { frameMs: Math.round(field.frameEma || 0), worstMs: Math.round(field.frameWorst || 0), scale: Number((field.renderScale || 1).toFixed(2)), swapMs: Math.round(field.lastSwapMs || 0), warmMs: Math.round(field.lastWarmMs || 0), bakeMs: Math.round(field.lastBakeMs || 0), warmDraw: field.lastWarmDraw || null, swap: field.lastSwapPhases || null, prepare: field.lastPrepare || null } : null,
   force: (slug) => { forcedForm = FORM_INDEX.has(slug) ? slug : null; return forcedForm; },
   arrival: (name) => { const i = ARRIVALS.findIndex((r) => r[0] === name); forcedArrival = i; return i >= 0 ? name : null; },
   arrivals: () => ARRIVALS.map((r) => r[0]),

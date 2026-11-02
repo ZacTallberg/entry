@@ -238,3 +238,45 @@ engine row at all. The receipt is the clock the judge keeps: it is the same wall
 own pass gate paces on (`needed = max(updateInterval, lastPass)`), so the judge and the gate now
 agree on what a pass costs. The thresholds stand (fast 150 ms, slow 800 ms); the phone's rows on
 this build say whether its tiny passes still clear the fast line on the receipt.
+
+**Correction 2026-11-02:** the trace probe's first verdict above ("zero tasks of 30 ms or more") was
+read off the wrong thread: the probe picked the busiest task-running thread, which on this page is
+the engine's worker, not the page's main thread. Re-read on CrRendererMain, the same i5 dictation at
+a phone viewport has five tasks of 60 ms or more (boot 165 ms once; at the release the shader warm
+and the bake, 198 and 162 ms, deferred there by design because the warm never compiles while the
+microphone is open; and two frames of 61 and 74 ms) and 45 rAF gaps over 40 ms, nearly all of them
+the field's own frame on this box's software GL. The probe (`tools/trace-probe.py`) now picks the
+thread by name. The phone's frames are the phone's to report, and its rows on build e7b7bc5 say
+17 ms a frame and 17 to 31 ms at worst around a release.
+
+**Amendment 2026-11-02 (goal loop, unit 6, the phone's three reports on build e7b7bc5):** the
+tagged phone said, typed, "while I'm typing (and presumably while I speak) the animations jump and
+stutter", and spoke "it's not very real time now" and "there's a bug where it cut me off early".
+Each was traced or read off the rows and answered:
+
+- **The typing jump** is the pre-warm. 800 ms after every pause in typing, `prepare` generated,
+  oriented and primed a 448-square of origins for the predicted form in one task: traced at a
+  phone viewport on the i5 as five page-thread tasks of 31 to 95 ms over one typed sentence
+  (generator 22, orient 9, prime 26 ms, plus GC), and the perf rows could not see it because the
+  worst frame decayed per frame and the row was sent after the release. The two passes that are
+  ours now run in slices of 24 000 particles with a frame between each; the generator runs whole.
+  The bake that follows uploads its two point sets a frame apart. Re-traced: no script task of
+  30 ms or more on the page thread while typing (the remaining long tasks are this box's GPU
+  command-buffer waits, 91 and 113 ms, which the phone's GPU does not have). A release that finds
+  a bake unfinished asks for the rest at once; the worst frame is now a window read and reset by
+  two perf rows, one at the release for the composing and one three seconds into the answer.
+- **The early cut-off** is the voice gate. A frame counted as voice only above a fifth of the
+  speaker's recent peak, and the peak forgot slowly; on the phone one loud word (peak 0.65) set a
+  bar of 0.13 that the softer sentences after it (0.11 to 0.15) never cleared, so twenty seconds
+  of talking counted as 3.5 s of voice, the trailing-quiet clock ran through the speech and
+  closed the microphone mid-thought. The bar is a twelfth of the peak and the peak halves every
+  1.5 s of audio, and the quiet clock never fires within 1.5 s of the engine writing. On the i5's
+  clip the voice counted is 13.1 s of a 24 s sitting and the sitting runs to its end.
+- **The second behind** is the engine starving. With the engine in the worker the field ran at
+  full rate through every pass; on the phone small's passes went from 300 to 600 ms on the page
+  thread to 450 to 900 ms in the worker (medians 469, 722, 854, 891 ms in the rows), a second
+  between the voice and the words. A pass that costs more than twice the gate now sets the field
+  to 30 frames a second until the passes come back under it, the same lever the chunk path had.
+  On the i5 (tiny, gate 125 ms, passes 236 to 298 ms) the lever is in and out and the median is
+  inside the noise of earlier runs; the phone's next rows judge it.
+The watch now prints the first-text number it was dropping.

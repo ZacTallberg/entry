@@ -72,7 +72,8 @@ def summarize(r):
         if t in ("report-said", "report-release", "report-text"):
             parts.append("%s[%s]=%r" % (t, e.get("src", "typed" if e.get("typed") else ""), e.get("text", "")))
         elif t in KEEP:
-            rest = {k: v for k, v in e.items() if k not in ("type", "ms")}
+            # a row whose payload is its ms (first text, a pass) keeps that number
+            rest = {k: v for k, v in e.items() if k not in ("type", "ms") or (k == "ms" and t in ("rung-a-first", "rung-a-ready"))}
             parts.append("%s%s" % (t, (" " + json.dumps(rest, separators=(",", ":"))) if rest else ""))
     if lags:
         lags_s = sorted(lags)

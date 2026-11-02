@@ -87,7 +87,10 @@ by_thread = collections.Counter()
 for e in events:
     if e.get("ph") == "X" and e.get("name") in ("RunTask", "ThreadControllerImpl::RunTask"):
         by_thread[(e["pid"], e["tid"])] += 1
-(pid, tid), _n = by_thread.most_common(1)[0]
+# the page main thread is named CrRendererMain; the busiest RunTask thread is often a worker
+names = {(e["pid"], e["tid"]): e["args"]["name"] for e in events if e.get("ph") == "M" and e.get("name") == "thread_name"}
+mains = [k for k in by_thread if names.get(k) == "CrRendererMain"]
+(pid, tid) = max(mains, key=lambda k: by_thread[k]) if mains else by_thread.most_common(1)[0][0]
 main = [e for e in events if e.get("pid") == pid and e.get("tid") == tid]
 xs = sorted((e for e in main if e.get("ph") == "X" and "dur" in e), key=lambda e: (e["ts"], -e["dur"]))
 marks = [e for e in main if e.get("ph") in ("R", "I", "i") and e.get("cat", "").find("user_timing") >= 0]
