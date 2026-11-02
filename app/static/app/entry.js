@@ -986,6 +986,12 @@ class ParticleField {
         uGrainT: { value: 0 },
         uGrain: { value: 0.05 },
         uVignette: { value: 0.28 },
+        uRipple: { value: 0 },
+        uRipplePhase: { value: 0 },
+        uMirror: { value: 0 },
+        uMirrorAngle: { value: 0 },
+        uChroma: { value: 0 },
+        uAspect: { value: window.innerWidth / Math.max(1, window.innerHeight) },
         uFringe: { value: 0.0016 },
         uLift: { value: 0.006 },
         uWash: { value: 0.03 },
@@ -1015,6 +1021,7 @@ class ParticleField {
         uniform float uStreak;
         uniform vec3 uStreakTint;
         uniform vec3 uWashTint;
+        uniform float uRipple, uRipplePhase, uMirror, uMirrorAngle, uChroma, uAspect;
         varying vec2 vUv;
         float hash(vec2 p) {
           return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -1022,14 +1029,35 @@ class ParticleField {
         void main() {
           vec2 c = vUv - 0.5;
           float r2 = dot(c, c);
+          // Three kinds of motion that are the picture's, not the particles': the image folds
+          // into mirrored wedges, a slow ripple passes through it as through water, and the
+          // colour separation breathes. Each is a hashed effect like the others.
+          vec2 uv = vUv;
+          if (uMirror > 0.5) {
+            vec2 q = vec2(c.x * uAspect, c.y);
+            float ang = atan(q.y, q.x) - uMirrorAngle;
+            float wedge = 6.2831853 / uMirror;
+            ang = mod(ang, wedge);
+            ang = abs(ang - wedge * 0.5);
+            float len = length(q);
+            q = vec2(cos(ang + uMirrorAngle), sin(ang + uMirrorAngle)) * len;
+            uv = vec2(q.x / uAspect, q.y) + 0.5;
+            uv = clamp(uv, 0.001, 0.999);
+          }
+          if (uRipple > 0.001) {
+            float len = length(c);
+            float wave = sin(len * 16.0 - uGrainT * 1.6 + uRipplePhase);
+            uv += (c / max(len, 0.001)) * wave * uRipple * 0.028 * smoothstep(0.0, 0.22, len);
+          }
+          float breath = 1.0 + uChroma * (0.5 + 0.5 * sin(uGrainT * 0.9 + uRipplePhase)) * 6.0;
           // chromatic separation, none at the centre, most in the corners
-          vec2 off = c * r2 * uFringe;
+          vec2 off = c * r2 * uFringe * breath + c * uChroma * 0.006;
           vec3 col = vec3(
-            texture2D(map, vUv + off).r,
-            texture2D(map, vUv).g,
-            texture2D(map, vUv - off).b);
-          col += texture2D(bloomMap, vUv).rgb * uBloom;
-          col += texture2D(streakMap, vUv).rgb * uStreakTint * uStreak;
+            texture2D(map, uv + off).r,
+            texture2D(map, uv).g,
+            texture2D(map, uv - off).b);
+          col += texture2D(bloomMap, uv).rgb * uBloom;
+          col += texture2D(streakMap, uv).rgb * uStreakTint * uStreak;
           float luma = dot(col, vec3(0.299, 0.587, 0.114));
           // the dark is a room, not a void: a slow low wash that only shows where nothing else is
           float w = sin(vUv.x * 2.3 + uGrainT * 0.05) * sin(vUv.y * 1.9 - uGrainT * 0.037)
@@ -1771,6 +1799,13 @@ class ParticleField {
       gravity: roll(0xb5c0fbcf, 0.28),
       twin: roll(0xe9b5dba5, 0.3),
       veil: roll(0x3956c25b, 0.3),
+      // kinds of motion the picture had not had: of the image (mirror, ripple, chroma) and of
+      // the eye (orbit, plunge), hashed at the same odds as the rest
+      mirror: roll(0x59f111f1, 0.24),
+      ripple: roll(0x923f82a4, 0.3),
+      chroma: roll(0xab1c5ed5, 0.3),
+      orbit: roll(0xd807aa98, 0.32),
+      plunge: roll(0x12835b01, 0.3),
     };
     // Glyph forms are the words: the density self-repulsion, the turbulence and the octave
     // noise blur a compact line of letters into a grid-aligned spray (under the speed limit the
@@ -1779,6 +1814,7 @@ class ParticleField {
     if (formDef.origin === 'glyph') {
       fx.dense = false; fx.turb = false; fx.octave = false; fx.ring = false; fx.drift = false; fx.zones = false;
       fx.kaleido = false; fx.tide = false; fx.well = false; fx.lattice = false; fx.gravity = false; fx.twin = false;
+      fx.mirror = false; fx.ripple = false;
     }
     if (!Object.values(fx).some(Boolean)) {
       const names = Object.keys(fx);
@@ -1821,6 +1857,16 @@ class ParticleField {
     ru2.uFxShimmer.value = fx.shimmer ? 0.22 + v1 * 0.25 : 0;
     ru2.uFxSizeWave.value = fx.sizeWave ? 0.35 + v2 * 0.35 : 0;
     ru2.uFxFog.value = fx.fog ? 0.35 + v1 * 0.3 : 0;
+    const du = this.displayMaterial.uniforms;
+    du.uMirror.value = fx.mirror ? 3 + ((seedHash >>> 11) % 4) * 2 : 0;
+    du.uMirrorAngle.value = v3 * Math.PI;
+    du.uRipple.value = fx.ripple ? 0.5 + v2 * 0.6 : 0;
+    du.uRipplePhase.value = v1 * Math.PI * 2;
+    du.uChroma.value = fx.chroma ? 0.5 + v3 * 0.5 : 0;
+    // the eye moves too: a slow orbit about the form, or a plunge toward it that eases back
+    this.camOrbit = fx.orbit ? { amp: 0.35 + v1 * 0.4, speed: 0.11 + v2 * 0.1, phase: v3 * 6.283 } : null;
+    this.camPlunge = fx.plunge ? 0.9 + v2 * 0.7 : 0;
+    this.camSince = performance.now();
     this.beatTempo = fx.beat ? 0.6 + v3 * 0.8 : 0;
     ru2.uPointSize.value = this.basePointSize() * (js.size || 1) * (0.95 + v2 * 0.28);
     ru2.uAlpha.value = Math.min(0.9, (js.alpha ?? 0.62) * 1.1);
@@ -2175,6 +2221,7 @@ class ParticleField {
     this.frameFit = Math.min(1, this.viewHalfW / 3.6, this.viewHalfH / 2.6);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.allocTrailTargets();
+    if (this.displayMaterial) this.displayMaterial.uniforms.uAspect.value = window.innerWidth / Math.max(1, window.innerHeight);
     if (this.renderMaterial) {
       this.renderMaterial.uniforms.uPointSize.value = this.basePointSize() * ((this.formJs || {}).size || 1);
     }
@@ -2252,8 +2299,24 @@ class ParticleField {
       this.pulseAnchor = null;
     }
 
-    this.camera.position.x += (this.pointer.x * 0.14 - this.camera.position.x) * 0.03;
-    this.camera.position.y += (this.pointer.y * 0.1 - this.camera.position.y) * 0.03;
+    // the eye's own motion, when the hash gave the answer one: an orbit that never settles, a
+    // plunge that arrives with the form over four seconds and eases back over the next twenty
+    let camX = this.pointer.x * 0.14;
+    let camY = this.pointer.y * 0.1;
+    let camZ = 4.4;
+    if (this.camOrbit) {
+      const o = this.camOrbit;
+      camX += Math.sin(time * o.speed + o.phase) * o.amp;
+      camY += Math.cos(time * o.speed * 0.7 + o.phase) * o.amp * 0.45;
+    }
+    if (this.camPlunge) {
+      const age = (now - (this.camSince || now)) / 1000;
+      const inward = Math.min(1, age / 4) * Math.exp(-Math.max(0, age - 4) / 20);
+      camZ -= this.camPlunge * inward;
+    }
+    this.camera.position.x += (camX - this.camera.position.x) * 0.03;
+    this.camera.position.y += (camY - this.camera.position.y) * 0.03;
+    this.camera.position.z += (camZ - this.camera.position.z) * 0.03;
     this.camera.lookAt(0, 0, 0);
 
     let releaseForce = 0;

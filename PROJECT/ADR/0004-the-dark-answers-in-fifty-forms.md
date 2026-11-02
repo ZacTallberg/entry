@@ -166,3 +166,22 @@ was the dust's one proven defect.
 **Dreams (2026-10-28):** the sleeping dark dreamed in fourteen of its quiet selves; it now has
 thirty-two, every calm non-glyph form whose gesture does not erupt. A tab left open is rarely in
 the same place twice.
+
+**Amendment 2026-11-02 (goal loop, unit 7, "expand the kinds and sorts of animations"):** the
+tagged phone asked, typed, for more kinds of animation and graphics. Every effect so far moved the
+particles or coloured them; five new ones move the picture and the eye instead, in the display pass
+and the camera, hashed at the same odds as the rest and under the same cap of three:
+
+| effect | where | what it does |
+|---|---|---|
+| mirror | display | the image folds into 3, 5, 7 or 9 mirrored wedges about the centre, at a hashed angle |
+| ripple | display | a slow ring-wave of displacement passes outward through the image, as through water |
+| chroma | display | the colour separation breathes, three to seven times its resting width |
+| orbit | camera | the eye circles the form and never settles (amplitude 0.35 to 0.75, a turn every minute or so) |
+| plunge | camera | the eye closes on the form over four seconds with the arrival and eases back over twenty |
+
+Mirror and ripple are kept off the glyph forms, whose particles are the words. Framed locally on a
+pinned nebula with `?fx=` (3 s and 9 s after the release): the mirror reads as a mandala, the ripple
+as rings of displacement through the form (its first amplitude, 0.012 of the frame, was invisible
+in a still and is 0.028 with a coarser wave), chroma as a pink and cyan fringe, orbit and plunge as
+the form moving and nearing between the two frames. With these the picker holds 29 effects.
